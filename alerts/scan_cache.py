@@ -39,3 +39,10 @@ def get_edge(scan_id: str, index: int) -> dict:
     if 0 <= index < len(edges):
         return edges[index]
     return {}
+
+
+def get_latest_scan_id() -> str | None:
+    """Return the most recent scan ID, or None if no scans are cached."""
+    if not _cache:
+        return None
+    return sorted(_cache.keys())[-1]

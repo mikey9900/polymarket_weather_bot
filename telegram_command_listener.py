@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from run_scanner import run_weather_scan
 from portfolio.portfolio_tracker import run_portfolio_check, run_portfolio_auto_track
 from tracking.scan_tracker import get_stats
-from alerts.scan_cache import get_scan, get_edge
+from alerts.scan_cache import get_scan, get_edge, get_latest_scan_id
 from alerts.telegram_alerts import send_with_keyboard, answer_callback
 from logic.discrepancy_logic import format_discrepancy_message
 
@@ -129,11 +129,69 @@ def _handle_filter(scan_id: str, filt: str):
 
     if not subset:
         send_message(f"{label}\n\nNo edges match this filter.")
+        send_command_footer()
         return
 
     send_message(f"{label} — {len(subset)} edge(s)")
     for index, d in subset:
         _send_edge_with_buttons(d, scan_id, index)
+    send_command_footer()
+
+
+# =============================================================
+# COMMAND FOOTER
+# =============================================================
+
+def send_command_footer():
+    """
+    Send a message with command buttons + latest scan filter buttons.
+    Appended to the bottom of every response chain so the user
+    doesn't have to scroll up to find commands or filters.
+    """
+    keyboard = [
+        [
+            {"text": "🔍 Scan",      "callback_data": "cmd:scan"},
+            {"text": "📊 Portfolio", "callback_data": "cmd:portfolio"},
+            {"text": "📈 Stats",     "callback_data": "cmd:stats"},
+            {"text": "🔄 Status",    "callback_data": "cmd:status"},
+        ],
+    ]
+
+    scan_id = get_latest_scan_id()
+    if scan_id:
+        edges = get_scan(scan_id)
+        s3p = sum(1 for d in edges if d.get("source_count", 1) >= 3 and d.get("edge_size") == "large")
+        s2a = sum(1 for d in edges if d.get("source_count", 1) == 2 and d.get("edge_size") == "large")
+        s1  = sum(1 for d in edges if d.get("source_count", 1) == 1 and d.get("edge_size") == "large")
+        keyboard.append([
+            {"text": f"🔥 3+ Agree ({s3p})", "callback_data": f"f:{scan_id}:3p"},
+            {"text": f"✅ 2 Agree ({s2a})",   "callback_data": f"f:{scan_id}:2a"},
+            {"text": f"🟡 1 Source ({s1})",   "callback_data": f"f:{scan_id}:1s"},
+        ])
+
+    send_with_keyboard("─── Commands ───", keyboard)
+
+
+# =============================================================
+# PORTFOLIO RUNNER (module-level so callbacks can reuse it)
+# =============================================================
+
+def _run_portfolio():
+    try:
+        send_message("📊 Checking your positions…")
+        items = run_portfolio_check()
+        for item in items:
+            msg = item["text"]
+            url = item.get("url")
+            if url:
+                send_with_keyboard(msg, [[{"text": "📊 View on Polymarket →", "url": url}]])
+            else:
+                send_message(msg)
+        send_command_footer()
+    except Exception as e:
+        send_message(f"❌ Portfolio check failed:\n{e}")
+        import traceback
+        traceback.print_exc()
 
 
 # =============================================================
@@ -164,6 +222,7 @@ def run_scan_with_lock(triggered_by: str = "manual"):
                 traceback.print_exc()
             finally:
                 send_message("✅ Scan finished.")
+                send_command_footer()
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -243,6 +302,29 @@ def main():
                             target=_handle_filter, args=(scan_id, filt), daemon=True
                         ).start()
 
+                    elif cb_data.startswith("cmd:"):
+                        cmd = cb_data.split(":", 1)[1]
+                        answer_callback(cb_id, "Running…")
+                        if cmd == "scan":
+                            run_scan_with_lock(triggered_by="manual")
+                        elif cmd == "portfolio":
+                            threading.Thread(target=_run_portfolio, daemon=True).start()
+                        elif cmd == "stats":
+                            try:
+                                send_message(get_stats())
+                            except Exception as e:
+                                send_message(f"❌ Stats failed:\n{e}")
+                            send_command_footer()
+                        elif cmd == "status":
+                            running = scan_lock.locked()
+                            mins_until = max(0, int((next_auto_scan - datetime.now()).total_seconds() / 60))
+                            send_message(
+                                f"✅ Bot is running\n"
+                                f"🔒 Scan in progress: {'YES — please wait' if running else 'NO — ready'}\n"
+                                f"⏰ Next auto-scan in: {mins_until} min"
+                            )
+                            send_command_footer()
+
                     else:
                         answer_callback(cb_id)
                     continue
@@ -258,21 +340,6 @@ def main():
                     run_scan_with_lock(triggered_by="manual")
 
                 elif text == "/portfolio":
-                    def _run_portfolio():
-                        try:
-                            send_message("📊 Checking your positions…")
-                            items = run_portfolio_check()
-                            for item in items:
-                                msg = item["text"]
-                                url = item.get("url")
-                                if url:
-                                    send_with_keyboard(msg, [[{"text": "📊 View on Polymarket →", "url": url}]])
-                                else:
-                                    send_message(msg)
-                        except Exception as e:
-                            send_message(f"❌ Portfolio check failed:\n{e}")
-                            import traceback
-                            traceback.print_exc()
                     threading.Thread(target=_run_portfolio, daemon=True).start()
 
                 elif text == "/stats":
@@ -280,6 +347,7 @@ def main():
                         send_message(get_stats())
                     except Exception as e:
                         send_message(f"❌ Stats failed:\n{e}")
+                    send_command_footer()
 
                 elif text == "/status":
                     running = scan_lock.locked()
@@ -289,6 +357,7 @@ def main():
                         f"🔒 Scan in progress: {'YES — please wait' if running else 'NO — ready'}\n"
                         f"⏰ Next auto-scan in: {mins_until} min"
                     )
+                    send_command_footer()
 
                 else:
                     if text.startswith("/"):

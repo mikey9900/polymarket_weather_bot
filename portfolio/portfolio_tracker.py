@@ -347,11 +347,19 @@ def format_position(
 
     rec = get_recommendation(outcome, avg_price, cur_price, forecast_prob, event_date)
 
+    outcome_upper = (outcome or "").upper()
+    if outcome_upper == "YES":
+        holding_label = "🟢 YES"
+    elif outcome_upper == "NO":
+        holding_label = "🔴 NO"
+    else:
+        holding_label = f"❓ {outcome}"
+
     lines = [f"*{title}*"]
     if bucket_label:
-        lines.append(f"Bucket: `{bucket_label}` | Holding: *{outcome}* | Expires: {end_date}")
+        lines.append(f"Holding: {holding_label} | Bucket: `{bucket_label}` | Expires: {end_date}")
     else:
-        lines.append(f"Holding: *{outcome}* | Expires: {end_date}")
+        lines.append(f"Holding: {holding_label} | Expires: {end_date}")
 
     price_line = f"Entry: {round(avg_price*100)}% → Now: {round(cur_price*100)}%"
     if forecast_prob is not None:
