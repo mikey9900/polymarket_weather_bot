@@ -24,7 +24,7 @@ from typing import Optional
 # Minimum liquidity (in USD) for a market to be worth alerting on.
 # Markets below this threshold are too illiquid to trade reliably.
 # Adjust this based on your trading size — $500 is a reasonable default.
-MIN_LIQUIDITY = 20.0
+MIN_LIQUIDITY = 5.0
 
 # Temperature keywords that must appear in the market text
 TEMP_KEYWORDS = [
@@ -109,7 +109,7 @@ def _get_liquidity(market: dict) -> float:
     Child markets store liquidity in different fields depending on market type.
     We check multiple fields and return the first non-zero value found.
     """
-    for field in ("liquidity", "liquidityClob", "volumeNum", "volume"):
+    for field in ("liquidityNum", "liquidity", "liquidityClob"):
         val = market.get(field)
         if val:
             try:

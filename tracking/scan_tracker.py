@@ -97,6 +97,72 @@ def log_edge(d: dict):
 
 
 # =============================================================
+# TRADE LOGGING (user clicked "Mark Bought" button)
+# =============================================================
+
+def log_trade(scan_id: str, edge_index: int):
+    """
+    Mark an edge as bought in the tracking file when the user
+    clicks the "Mark Bought" inline button on Telegram.
+
+    Matches by the edge's ID (city_slug + event_date + label + direction)
+    and stamps bought=True + buy_time on the existing tracking entry.
+    """
+    from alerts.scan_cache import get_edge
+    edge_data = get_edge(scan_id, edge_index)
+    if not edge_data:
+        print(f"    ⚠️  log_trade: no edge found for {scan_id}[{edge_index}]")
+        return
+
+    edges    = _load()
+    entry_id = (
+        f"{edge_data.get('city_slug')}_{edge_data.get('event_date')}"
+        f"_{edge_data.get('label')}_{edge_data.get('direction')}"
+    )
+    buy_time = datetime.now().isoformat(timespec="seconds")
+
+    matched = False
+    for e in edges:
+        if e.get("id") == entry_id:
+            e["bought"]    = True
+            e["buy_price"] = edge_data.get("market_prob")
+            e["buy_time"]  = buy_time
+            matched = True
+            break
+
+    if not matched:
+        # Edge not in tracker yet (e.g., scan was run before tracker was added) — insert it
+        edges.append({
+            "id":           entry_id,
+            "scan_time":    buy_time,
+            "event_title":  edge_data.get("event_title", ""),
+            "city_slug":    edge_data.get("city_slug", ""),
+            "event_date":   str(edge_data.get("event_date", "")),
+            "label":        edge_data.get("label", ""),
+            "direction":    edge_data.get("direction", ""),
+            "confidence":   edge_data.get("confidence", ""),
+            "edge_size":    edge_data.get("edge_size", ""),
+            "market_price": round(edge_data.get("market_prob", 0), 3),
+            "wu_prob":      edge_data.get("wu_prob"),
+            "om_prob":      edge_data.get("om_prob"),
+            "vc_prob":      edge_data.get("vc_prob"),
+            "edge":         round(edge_data.get("discrepancy", 0), 3),
+            "liquidity":    edge_data.get("liquidity", 0),
+            "event_slug":   edge_data.get("event_slug", ""),
+            "market_slug":  edge_data.get("market_slug", ""),
+            "bought":       True,
+            "buy_price":    edge_data.get("market_prob"),
+            "buy_time":     buy_time,
+            "resolved":     False,
+            "resolution":   None,
+            "result":       None,
+        })
+
+    _save(edges)
+    print(f"    💰 Trade logged: {entry_id}")
+
+
+# =============================================================
 # RESOLUTION CHECKING
 # =============================================================
 

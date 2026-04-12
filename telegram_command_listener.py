@@ -23,7 +23,10 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from run_scanner import run_weather_scan
 from portfolio.portfolio_tracker import run_portfolio_check
-from tracking.scan_tracker import get_stats
+from tracking.scan_tracker import get_stats, log_trade
+from alerts.scan_cache import get_scan, get_edge
+from alerts.telegram_alerts import send_with_keyboard, answer_callback
+from logic.discrepancy_logic import format_discrepancy_message
 
 # =============================================================
 # CONFIG
@@ -74,6 +77,66 @@ def get_updates(offset=None):
     )
     r.raise_for_status()
     return r.json()
+
+
+# =============================================================
+# CALLBACK HANDLERS (inline button presses)
+# =============================================================
+
+def _edge_url(d: dict) -> str:
+    slug = d.get("event_slug") or d.get("market_slug", "")
+    return f"https://polymarket.com/event/{slug}" if slug else ""
+
+
+def _send_edge_with_buttons(d: dict, scan_id: str, index: int):
+    """Send a single edge message with Mark Bought + View on Polymarket buttons."""
+    text = format_discrepancy_message(d)
+    url  = _edge_url(d)
+
+    keyboard = [[
+        {"text": "💰 Mark Bought", "callback_data": f"b:{scan_id}:{index}"},
+    ]]
+    if url:
+        keyboard[0].append({"text": "📊 View →", "url": url})
+
+    send_with_keyboard(text, keyboard)
+
+
+def _handle_filter(scan_id: str, filt: str):
+    """Send edges from a cached scan filtered by button type."""
+    edges = get_scan(scan_id)
+    if edges is None:
+        send_message("⚠️ Scan results expired. Please run /scan again.")
+        return
+
+    if filt == "3p":
+        subset = [(i, d) for i, d in enumerate(edges) if d.get("source_count", 1) >= 3]
+        label  = "🔥 3+ Sources Agree"
+    elif filt == "2a":
+        subset = [(i, d) for i, d in enumerate(edges) if d.get("source_count", 1) == 2]
+        label  = "✅ 2 Sources Agree"
+    elif filt == "1s":
+        subset = [(i, d) for i, d in enumerate(edges) if d.get("source_count", 1) == 1]
+        label  = "🟡 Single Source"
+    elif filt == "lg":
+        subset = [(i, d) for i, d in enumerate(edges) if d.get("edge_size") == "large"]
+        label  = "🔴 Large Edges (20%+)"
+    else:
+        send_message(f"❓ Unknown filter: {filt}")
+        return
+
+    if not subset:
+        send_message(f"{label}\n\nNo edges match this filter.")
+        return
+
+    send_message(f"{label} — {len(subset)} edge(s)")
+    for index, d in subset:
+        _send_edge_with_buttons(d, scan_id, index)
+
+
+def _handle_buy(scan_id: str, edge_index: int):
+    """Log a trade when user clicks Mark Bought."""
+    log_trade(scan_id, edge_index)
 
 
 # =============================================================
@@ -156,6 +219,29 @@ def main():
             for update in updates.get("result", []):
                 offset = update["update_id"] + 1
 
+                # ── Inline button callbacks ──────────────────────────────
+                callback = update.get("callback_query")
+                if callback:
+                    cb_id   = callback["id"]
+                    cb_data = callback.get("data", "")
+
+                    if cb_data.startswith("f:"):
+                        _, scan_id, filt = cb_data.split(":", 2)
+                        answer_callback(cb_id, "Loading…")
+                        threading.Thread(
+                            target=_handle_filter, args=(scan_id, filt), daemon=True
+                        ).start()
+
+                    elif cb_data.startswith("b:"):
+                        _, scan_id, idx_str = cb_data.split(":", 2)
+                        answer_callback(cb_id, "✅ Marked as bought!")
+                        _handle_buy(scan_id, int(idx_str))
+
+                    else:
+                        answer_callback(cb_id)
+                    continue
+
+                # ── Text commands ────────────────────────────────────────
                 message = update.get("message")
                 if not message:
                     continue
@@ -169,9 +255,14 @@ def main():
                     def _run_portfolio():
                         try:
                             send_message("📊 Checking your positions…")
-                            messages = run_portfolio_check()
-                            for msg in messages:
-                                send_message(msg)
+                            items = run_portfolio_check()
+                            for item in items:
+                                msg = item["text"]
+                                url = item.get("url")
+                                if url:
+                                    send_with_keyboard(msg, [[{"text": "📊 View on Polymarket →", "url": url}]])
+                                else:
+                                    send_message(msg)
                         except Exception as e:
                             send_message(f"❌ Portfolio check failed:\n{e}")
                             import traceback

@@ -323,6 +323,79 @@ def get_visual_crossing_forecast_max_temp(city_slug: str, target_date: date) -> 
 
 
 # =============================================================
+# NOAA / NWS API (free, no API key, US cities only, 7-day forecast)
+# =============================================================
+
+# Cache grid forecast URLs per city so we only call /points/ once per session
+_noaa_grid_cache: Dict[str, str] = {}
+
+NOAA_HEADERS = {
+    "User-Agent": "polymarket-weather-bot (github.com/mikey9900/polymarket_weather_bot)"
+}
+
+
+def get_noaa_forecast_max_temp(city_slug: str, target_date: date) -> Optional[float]:
+    """
+    Fetches the daily max temperature from NOAA/NWS.
+    Free, no API key required. US cities only (fahrenheit markets).
+
+    Two-step process:
+        1. /points/{lat},{lon}  → get the grid forecast URL for this location
+        2. {forecast_url}       → get 7-day forecast, find daytime period for target_date
+
+    Args:
+        city_slug:   e.g. "nyc"
+        target_date: the date to forecast
+
+    Returns:
+        float — max temp in °F
+        None  — if city is non-US, call fails, or date out of range
+    """
+    coords = CITY_COORDS.get(city_slug)
+    if not coords:
+        return None
+
+    # NOAA only covers US cities
+    if coords.get("unit") != "fahrenheit":
+        return None
+
+    lat = coords["lat"]
+    lon = coords["lon"]
+
+    try:
+        # Step 1: get forecast URL (cached per session)
+        if city_slug not in _noaa_grid_cache:
+            r = requests.get(
+                f"https://api.weather.gov/points/{lat},{lon}",
+                headers=NOAA_HEADERS,
+                timeout=10,
+            )
+            r.raise_for_status()
+            forecast_url = r.json()["properties"]["forecast"]
+            _noaa_grid_cache[city_slug] = forecast_url
+
+        forecast_url = _noaa_grid_cache[city_slug]
+
+        # Step 2: get the 7-day forecast
+        r = requests.get(forecast_url, headers=NOAA_HEADERS, timeout=10)
+        r.raise_for_status()
+        periods = r.json()["properties"]["periods"]
+
+        # Find the daytime period for our target date — that's the daily high
+        target_str = target_date.isoformat()
+        for period in periods:
+            if period.get("isDaytime") and period.get("startTime", "")[:10] == target_str:
+                return float(period["temperature"])
+
+        return None  # date not in 7-day window
+
+    except Exception as e:
+        print(f"    ⚠️  NOAA failed for {city_slug}: {e}")
+        _noaa_grid_cache.pop(city_slug, None)  # clear cache on error so next call retries
+        return None
+
+
+# =============================================================
 # COMBINED FORECAST
 # =============================================================
 
@@ -483,24 +556,30 @@ def get_both_bucket_probabilities(
     unit_sym = "°F" if unit == "fahrenheit" else "°C"
     station  = coords.get("station", "?")
 
-    wu_temp = get_wu_forecast_max_temp(city_slug, target_date)
-    om_temp = get_openmeteo_forecast_max_temp(city_slug, target_date)
-    vc_temp = get_visual_crossing_forecast_max_temp(city_slug, target_date)
+    wu_temp   = get_wu_forecast_max_temp(city_slug, target_date)
+    om_temp   = get_openmeteo_forecast_max_temp(city_slug, target_date)
+    vc_temp   = get_visual_crossing_forecast_max_temp(city_slug, target_date)
+    noaa_temp = get_noaa_forecast_max_temp(city_slug, target_date)  # US only, None for international
 
     print(f"    🌡️  WU ({station}): {f'{wu_temp:.1f}{unit_sym}' if wu_temp is not None else 'N/A'}")
     print(f"    🌤️  Open-Meteo:   {f'{om_temp:.1f}{unit_sym}' if om_temp is not None else 'N/A'}")
     print(f"    🌍  Vis.Crossing: {f'{vc_temp:.1f}{unit_sym}' if vc_temp is not None else 'N/A'}")
+    if noaa_temp is not None:
+        print(f"    🇺🇸  NOAA/NWS:    {noaa_temp:.1f}{unit_sym}")
 
-    wu_probs = _probs_from_temp(wu_temp, buckets, unit) if wu_temp is not None else None
-    om_probs = _probs_from_temp(om_temp, buckets, unit) if om_temp is not None else None
-    vc_probs = _probs_from_temp(vc_temp, buckets, unit) if vc_temp is not None else None
+    wu_probs   = _probs_from_temp(wu_temp,   buckets, unit) if wu_temp   is not None else None
+    om_probs   = _probs_from_temp(om_temp,   buckets, unit) if om_temp   is not None else None
+    vc_probs   = _probs_from_temp(vc_temp,   buckets, unit) if vc_temp   is not None else None
+    noaa_probs = _probs_from_temp(noaa_temp, buckets, unit) if noaa_temp is not None else None
 
     return {
         "wu":        wu_probs,
         "openmeteo": om_probs,
         "vc":        vc_probs,
+        "noaa":      noaa_probs,
         "wu_temp":   wu_temp,
         "om_temp":   om_temp,
         "vc_temp":   vc_temp,
+        "noaa_temp": noaa_temp,
         "unit":      unit_sym,
     }

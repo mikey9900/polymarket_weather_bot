@@ -24,27 +24,11 @@ from forecast.forecast_engine import get_both_bucket_probabilities, CITY_COORDS
 from logic.discrepancy_logic import (
     find_discrepancies,
     format_discrepancy_message,
-    format_small_edge,
     summarize_discrepancies,
 )
-from alerts.telegram_alerts import send_telegram_alert
+from alerts.telegram_alerts import send_telegram_alert, send_with_keyboard
+from alerts.scan_cache import store_scan
 from tracking.scan_tracker import log_edge, check_resolutions
-
-SMALL_EDGES_PER_MESSAGE = 5
-
-
-def _send_batched(items: list, header: str, format_fn, batch_size: int):
-    """Sends a list of items to Telegram in batches."""
-    total = (len(items) + batch_size - 1) // batch_size
-    for i in range(0, len(items), batch_size):
-        batch     = items[i:i + batch_size]
-        batch_num = (i // batch_size) + 1
-        suffix    = f" ({batch_num}/{total})" if total > 1 else ""
-        lines     = [f"{header}{suffix}\n"]
-        for item in batch:
-            lines.append(format_fn(item))
-            lines.append("")
-        send_telegram_alert("\n".join(lines))
 
 
 def run_weather_scan(limit: int = 300):
@@ -103,15 +87,17 @@ def run_weather_scan(limit: int = 300):
 
         # Fetch from all three sources
         forecast_data = get_both_bucket_probabilities(city_slug, event_date, buckets)
-        wu_probs  = forecast_data.get("wu")
-        om_probs  = forecast_data.get("openmeteo")
-        vc_probs  = forecast_data.get("vc")
-        wu_temp   = forecast_data.get("wu_temp")
-        om_temp   = forecast_data.get("om_temp")
-        vc_temp   = forecast_data.get("vc_temp")
-        unit_sym  = forecast_data.get("unit", "°F")
+        wu_probs   = forecast_data.get("wu")
+        om_probs   = forecast_data.get("openmeteo")
+        vc_probs   = forecast_data.get("vc")
+        noaa_probs = forecast_data.get("noaa")
+        wu_temp    = forecast_data.get("wu_temp")
+        om_temp    = forecast_data.get("om_temp")
+        vc_temp    = forecast_data.get("vc_temp")
+        noaa_temp  = forecast_data.get("noaa_temp")
+        unit_sym   = forecast_data.get("unit", "°F")
 
-        if wu_probs is None and om_probs is None and vc_probs is None:
+        if wu_probs is None and om_probs is None and vc_probs is None and noaa_probs is None:
             print(f"   ⚠️  All forecasts failed — skipping\n")
             events_skipped += 1
             continue
@@ -121,58 +107,70 @@ def run_weather_scan(limit: int = 300):
         unit_name = coords.get("unit", "fahrenheit")
 
         # Print comparison table
-        print(f"   {'Bucket':<22} {'Mkt':>6} {'WU':>6} {'OM':>6} {'VC':>6} {'WUΔ':>7} {'OMΔ':>7} {'VCΔ':>7}  {'Liq':>7}")
-        print(f"   {'-'*80}")
+        has_noaa = noaa_probs is not None
+        if has_noaa:
+            print(f"   {'Bucket':<22} {'Mkt':>5} {'WU':>5} {'OM':>5} {'VC':>5} {'NOAA':>5} {'WUΔ':>6} {'OMΔ':>6} {'VCΔ':>6} {'NAΔ':>6}  {'Liq':>7}")
+            print(f"   {'-'*88}")
+        else:
+            print(f"   {'Bucket':<22} {'Mkt':>6} {'WU':>6} {'OM':>6} {'VC':>6} {'WUΔ':>7} {'OMΔ':>7} {'VCΔ':>7}  {'Liq':>7}")
+            print(f"   {'-'*80}")
 
         for bucket in buckets:
             label     = bucket.get("label", "")
             mkt       = bucket.get("market_yes_price")
-            wu_p      = wu_probs.get(label) if wu_probs else None
-            om_p      = om_probs.get(label) if om_probs else None
-            vc_p      = vc_probs.get(label) if vc_probs else None
+            wu_p      = wu_probs.get(label)   if wu_probs   else None
+            om_p      = om_probs.get(label)   if om_probs   else None
+            vc_p      = vc_probs.get(label)   if vc_probs   else None
+            noaa_p    = noaa_probs.get(label) if noaa_probs else None
             liquidity = bucket.get("liquidity", 0)
 
             if mkt is None:
                 continue
 
-            wu_diff = wu_p - mkt if wu_p is not None else None
-            om_diff = om_p - mkt if om_p is not None else None
-            vc_diff = vc_p - mkt if vc_p is not None else None
+            wu_diff   = wu_p   - mkt if wu_p   is not None else None
+            om_diff   = om_p   - mkt if om_p   is not None else None
+            vc_diff   = vc_p   - mkt if vc_p   is not None else None
+            noaa_diff = noaa_p - mkt if noaa_p is not None else None
 
             def fmt_pct(v):
-                return f"{v*100:.0f}%" if v is not None else "  N/A"
+                return f"{v*100:.0f}%" if v is not None else " N/A"
 
             def fmt_diff(v):
                 if v is None:
-                    return "   N/A"
+                    return "  N/A"
                 return f"+{v*100:.0f}%" if v >= 0 else f"{v*100:.0f}%"
 
             def flag(v):
-                if v is None:
-                    return ""
-                if abs(v) >= 0.20:
-                    return "🔴"
-                if abs(v) >= 0.10:
-                    return "🟡"
+                if v is None: return ""
+                if abs(v) >= 0.20: return "🔴"
+                if abs(v) >= 0.10: return "🟡"
                 return ""
 
-            # Show ✅ if 2+ sources agree on a discrepancy
-            diffs = [d for d in [wu_diff, om_diff, vc_diff] if d is not None and abs(d) >= 0.10]
-            yes_votes = sum(1 for d in diffs if d > 0)
-            no_votes  = sum(1 for d in diffs if d < 0)
+            all_diffs = [d for d in [wu_diff, om_diff, vc_diff, noaa_diff] if d is not None and abs(d) >= 0.10]
+            yes_votes = sum(1 for d in all_diffs if d > 0)
+            no_votes  = sum(1 for d in all_diffs if d < 0)
             confirmed = " ✅" if yes_votes >= 2 or no_votes >= 2 else ""
 
-            print(
-                f"   {label:<22} "
-                f"{fmt_pct(mkt):>6} "
-                f"{fmt_pct(wu_p):>6} "
-                f"{fmt_pct(om_p):>6} "
-                f"{fmt_pct(vc_p):>6} "
-                f"{fmt_diff(wu_diff):>7}{flag(wu_diff)} "
-                f"{fmt_diff(om_diff):>7}{flag(om_diff)} "
-                f"{fmt_diff(vc_diff):>7}{flag(vc_diff)}"
-                f"{confirmed}  ${liquidity:>5,.0f}"
-            )
+            if has_noaa:
+                print(
+                    f"   {label:<22} "
+                    f"{fmt_pct(mkt):>5} {fmt_pct(wu_p):>5} {fmt_pct(om_p):>5} "
+                    f"{fmt_pct(vc_p):>5} {fmt_pct(noaa_p):>5} "
+                    f"{fmt_diff(wu_diff):>6}{flag(wu_diff)} "
+                    f"{fmt_diff(om_diff):>6}{flag(om_diff)} "
+                    f"{fmt_diff(vc_diff):>6}{flag(vc_diff)} "
+                    f"{fmt_diff(noaa_diff):>6}{flag(noaa_diff)}"
+                    f"{confirmed}  ${liquidity:>5,.0f}"
+                )
+            else:
+                print(
+                    f"   {label:<22} "
+                    f"{fmt_pct(mkt):>6} {fmt_pct(wu_p):>6} {fmt_pct(om_p):>6} {fmt_pct(vc_p):>6} "
+                    f"{fmt_diff(wu_diff):>7}{flag(wu_diff)} "
+                    f"{fmt_diff(om_diff):>7}{flag(om_diff)} "
+                    f"{fmt_diff(vc_diff):>7}{flag(vc_diff)}"
+                    f"{confirmed}  ${liquidity:>5,.0f}"
+                )
 
         # Find discrepancies
         event_discreps = find_discrepancies(
@@ -187,6 +185,8 @@ def run_weather_scan(limit: int = 300):
             unit_symbol  = unit_sym,
             vc_probs     = vc_probs,
             vc_temp      = vc_temp,
+            noaa_probs   = noaa_probs,
+            noaa_temp    = noaa_temp,
         )
 
         if event_discreps:
@@ -202,60 +202,41 @@ def run_weather_scan(limit: int = 300):
             print(f"   ✅ No significant discrepancies\n")
 
     # ----------------------------------------------------------
-    # STEP 5: Send Telegram alerts
+    # STEP 5: Cache results + send ONE summary with filter buttons
     # ----------------------------------------------------------
     print(f"{'='*52}")
     print(f"Processed: {events_ok + events_flagged} | Flagged: {events_flagged} | Skipped: {events_skipped}")
     print(f"Total edges: {len(all_discrepancies)}")
-
-    confirmed  = [d for d in all_discrepancies if d["confidence"] == "confirmed"]
-    single_src = [d for d in all_discrepancies if d["confidence"] != "confirmed"]
-    large      = [d for d in all_discrepancies if d["edge_size"] == "large"]
 
     if not all_discrepancies:
         send_telegram_alert(
             f"🌡️ *Temperature Scan Complete*\n\n"
             f"📅 Events scanned: {total_events}\n"
             f"✅ No significant discrepancies found.\n"
-            f"Markets are aligned with both WU and Open-Meteo forecasts."
+            f"Markets look fairly priced across all sources."
         )
         return
 
-    # 1. Summary
-    send_telegram_alert(summarize_discrepancies(all_discrepancies))
+    # Cache the full list — buttons reference this scan_id
+    scan_id = store_scan(all_discrepancies)
 
-    # 2. Confirmed large edges — one message each (best opportunities)
-    conf_large = [d for d in confirmed if d["edge_size"] == "large"]
-    if conf_large:
-        send_telegram_alert(f"✅🔴 *CONFIRMED LARGE EDGES* — {len(conf_large)} found")
-        for d in conf_large:
-            send_telegram_alert(format_discrepancy_message(d))
+    s3p   = sum(1 for d in all_discrepancies if d.get("source_count", 1) >= 3)
+    s2a   = sum(1 for d in all_discrepancies if d.get("source_count", 1) == 2)
+    s1    = sum(1 for d in all_discrepancies if d.get("source_count", 1) == 1)
+    large = sum(1 for d in all_discrepancies if d["edge_size"] == "large")
 
-    # 3. Confirmed small edges — batched
-    conf_small = [d for d in confirmed if d["edge_size"] == "small"]
-    if conf_small:
-        _send_batched(
-            items      = conf_small,
-            header     = f"✅🟡 *CONFIRMED SMALL EDGES* — {len(conf_small)} found",
-            format_fn  = format_small_edge,
-            batch_size = SMALL_EDGES_PER_MESSAGE,
-        )
+    summary_text = summarize_discrepancies(all_discrepancies)
 
-    # 4. Single-source large edges
-    ss_large = [d for d in single_src if d["edge_size"] == "large"]
-    if ss_large:
-        send_telegram_alert(f"🔴 *SINGLE-SOURCE LARGE EDGES* — {len(ss_large)} found")
-        for d in ss_large:
-            send_telegram_alert(format_discrepancy_message(d))
+    keyboard = [
+        [
+            {"text": f"🔥 3+ Agree ({s3p})",   "callback_data": f"f:{scan_id}:3p"},
+            {"text": f"✅ 2 Agree ({s2a})",     "callback_data": f"f:{scan_id}:2a"},
+        ],
+        [
+            {"text": f"🟡 1 Source ({s1})",     "callback_data": f"f:{scan_id}:1s"},
+            {"text": f"🔴 20%+ Edge ({large})", "callback_data": f"f:{scan_id}:lg"},
+        ],
+    ]
 
-    # 5. Single-source small edges — batched
-    ss_small = [d for d in single_src if d["edge_size"] == "small"]
-    if ss_small:
-        _send_batched(
-            items      = ss_small,
-            header     = f"🟡 *SINGLE-SOURCE SMALL EDGES* — {len(ss_small)} found",
-            format_fn  = format_small_edge,
-            batch_size = SMALL_EDGES_PER_MESSAGE,
-        )
-
-    print(f"✅ Done. {len(confirmed)} confirmed + {len(single_src)} single-source edges sent.")
+    send_with_keyboard(summary_text, keyboard)
+    print(f"✅ Done. Scan {scan_id} cached with {len(all_discrepancies)} edges. Filter buttons sent.")

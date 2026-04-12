@@ -77,6 +77,25 @@ CITY_DISPLAY_TO_SLUG = {
 
 
 # =============================================================
+# URL BUILDER
+# =============================================================
+
+_MONTH_NAMES = [
+    "", "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+]
+
+def get_event_url(city_slug: str, event_date: date) -> str:
+    """
+    Build a Polymarket event URL from city slug + event date.
+    e.g. https://polymarket.com/event/highest-temperature-in-nyc-on-april-13-2026
+    """
+    month = _MONTH_NAMES[event_date.month]
+    slug  = f"highest-temperature-in-{city_slug}-on-{month}-{event_date.day}-{event_date.year}"
+    return f"https://polymarket.com/event/{slug}"
+
+
+# =============================================================
 # DATA FETCHING
 # =============================================================
 
@@ -209,15 +228,16 @@ def get_forecast_prob_for_bucket(
     high = bounds.get("high")
 
     # For today's markets use WU live observation as primary source
-    from forecast.forecast_engine import get_wu_forecast_max_temp
+    from forecast.forecast_engine import get_wu_forecast_max_temp, get_noaa_forecast_max_temp
     today = date.today()
 
-    wu_temp = get_wu_forecast_max_temp(city_slug, event_date) if event_date <= today else None
-    om_temp = get_openmeteo_forecast_max_temp(city_slug, event_date)
-    vc_temp = get_visual_crossing_forecast_max_temp(city_slug, event_date)
+    wu_temp   = get_wu_forecast_max_temp(city_slug, event_date) if event_date <= today else None
+    om_temp   = get_openmeteo_forecast_max_temp(city_slug, event_date)
+    vc_temp   = get_visual_crossing_forecast_max_temp(city_slug, event_date)
+    noaa_temp = get_noaa_forecast_max_temp(city_slug, event_date)  # US only
 
     probs = []
-    for temp in [wu_temp, om_temp, vc_temp]:
+    for temp in [wu_temp, om_temp, vc_temp, noaa_temp]:
         if temp is None:
             continue
         if low is None and high is None:
@@ -351,41 +371,44 @@ def format_position(
 # MAIN
 # =============================================================
 
-def run_portfolio_check() -> list[str]:
+def run_portfolio_check() -> list[dict]:
     """
-    Full portfolio check. Returns a list of Telegram messages to send.
-    Splits into multiple messages so Telegram doesn't hit length limits.
+    Full portfolio check.
+    Returns list of dicts: {"text": str, "url": str | None}
+    Callers send each as a message, optionally with a [📊 View →] button for the URL.
     """
     print("📊 Fetching portfolio...")
     positions = fetch_positions()
 
     if not positions:
-        return ["📭 No open positions found for your wallet."]
+        return [{"text": "📭 No open positions found for your wallet.", "url": None}]
 
     weather_positions = [p for p in positions if is_weather_market(p)]
     other_count       = len(positions) - len(weather_positions)
 
     if not weather_positions:
-        return [
-            f"📭 No weather positions found.\n"
-            f"({len(positions)} total open position(s), none are temperature markets)"
-        ]
+        return [{
+            "text": (
+                f"📭 No weather positions found.\n"
+                f"({len(positions)} total open position(s), none are temperature markets)"
+            ),
+            "url": None,
+        }]
 
-    messages = []
-    total_pnl   = 0.0
-    total_init  = 0.0
+    results    = []
+    total_pnl  = 0.0
+    total_init = 0.0
 
     for pos in weather_positions:
-        outcome    = pos.get("outcome", "Yes")
-        title      = pos.get("title", "")
-        end_date   = pos.get("endDate", "")
+        title    = pos.get("title", "")
+        end_date = pos.get("endDate", "")
         total_pnl  += float(pos.get("cashPnl") or 0)
         total_init += float(pos.get("initialValue") or 0)
 
         forecast_prob = None
         bucket_label  = ""
+        event_url     = None
 
-        # Parse city, date, and bucket directly from the position title
         info = parse_position_title(title, end_date)
         if info:
             city_slug    = info["city_slug"]
@@ -393,11 +416,13 @@ def run_portfolio_check() -> list[str]:
             bucket_label = info["bucket_label"]
             print(f"    🔍 Forecasting {city_slug} on {event_date} for '{bucket_label}'...")
             forecast_prob = get_forecast_prob_for_bucket(city_slug, event_date, bucket_label)
+            event_url     = get_event_url(city_slug, event_date)
 
         event_date_obj = info["event_date"] if info else None
-        messages.append(format_position(pos, forecast_prob, bucket_label, event_date_obj))
+        text = format_position(pos, forecast_prob, bucket_label, event_date_obj)
+        results.append({"text": text, "url": event_url})
 
-    # Summary footer
+    # Summary footer (no URL)
     pnl_sign  = "+" if total_pnl >= 0 else ""
     pnl_emoji = "📈" if total_pnl >= 0 else "📉"
     footer_lines = [
@@ -407,6 +432,6 @@ def run_portfolio_check() -> list[str]:
     ]
     if other_count:
         footer_lines.append(f"_(+{other_count} non-weather position(s) not shown)_")
-    messages.append("\n".join(footer_lines))
+    results.append({"text": "\n".join(footer_lines), "url": None})
 
-    return messages
+    return results
