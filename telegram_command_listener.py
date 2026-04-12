@@ -22,6 +22,7 @@ import threading
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from run_scanner import run_weather_scan
+from portfolio.portfolio_tracker import run_portfolio_check
 
 # =============================================================
 # CONFIG
@@ -139,8 +140,9 @@ def main():
         f"Auto-scan every {AUTO_SCAN_HOURS}h\n"
         f"Next auto-scan: {next_auto_scan.strftime('%H:%M')}\n\n"
         "Commands:\n"
-        "/scan    – run a full scan now\n"
-        "/status  – check scan status + next auto-scan time"
+        "/scan       – run a full scan now\n"
+        "/portfolio  – check open positions + recommendations\n"
+        "/status     – scan status + next auto-scan time"
     )
 
     offset = None
@@ -161,6 +163,19 @@ def main():
                 if text == "/scan":
                     run_scan_with_lock(triggered_by="manual")
 
+                elif text == "/portfolio":
+                    def _run_portfolio():
+                        try:
+                            send_message("📊 Checking your positions…")
+                            messages = run_portfolio_check()
+                            for msg in messages:
+                                send_message(msg)
+                        except Exception as e:
+                            send_message(f"❌ Portfolio check failed:\n{e}")
+                            import traceback
+                            traceback.print_exc()
+                    threading.Thread(target=_run_portfolio, daemon=True).start()
+
                 elif text == "/status":
                     running = scan_lock.locked()
                     mins_until = max(0, int((next_auto_scan - datetime.now()).total_seconds() / 60))
@@ -174,7 +189,7 @@ def main():
                     if text.startswith("/"):
                         send_message(
                             f"❓ Unknown command: {text}\n\n"
-                            "Try:\n/scan\n/status"
+                            "Try:\n/scan\n/portfolio\n/status"
                         )
 
             time.sleep(2)
