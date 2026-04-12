@@ -1,0 +1,11 @@
+name: "Polymarket Weather Bot"
+description: "Scans Polymarket for weather prediction market edges"
+version: "1.0.0"
+slug: "polymarket_weather_bot"
+init: false
+arch:
+  - aarch64
+  - amd64
+  - armv7
+map:
+  - config:rw
