@@ -28,6 +28,7 @@ from logic.discrepancy_logic import (
     summarize_discrepancies,
 )
 from alerts.telegram_alerts import send_telegram_alert
+from tracking.scan_tracker import log_edge, check_resolutions
 
 SMALL_EDGES_PER_MESSAGE = 5
 
@@ -52,6 +53,9 @@ def run_weather_scan(limit: int = 300):
     """
 
     print("🔍 Starting dual-source temperature + discrepancy scan...")
+
+    # Check if any previously tracked edges have resolved
+    check_resolutions()
 
     # ----------------------------------------------------------
     # STEP 1: Fetch temperature events
@@ -190,6 +194,9 @@ def run_weather_scan(limit: int = 300):
             all_discrepancies.extend(event_discreps)
             confirmed_count = sum(1 for d in event_discreps if d["confidence"] == "confirmed")
             print(f"   ⚡ {len(event_discreps)} edge(s) found ({confirmed_count} confirmed)\n")
+            # Log every edge for performance tracking
+            for d in event_discreps:
+                log_edge(d)
         else:
             events_ok += 1
             print(f"   ✅ No significant discrepancies\n")

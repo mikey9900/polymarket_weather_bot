@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from run_scanner import run_weather_scan
 from portfolio.portfolio_tracker import run_portfolio_check
+from tracking.scan_tracker import get_stats
 
 # =============================================================
 # CONFIG
@@ -142,6 +143,7 @@ def main():
         "Commands:\n"
         "/scan       – run a full scan now\n"
         "/portfolio  – check open positions + recommendations\n"
+        "/stats      – win rate + edge performance tracker\n"
         "/status     – scan status + next auto-scan time"
     )
 
@@ -176,6 +178,12 @@ def main():
                             traceback.print_exc()
                     threading.Thread(target=_run_portfolio, daemon=True).start()
 
+                elif text == "/stats":
+                    try:
+                        send_message(get_stats())
+                    except Exception as e:
+                        send_message(f"❌ Stats failed:\n{e}")
+
                 elif text == "/status":
                     running = scan_lock.locked()
                     mins_until = max(0, int((next_auto_scan - datetime.now()).total_seconds() / 60))
@@ -189,7 +197,7 @@ def main():
                     if text.startswith("/"):
                         send_message(
                             f"❓ Unknown command: {text}\n\n"
-                            "Try:\n/scan\n/portfolio\n/status"
+                            "Try:\n/scan\n/portfolio\n/stats\n/status"
                         )
 
             time.sleep(2)

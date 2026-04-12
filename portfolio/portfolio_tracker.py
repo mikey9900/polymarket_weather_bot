@@ -208,12 +208,16 @@ def get_forecast_prob_for_bucket(
     low  = bounds.get("low")
     high = bounds.get("high")
 
-    # Get temps from both sources
+    # For today's markets use WU live observation as primary source
+    from forecast.forecast_engine import get_wu_forecast_max_temp
+    today = date.today()
+
+    wu_temp = get_wu_forecast_max_temp(city_slug, event_date) if event_date <= today else None
     om_temp = get_openmeteo_forecast_max_temp(city_slug, event_date)
     vc_temp = get_visual_crossing_forecast_max_temp(city_slug, event_date)
 
     probs = []
-    for temp in [om_temp, vc_temp]:
+    for temp in [wu_temp, om_temp, vc_temp]:
         if temp is None:
             continue
         if low is None and high is None:
@@ -251,12 +255,21 @@ def get_recommendation(
     """
     today = date.today()
 
-    # Markets expiring today or already past — don't recommend trades
+    # Markets expiring today or already past
     if event_date is not None:
         if event_date < today:
             return "🔴 EXPIRED — awaiting redemption"
         if event_date == today:
-            return "⏰ RESOLVING TODAY — market price is now ground truth"
+            # Market price now reflects real-time weather observations
+            # Use cur_price (price of the token you hold) to advise
+            if cur_price <= 0.05:
+                return "🚨 SELL NOW — market says you lose, salvage what's left"
+            elif cur_price >= 0.90:
+                return "✋ HOLD — you're winning, let it resolve"
+            elif cur_price < avg_price * 0.6:
+                return "⚠️ CONSIDER SELLING — resolving today and underwater"
+            else:
+                return "⏰ RESOLVING TODAY — uncertain, watch live weather"
 
     if forecast_prob is None:
         return "❓ No forecast available"
