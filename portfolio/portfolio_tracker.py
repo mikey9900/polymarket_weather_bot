@@ -37,6 +37,44 @@ MONTH_MAP = {
 # Keywords that identify a temperature market
 WEATHER_KEYWORDS = ["temperature", "°f", "°c", "fahrenheit", "celsius"]
 
+# Maps Polymarket city display names → city slugs used by forecast engine
+CITY_DISPLAY_TO_SLUG = {
+    "new york city": "nyc",
+    "los angeles":   "los-angeles",
+    "chicago":       "chicago",
+    "houston":       "houston",
+    "dallas":        "dallas",
+    "austin":        "austin",
+    "san francisco": "san-francisco",
+    "seattle":       "seattle",
+    "denver":        "denver",
+    "atlanta":       "atlanta",
+    "miami":         "miami",
+    "london":        "london",
+    "paris":         "paris",
+    "tokyo":         "tokyo",
+    "toronto":       "toronto",
+    "mexico city":   "mexico-city",
+    "beijing":       "beijing",
+    "shanghai":      "shanghai",
+    "singapore":     "singapore",
+    "hong kong":     "hong-kong",
+    "seoul":         "seoul",
+    "amsterdam":     "amsterdam",
+    "madrid":        "madrid",
+    "helsinki":      "helsinki",
+    "warsaw":        "warsaw",
+    "istanbul":      "istanbul",
+    "lagos":         "lagos",
+    "buenos aires":  "buenos-aires",
+    "são paulo":     "sao-paulo",
+    "sao paulo":     "sao-paulo",
+    "jakarta":       "jakarta",
+    "kuala lumpur":  "kuala-lumpur",
+    "tel aviv":      "tel-aviv",
+    "moscow":        "moscow",
+}
+
 
 # =============================================================
 # DATA FETCHING
@@ -65,47 +103,56 @@ def fetch_positions() -> list:
     return r.json()
 
 
-def get_market_details(condition_id: str) -> Optional[dict]:
-    """
-    Look up a market in the Gamma API by its condition ID.
-    Returns the market dict (which includes event info), or None.
-    """
-    try:
-        r = requests.get(
-            f"{GAMMA_API}/markets",
-            params={"conditionIds": condition_id},
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json()
-        return data[0] if data else None
-    except Exception as e:
-        print(f"    ⚠️  Gamma API lookup failed for {condition_id}: {e}")
-        return None
+def is_weather_market(position: dict) -> bool:
+    """Check if a position is a temperature/weather market."""
+    title = (position.get("title") or "").lower()
+    return any(kw in title for kw in WEATHER_KEYWORDS)
 
 
 # =============================================================
-# PARSING
+# PARSING — extract city, bucket, date directly from title
 # =============================================================
 
-def parse_event_info(event_slug: str) -> Optional[dict]:
+def parse_position_title(title: str, end_date_str: str) -> Optional[dict]:
     """
-    Extract city_slug and event_date from a Polymarket event slug.
-    Format: highest-temperature-in-{city}-on-{month}-{day}-{year}
+    Parse city, bucket label, and date from a position title.
+
+    Title format:
+        "Will the highest temperature in {City} be {bucket} on {Month} {Day}?"
+
+    Examples:
+        "Will the highest temperature in Seattle be 56-57°F on April 11?"
+        "Will the highest temperature in New York City be 80°F or higher on April 13?"
+        "Will the highest temperature in Tokyo be 19°C on April 12?"
     """
     match = re.match(
-        r"highest-temperature-in-(.+)-on-(\w+)-(\d+)-(\d+)$",
-        event_slug,
+        r"Will the highest temperature in (.+?) be (.+?) on (\w+) (\d+)\??$",
+        title.strip(),
+        re.IGNORECASE,
     )
     if not match:
         return None
 
-    city_slug = match.group(1)
-    month_str = match.group(2).lower()
-    day       = int(match.group(3))
-    year      = int(match.group(4))
-    month     = MONTH_MAP.get(month_str)
+    city_display = match.group(1).strip().lower()
+    bucket_raw   = match.group(2).strip()
+    month_str    = match.group(3).lower()
+    day          = int(match.group(4))
 
+    # Strip "between " prefix (Polymarket sometimes adds it)
+    bucket_label = re.sub(r"^between\s+", "", bucket_raw, flags=re.IGNORECASE)
+
+    city_slug = CITY_DISPLAY_TO_SLUG.get(city_display)
+    if not city_slug:
+        print(f"    ⚠️  Unknown city: '{city_display}'")
+        return None
+
+    # Get year from endDate field (format: "2026-04-13T...")
+    try:
+        year = int(end_date_str[:4])
+    except (ValueError, TypeError):
+        year = date.today().year
+
+    month = MONTH_MAP.get(month_str)
     if not month:
         return None
 
@@ -114,13 +161,11 @@ def parse_event_info(event_slug: str) -> Optional[dict]:
     except ValueError:
         return None
 
-    return {"city_slug": city_slug, "event_date": event_date}
-
-
-def is_weather_market(position: dict) -> bool:
-    """Check if a position is a temperature/weather market."""
-    title = (position.get("title") or "").lower()
-    return any(kw in title for kw in WEATHER_KEYWORDS)
+    return {
+        "city_slug":    city_slug,
+        "event_date":   event_date,
+        "bucket_label": bucket_label,
+    }
 
 
 # =============================================================
@@ -303,34 +348,23 @@ def run_portfolio_check() -> list[str]:
     total_init  = 0.0
 
     for pos in weather_positions:
-        condition_id  = pos.get("conditionId", "")
-        outcome       = pos.get("outcome", "Yes")
-        total_pnl    += float(pos.get("cashPnl") or 0)
-        total_init   += float(pos.get("initialValue") or 0)
+        outcome    = pos.get("outcome", "Yes")
+        title      = pos.get("title", "")
+        end_date   = pos.get("endDate", "")
+        total_pnl  += float(pos.get("cashPnl") or 0)
+        total_init += float(pos.get("initialValue") or 0)
 
         forecast_prob = None
         bucket_label  = ""
 
-        # Try to get forecast for this position
-        if condition_id:
-            market = get_market_details(condition_id)
-            if market:
-                bucket_label = market.get("groupItemTitle", "")
-
-                # Get event info from the market's event list
-                events     = market.get("events") or []
-                event      = events[0] if events else {}
-                event_slug = event.get("slug", "") or market.get("eventSlug", "")
-
-                if event_slug and bucket_label:
-                    info = parse_event_info(event_slug)
-                    if info:
-                        print(f"    🔍 Forecasting {info['city_slug']} on {info['event_date']} for {bucket_label}...")
-                        forecast_prob = get_forecast_prob_for_bucket(
-                            city_slug    = info["city_slug"],
-                            event_date   = info["event_date"],
-                            bucket_label = bucket_label,
-                        )
+        # Parse city, date, and bucket directly from the position title
+        info = parse_position_title(title, end_date)
+        if info:
+            city_slug    = info["city_slug"]
+            event_date   = info["event_date"]
+            bucket_label = info["bucket_label"]
+            print(f"    🔍 Forecasting {city_slug} on {event_date} for '{bucket_label}'...")
+            forecast_prob = get_forecast_prob_for_bucket(city_slug, event_date, bucket_label)
 
         messages.append(format_position(pos, forecast_prob, bucket_label))
 
