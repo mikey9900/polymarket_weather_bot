@@ -58,28 +58,17 @@ def find_discrepancies(
     wu_temp:        Optional[float],
     om_temp:        Optional[float],
     unit_symbol:    str = "°F",
+    vc_probs:       Optional[dict] = None,
+    vc_temp:        Optional[float] = None,
 ) -> List[dict]:
     """
-    Compares both WU and Open-Meteo forecasts against market prices
-    for all buckets in one event. Returns a list of discrepancy dicts.
+    Compares WU, Open-Meteo, and Visual Crossing forecasts against
+    market prices for all buckets in one event.
 
-    A discrepancy is "confirmed" if both sources:
-        - Both show a discrepancy above the small threshold
-        - Both point in the same direction (both say BET YES, or both say BET NO)
+    CONFIRMED = 2 or more sources agree on direction AND size.
+    This means OM + VC can confirm each other even when WU is N/A.
 
-    Args:
-        event_title:  e.g. "Highest temperature in NYC on April 13?"
-        city_slug:    e.g. "nyc"
-        event_date:   date object
-        buckets:      list of bucket dicts with market_yes_price
-        wu_probs:     dict label→prob from WU, or None
-        om_probs:     dict label→prob from Open-Meteo, or None
-        wu_temp:      raw WU forecast temp (for display)
-        om_temp:      raw Open-Meteo forecast temp (for display)
-        unit_symbol:  "°F" or "°C"
-
-    Returns:
-        list of discrepancy dicts, sorted by confidence then size
+    Returns list of discrepancy dicts sorted by confidence then size.
     """
 
     discrepancies = []
@@ -103,37 +92,51 @@ def find_discrepancies(
             om_probs.get(label) if om_probs else None,
             "Open-Meteo"
         )
+        vc_result = _check_single_source(
+            label, market_prob,
+            vc_probs.get(label) if vc_probs else None,
+            "Visual Crossing"
+        )
 
-        # Determine confidence level
-        if wu_result and om_result:
-            # Both sources flagged this bucket — check if they agree on direction
-            if wu_result["direction"] == om_result["direction"]:
-                # ✅ CONFIRMED — both sources agree, strongest signal
-                confidence = "confirmed"
-                # Use average discrepancy for confirmed edges
-                avg_disc = (wu_result["discrepancy"] + om_result["discrepancy"]) / 2
-                direction = wu_result["direction"]
-                edge_size = "large" if abs(avg_disc) >= LARGE_EDGE_THRESHOLD else "small"
-                discrepancy_val = round(avg_disc, 3)
-                # Use WU as primary forecast (more accurate station), OM as backup
-                forecast_prob = wu_result["forecast_prob"]
-            else:
-                # Sources disagree on direction — lower confidence, skip
-                continue
+        # Collect all sources that flagged this bucket
+        all_results = [r for r in [wu_result, om_result, vc_result] if r is not None]
+
+        if not all_results:
+            continue
+
+        # Count votes for each direction
+        yes_votes = [r for r in all_results if r["direction"] == "YES"]
+        no_votes  = [r for r in all_results if r["direction"] == "NO"]
+
+        if len(yes_votes) >= 2:
+            # 2+ sources say BET YES — CONFIRMED
+            confidence  = "confirmed"
+            direction   = "YES"
+            agreeing    = yes_votes
+        elif len(no_votes) >= 2:
+            # 2+ sources say BET NO — CONFIRMED
+            confidence  = "confirmed"
+            direction   = "NO"
+            agreeing    = no_votes
         elif wu_result:
-            confidence      = "wu_only"
-            discrepancy_val = wu_result["discrepancy"]
-            direction       = wu_result["direction"]
-            edge_size       = wu_result["edge_size"]
-            forecast_prob   = wu_result["forecast_prob"]
+            confidence  = "wu_only"
+            direction   = wu_result["direction"]
+            agreeing    = [wu_result]
         elif om_result:
-            confidence      = "om_only"
-            discrepancy_val = om_result["discrepancy"]
-            direction       = om_result["direction"]
-            edge_size       = om_result["edge_size"]
-            forecast_prob   = om_result["forecast_prob"]
+            confidence  = "om_only"
+            direction   = om_result["direction"]
+            agreeing    = [om_result]
+        elif vc_result:
+            confidence  = "vc_only"
+            direction   = vc_result["direction"]
+            agreeing    = [vc_result]
         else:
-            continue  # no discrepancy from either source
+            continue
+
+        avg_disc        = sum(r["discrepancy"] for r in agreeing) / len(agreeing)
+        discrepancy_val = round(avg_disc, 3)
+        edge_size       = "large" if abs(avg_disc) >= LARGE_EDGE_THRESHOLD else "small"
+        forecast_prob   = agreeing[0]["forecast_prob"]
 
         discrepancies.append({
             "event_title":    event_title,
@@ -145,16 +148,16 @@ def find_discrepancies(
             "discrepancy":    discrepancy_val,
             "direction":      direction,
             "edge_size":      edge_size,
-            "confidence":     confidence,   # "confirmed", "wu_only", "om_only"
+            "confidence":     confidence,   # "confirmed", "wu_only", "om_only", "vc_only"
             "wu_temp":        wu_temp,
             "om_temp":        om_temp,
+            "vc_temp":        vc_temp,
             "unit":           unit_symbol,
             "market_slug":    market_slug,
             "liquidity":      liquidity,
-            # Individual source forecasts for display
             "wu_prob":        wu_result["forecast_prob"] if wu_result else None,
             "om_prob":        om_result["forecast_prob"] if om_result else None,
-            # Event slug for Polymarket URL (parent event, not child market)
+            "vc_prob":        vc_result["forecast_prob"] if vc_result else None,
             "event_slug":     bucket.get("event_slug", ""),
         })
 
@@ -190,6 +193,8 @@ def format_discrepancy_message(d: dict) -> str:
         conf_label = "✅ *CONFIRMED* —"
     elif conf == "wu_only":
         conf_label = "🌡️ *WU only* —"
+    elif conf == "vc_only":
+        conf_label = "🌍 *VC only* —"
     else:
         conf_label = "🌤️ *OM only* —"
 
@@ -201,42 +206,45 @@ def format_discrepancy_message(d: dict) -> str:
         .replace("?", "")
     )
 
-    unit      = d.get("unit", "°F")
-    wu_temp   = d.get("wu_temp")
-    om_temp   = d.get("om_temp")
-    wu_prob   = d.get("wu_prob")
-    om_prob   = d.get("om_prob")
+    unit    = d.get("unit", "°F")
+    wu_temp = d.get("wu_temp")
+    om_temp = d.get("om_temp")
+    vc_temp = d.get("vc_temp")
+    wu_prob = d.get("wu_prob")
+    om_prob = d.get("om_prob")
+    vc_prob = d.get("vc_prob")
 
-    wu_temp_str = f"{wu_temp:.1f}{unit}" if wu_temp is not None else "N/A"
-    om_temp_str = f"{om_temp:.1f}{unit}" if om_temp is not None else "N/A"
+    temp_parts = []
+    if wu_temp is not None:
+        temp_parts.append(f"🌡️ WU: `{wu_temp:.1f}{unit}`")
+    if om_temp is not None:
+        temp_parts.append(f"🌤️ OM: `{om_temp:.1f}{unit}`")
+    if vc_temp is not None:
+        temp_parts.append(f"🌍 VC: `{vc_temp:.1f}{unit}`")
 
     market_pct = round(d["market_prob"] * 100)
     diff_pct   = round(d["discrepancy"] * 100)
     diff_str   = f"+{diff_pct}%" if diff_pct > 0 else f"{diff_pct}%"
 
     liq_str = f"${d.get('liquidity', 0):,.0f}"
-    # Use event slug for the URL — market slugs go to 404
-    # Event slug format: highest-temperature-in-nyc-on-april-13-2026
     slug = d.get("event_slug") or d.get("market_slug", "")
     url  = f"https://polymarket.com/event/{slug}" if slug else ""
+
+    prob_parts = [f"Market: {market_pct}%"]
+    if wu_prob is not None:
+        prob_parts.append(f"WU: {round(wu_prob*100)}%")
+    if om_prob is not None:
+        prob_parts.append(f"OM: {round(om_prob*100)}%")
+    if vc_prob is not None:
+        prob_parts.append(f"VC: {round(vc_prob*100)}%")
 
     lines = [
         f"{size_emoji} {conf_label} *{short}*",
         f"Range: `{d['label']}`",
-        f"🌡️ WU: `{wu_temp_str}` | 🌤️ OM: `{om_temp_str}`",
+        " | ".join(temp_parts) if temp_parts else "",
+        " | ".join(prob_parts),
     ]
-
-    # Show per-source probabilities if both available
-    if wu_prob is not None and om_prob is not None:
-        lines.append(
-            f"Market: {market_pct}% | "
-            f"WU: {round(wu_prob*100)}% | "
-            f"OM: {round(om_prob*100)}%"
-        )
-    else:
-        lines.append(
-            f"Market: {market_pct}% → Forecast: {round(d['forecast_prob']*100)}%"
-        )
+    lines = [l for l in lines if l]  # remove empty lines
 
     lines.append(f"Avg edge: `{diff_str}` {bet_emoji} *BET {direction}*")
     lines.append(f"💧 Liquidity: {liq_str}")
@@ -255,7 +263,7 @@ def format_small_edge(d: dict) -> str:
     pct       = round(d["discrepancy"] * 100)
     sign      = "+" if pct > 0 else ""
 
-    conf_icon = "✅" if conf == "confirmed" else ("🌡️" if conf == "wu_only" else "🌤️")
+    conf_icon = "✅" if conf == "confirmed" else ("🌡️" if conf == "wu_only" else ("🌍" if conf == "vc_only" else "🌤️"))
 
     short = (
         d["event_title"]
@@ -266,15 +274,16 @@ def format_small_edge(d: dict) -> str:
     unit    = d.get("unit", "°F")
     wu_temp = d.get("wu_temp")
     om_temp = d.get("om_temp")
+    vc_temp = d.get("vc_temp")
 
-    if wu_temp is not None and om_temp is not None:
-        temp_str = f"WU:{wu_temp:.0f} OM:{om_temp:.0f}{unit}"
-    elif wu_temp is not None:
-        temp_str = f"WU:{wu_temp:.0f}{unit}"
-    elif om_temp is not None:
-        temp_str = f"OM:{om_temp:.0f}{unit}"
-    else:
-        temp_str = ""
+    temp_parts = []
+    if wu_temp is not None:
+        temp_parts.append(f"WU:{wu_temp:.0f}")
+    if om_temp is not None:
+        temp_parts.append(f"OM:{om_temp:.0f}")
+    if vc_temp is not None:
+        temp_parts.append(f"VC:{vc_temp:.0f}")
+    temp_str = (" ".join(temp_parts) + unit) if temp_parts else ""
 
     market_pct   = round(d["market_prob"] * 100)
     forecast_pct = round(d["forecast_prob"] * 100)
@@ -293,13 +302,15 @@ def summarize_discrepancies(all_discrepancies: list) -> str:
     confirmed = [d for d in all_discrepancies if d["confidence"] == "confirmed"]
     wu_only   = [d for d in all_discrepancies if d["confidence"] == "wu_only"]
     om_only   = [d for d in all_discrepancies if d["confidence"] == "om_only"]
+    vc_only   = [d for d in all_discrepancies if d["confidence"] == "vc_only"]
     large     = [d for d in all_discrepancies if d["edge_size"] == "large"]
     small     = [d for d in all_discrepancies if d["edge_size"] == "small"]
 
     lines = ["🌡️ *Discrepancy Scan Complete*\n"]
-    lines.append(f"✅ Confirmed (both sources agree): {len(confirmed)}")
+    lines.append(f"✅ Confirmed (2+ sources agree): {len(confirmed)}")
     lines.append(f"🌡️ WU only: {len(wu_only)}")
     lines.append(f"🌤️ Open-Meteo only: {len(om_only)}")
+    lines.append(f"🌍 Visual Crossing only: {len(vc_only)}")
     lines.append(f"🔴 Large edges (20%+): {len(large)}")
     lines.append(f"🟡 Small edges (10-20%): {len(small)}")
     lines.append(f"📊 Total flagged: {len(all_discrepancies)}\n")

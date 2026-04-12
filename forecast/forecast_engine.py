@@ -33,8 +33,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# WU API key from .env
-WU_API_KEY = os.getenv("WU_API_KEY")
+# API keys from .env
+WU_API_KEY             = os.getenv("WU_API_KEY")
+VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY")
 
 # -------------------------------------------------------------
 # CITY → WU STATION + COORDINATES + UNIT
@@ -269,6 +270,59 @@ def get_openmeteo_forecast_max_temp(city_slug: str, target_date: date) -> Option
 
 
 # =============================================================
+# VISUAL CROSSING API (free third source, 15-day global forecast)
+# =============================================================
+
+def get_visual_crossing_forecast_max_temp(city_slug: str, target_date: date) -> Optional[float]:
+    """
+    Fetches the daily max temperature from Visual Crossing.
+    Free tier: 1000 records/day. No restrictions on forecast range.
+
+    Args:
+        city_slug:   e.g. "san-francisco"
+        target_date: the date to forecast
+
+    Returns:
+        float — max temp in city's native unit (°F or °C)
+        None  — if API key missing or call fails
+    """
+
+    if not VISUAL_CROSSING_API_KEY:
+        return None
+
+    coords = CITY_COORDS.get(city_slug)
+    if not coords:
+        return None
+
+    lat        = coords["lat"]
+    lon        = coords["lon"]
+    unit       = coords["unit"]
+    unit_group = "us" if unit == "fahrenheit" else "metric"
+
+    try:
+        r = requests.get(
+            f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{lat},{lon}/{target_date.isoformat()}",
+            params={
+                "key":       VISUAL_CROSSING_API_KEY,
+                "unitGroup": unit_group,
+                "include":   "days",
+                "elements":  "tempmax",
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        days = data.get("days", [])
+        if not days or days[0].get("tempmax") is None:
+            return None
+        return float(days[0]["tempmax"])
+
+    except Exception as e:
+        print(f"    ⚠️  Visual Crossing failed for {city_slug}: {e}")
+        return None
+
+
+# =============================================================
 # COMBINED FORECAST
 # =============================================================
 
@@ -405,7 +459,8 @@ def get_both_bucket_probabilities(
     buckets:     list,
 ) -> Dict[str, Optional[Dict]]:
     """
-    Returns bucket probabilities from BOTH WU and Open-Meteo sources.
+    Returns bucket probabilities from all three sources:
+    Weather Underground, Open-Meteo, and Visual Crossing.
 
     Args:
         city_slug:   e.g. "san-francisco"
@@ -416,35 +471,36 @@ def get_both_bucket_probabilities(
         dict with keys:
             "wu":        dict of label → prob, or None
             "openmeteo": dict of label → prob, or None
+            "vc":        dict of label → prob, or None
             "wu_temp":   float or None
             "om_temp":   float or None
+            "vc_temp":   float or None
             "unit":      "°F" or "°C"
     """
 
-    coords     = CITY_COORDS.get(city_slug, {})
-    unit       = coords.get("unit", "fahrenheit")
-    unit_sym   = "°F" if unit == "fahrenheit" else "°C"
-    std        = UNCERTAINTY_F if unit == "fahrenheit" else UNCERTAINTY_C
-    station    = coords.get("station", "?")
+    coords   = CITY_COORDS.get(city_slug, {})
+    unit     = coords.get("unit", "fahrenheit")
+    unit_sym = "°F" if unit == "fahrenheit" else "°C"
+    station  = coords.get("station", "?")
 
-    # Fetch from both sources
     wu_temp = get_wu_forecast_max_temp(city_slug, target_date)
     om_temp = get_openmeteo_forecast_max_temp(city_slug, target_date)
+    vc_temp = get_visual_crossing_forecast_max_temp(city_slug, target_date)
 
     print(f"    🌡️  WU ({station}): {f'{wu_temp:.1f}{unit_sym}' if wu_temp is not None else 'N/A'}")
-    print(f"    🌤️  Open-Meteo:  {f'{om_temp:.1f}{unit_sym}' if om_temp is not None else 'N/A'}")
-
-    if wu_temp is not None and om_temp is not None:
-        diff = abs(wu_temp - om_temp)
-        print(f"    📊 Source diff: {diff:.1f}{unit_sym}")
+    print(f"    🌤️  Open-Meteo:   {f'{om_temp:.1f}{unit_sym}' if om_temp is not None else 'N/A'}")
+    print(f"    🌍  Vis.Crossing: {f'{vc_temp:.1f}{unit_sym}' if vc_temp is not None else 'N/A'}")
 
     wu_probs = _probs_from_temp(wu_temp, buckets, unit) if wu_temp is not None else None
     om_probs = _probs_from_temp(om_temp, buckets, unit) if om_temp is not None else None
+    vc_probs = _probs_from_temp(vc_temp, buckets, unit) if vc_temp is not None else None
 
     return {
         "wu":        wu_probs,
         "openmeteo": om_probs,
+        "vc":        vc_probs,
         "wu_temp":   wu_temp,
         "om_temp":   om_temp,
+        "vc_temp":   vc_temp,
         "unit":      unit_sym,
     }

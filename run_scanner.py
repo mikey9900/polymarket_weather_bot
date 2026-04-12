@@ -97,16 +97,18 @@ def run_weather_scan(limit: int = 300):
         for bucket in buckets:
             bucket["event_slug"] = event_slug
 
-        # Fetch from both sources
+        # Fetch from all three sources
         forecast_data = get_both_bucket_probabilities(city_slug, event_date, buckets)
         wu_probs  = forecast_data.get("wu")
         om_probs  = forecast_data.get("openmeteo")
+        vc_probs  = forecast_data.get("vc")
         wu_temp   = forecast_data.get("wu_temp")
         om_temp   = forecast_data.get("om_temp")
+        vc_temp   = forecast_data.get("vc_temp")
         unit_sym  = forecast_data.get("unit", "°F")
 
-        if wu_probs is None and om_probs is None:
-            print(f"   ⚠️  Both forecasts failed — skipping\n")
+        if wu_probs is None and om_probs is None and vc_probs is None:
+            print(f"   ⚠️  All forecasts failed — skipping\n")
             events_skipped += 1
             continue
 
@@ -115,21 +117,23 @@ def run_weather_scan(limit: int = 300):
         unit_name = coords.get("unit", "fahrenheit")
 
         # Print comparison table
-        print(f"   {'Bucket':<22} {'Mkt':>6} {'WU':>6} {'OM':>6} {'WUΔ':>7} {'OMΔ':>7}  {'Liq':>7}")
-        print(f"   {'-'*68}")
+        print(f"   {'Bucket':<22} {'Mkt':>6} {'WU':>6} {'OM':>6} {'VC':>6} {'WUΔ':>7} {'OMΔ':>7} {'VCΔ':>7}  {'Liq':>7}")
+        print(f"   {'-'*80}")
 
         for bucket in buckets:
-            label       = bucket.get("label", "")
-            mkt         = bucket.get("market_yes_price")
-            wu_p        = wu_probs.get(label) if wu_probs else None
-            om_p        = om_probs.get(label) if om_probs else None
-            liquidity   = bucket.get("liquidity", 0)
+            label     = bucket.get("label", "")
+            mkt       = bucket.get("market_yes_price")
+            wu_p      = wu_probs.get(label) if wu_probs else None
+            om_p      = om_probs.get(label) if om_probs else None
+            vc_p      = vc_probs.get(label) if vc_probs else None
+            liquidity = bucket.get("liquidity", 0)
 
             if mkt is None:
                 continue
 
-            wu_diff  = wu_p - mkt if wu_p is not None else None
-            om_diff  = om_p - mkt if om_p is not None else None
+            wu_diff = wu_p - mkt if wu_p is not None else None
+            om_diff = om_p - mkt if om_p is not None else None
+            vc_diff = vc_p - mkt if vc_p is not None else None
 
             def fmt_pct(v):
                 return f"{v*100:.0f}%" if v is not None else "  N/A"
@@ -137,8 +141,7 @@ def run_weather_scan(limit: int = 300):
             def fmt_diff(v):
                 if v is None:
                     return "   N/A"
-                s = f"+{v*100:.0f}%" if v >= 0 else f"{v*100:.0f}%"
-                return s
+                return f"+{v*100:.0f}%" if v >= 0 else f"{v*100:.0f}%"
 
             def flag(v):
                 if v is None:
@@ -149,20 +152,21 @@ def run_weather_scan(limit: int = 300):
                     return "🟡"
                 return ""
 
-            # Show ✅ if both sources agree on a discrepancy
-            confirmed = ""
-            if wu_diff is not None and om_diff is not None:
-                if abs(wu_diff) >= 0.10 and abs(om_diff) >= 0.10:
-                    if (wu_diff > 0) == (om_diff > 0):
-                        confirmed = " ✅"
+            # Show ✅ if 2+ sources agree on a discrepancy
+            diffs = [d for d in [wu_diff, om_diff, vc_diff] if d is not None and abs(d) >= 0.10]
+            yes_votes = sum(1 for d in diffs if d > 0)
+            no_votes  = sum(1 for d in diffs if d < 0)
+            confirmed = " ✅" if yes_votes >= 2 or no_votes >= 2 else ""
 
             print(
                 f"   {label:<22} "
                 f"{fmt_pct(mkt):>6} "
                 f"{fmt_pct(wu_p):>6} "
                 f"{fmt_pct(om_p):>6} "
+                f"{fmt_pct(vc_p):>6} "
                 f"{fmt_diff(wu_diff):>7}{flag(wu_diff)} "
-                f"{fmt_diff(om_diff):>7}{flag(om_diff)}"
+                f"{fmt_diff(om_diff):>7}{flag(om_diff)} "
+                f"{fmt_diff(vc_diff):>7}{flag(vc_diff)}"
                 f"{confirmed}  ${liquidity:>5,.0f}"
             )
 
@@ -177,6 +181,8 @@ def run_weather_scan(limit: int = 300):
             wu_temp      = wu_temp,
             om_temp      = om_temp,
             unit_symbol  = unit_sym,
+            vc_probs     = vc_probs,
+            vc_temp      = vc_temp,
         )
 
         if event_discreps:
