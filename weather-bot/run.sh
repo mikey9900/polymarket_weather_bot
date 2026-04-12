@@ -21,4 +21,5 @@ echo "Loading secrets..."
 cp /config/weather_bot.env .env
 
 echo "Starting bot..."
-python telegram_command_listener.py
+python -u telegram_command_listener.py 2>&1
+echo "Bot exited with code $?"
