@@ -16,6 +16,7 @@
 #   4. Single-source edges — batched separately (lower confidence)
 # =============================================================
 
+from collections import Counter
 from datetime import date
 
 from scanner.weather_event_scanner import fetch_weather_events
@@ -77,6 +78,29 @@ def run_weather_scan(limit: int = 300):
             print(f"   ⚠️  No active liquid buckets — skipping\n")
             events_skipped += 1
             continue
+
+        # Drop buckets whose market price appears 3+ times in this event —
+        # uniform pricing across multiple buckets usually means stale/thin
+        # markets where the price isn't reliable.
+        price_counts = Counter(
+            round(b["market_yes_price"], 3)
+            for b in buckets
+            if b.get("market_yes_price") is not None
+        )
+        duped_prices = {p for p, n in price_counts.items() if n >= 3}
+        if duped_prices:
+            before = len(buckets)
+            buckets = [
+                b for b in buckets
+                if round(b.get("market_yes_price", -1), 3) not in duped_prices
+            ]
+            removed = before - len(buckets)
+            print(f"   🚫 Filtered {removed} bucket(s) with duplicate price(s): "
+                  f"{[f'{p*100:.0f}%' for p in duped_prices]}")
+            if not buckets:
+                print(f"   ⚠️  All buckets filtered — skipping\n")
+                events_skipped += 1
+                continue
 
         # Stamp the parent event slug onto every bucket so we can
         # build correct Polymarket URLs in alerts
