@@ -191,20 +191,31 @@ def parse_position_title(title: str, end_date_str: str) -> Optional[dict]:
 # FORECAST INTEGRATION
 # =============================================================
 
-def get_forecast_prob_for_bucket(
+def get_forecast_data_for_bucket(
     city_slug:    str,
     event_date:   date,
     bucket_label: str,
-) -> Optional[float]:
+) -> dict:
     """
-    Run forecast for a city/date and return the probability for
-    a specific bucket label (e.g. "72-73°F").
+    Run forecast for a city/date and return both the bucket probability
+    and the individual source temperatures.
 
-    Uses Open-Meteo + Visual Crossing. Returns average of available sources.
+    Returns:
+        {
+            "prob":             float | None,
+            "wu_temp":          float | None,   # live obs if today, None if future
+            "om_temp":          float | None,
+            "vc_temp":          float | None,
+            "noaa_temp":        float | None,
+            "avg_forecast_temp": float | None,  # avg of forecast sources (excl WU)
+            "unit_sym":         "°F" | "°C",
+        }
     """
     from forecast.forecast_engine import (
         get_openmeteo_forecast_max_temp,
         get_visual_crossing_forecast_max_temp,
+        get_wu_forecast_max_temp,
+        get_noaa_forecast_max_temp,
         CITY_COORDS,
         UNCERTAINTY_F,
         UNCERTAINTY_C,
@@ -212,30 +223,39 @@ def get_forecast_prob_for_bucket(
     )
     from parser.weather_parser import parse_temperature_bucket
 
+    empty = {
+        "prob": None, "wu_temp": None, "om_temp": None,
+        "vc_temp": None, "noaa_temp": None,
+        "avg_forecast_temp": None, "unit_sym": "°F",
+    }
+
     coords = CITY_COORDS.get(city_slug)
     if not coords:
-        return None
+        return empty
 
-    unit = coords.get("unit", "fahrenheit")
-    std  = UNCERTAINTY_F if unit == "fahrenheit" else UNCERTAINTY_C
+    unit     = coords.get("unit", "fahrenheit")
+    std      = UNCERTAINTY_F if unit == "fahrenheit" else UNCERTAINTY_C
+    unit_sym = "°F" if unit == "fahrenheit" else "°C"
 
-    # Parse the bucket label into low/high bounds
     bounds = parse_temperature_bucket(bucket_label)
     if not bounds:
-        return None
+        return {**empty, "unit_sym": unit_sym}
 
     low  = bounds.get("low")
     high = bounds.get("high")
 
-    # For today's markets use WU live observation as primary source
-    from forecast.forecast_engine import get_wu_forecast_max_temp, get_noaa_forecast_max_temp
     today = date.today()
 
     wu_temp   = get_wu_forecast_max_temp(city_slug, event_date) if event_date <= today else None
     om_temp   = get_openmeteo_forecast_max_temp(city_slug, event_date)
     vc_temp   = get_visual_crossing_forecast_max_temp(city_slug, event_date)
-    noaa_temp = get_noaa_forecast_max_temp(city_slug, event_date)  # US only
+    noaa_temp = get_noaa_forecast_max_temp(city_slug, event_date)
 
+    # Average forecast temp from model sources (OM, VC, NOAA — not WU live obs)
+    model_temps = [t for t in [om_temp, vc_temp, noaa_temp] if t is not None]
+    avg_forecast_temp = round(sum(model_temps) / len(model_temps), 1) if model_temps else None
+
+    # Probability: use all available sources
     probs = []
     for temp in [wu_temp, om_temp, vc_temp, noaa_temp]:
         if temp is None:
@@ -250,7 +270,26 @@ def get_forecast_prob_for_bucket(
             p = _normal_cdf(high, temp, std) - _normal_cdf(low, temp, std)
         probs.append(max(0.0, min(1.0, p)))
 
-    return round(sum(probs) / len(probs), 3) if probs else None
+    prob = round(sum(probs) / len(probs), 3) if probs else None
+
+    return {
+        "prob":              prob,
+        "wu_temp":           wu_temp,
+        "om_temp":           om_temp,
+        "vc_temp":           vc_temp,
+        "noaa_temp":         noaa_temp,
+        "avg_forecast_temp": avg_forecast_temp,
+        "unit_sym":          unit_sym,
+    }
+
+
+def get_forecast_prob_for_bucket(
+    city_slug:    str,
+    event_date:   date,
+    bucket_label: str,
+) -> Optional[float]:
+    """Thin wrapper kept for backwards compatibility."""
+    return get_forecast_data_for_bucket(city_slug, event_date, bucket_label)["prob"]
 
 
 # =============================================================
@@ -328,6 +367,7 @@ def format_position(
     forecast_prob: Optional[float],
     bucket_label:  str = "",
     event_date:    Optional[date] = None,
+    forecast_data: Optional[dict] = None,
 ) -> str:
     """Format a single position as a Telegram message block."""
 
@@ -360,6 +400,27 @@ def format_position(
         lines.append(f"Holding: {holding_label} | Bucket: `{bucket_label}` | Expires: {end_date}")
     else:
         lines.append(f"Holding: {holding_label} | Expires: {end_date}")
+
+    # ── Temperature line ──────────────────────────────────────
+    if forecast_data:
+        wu_temp          = forecast_data.get("wu_temp")
+        om_temp          = forecast_data.get("om_temp")
+        vc_temp          = forecast_data.get("vc_temp")
+        noaa_temp        = forecast_data.get("noaa_temp")
+        avg_forecast_temp = forecast_data.get("avg_forecast_temp")
+        unit_sym         = forecast_data.get("unit_sym", "°F")
+
+        temp_parts = []
+        if wu_temp   is not None: temp_parts.append(f"🌡️ {wu_temp:.0f}")
+        if om_temp   is not None: temp_parts.append(f"🌤️ {om_temp:.0f}")
+        if vc_temp   is not None: temp_parts.append(f"🌍 {vc_temp:.0f}")
+        if noaa_temp is not None: temp_parts.append(f"🇺🇸 {noaa_temp:.0f}")
+
+        if temp_parts:
+            temp_line = "  ".join(temp_parts) + unit_sym
+            if avg_forecast_temp is not None:
+                temp_line += f"  →  Avg: *{avg_forecast_temp:.0f}{unit_sym}*"
+            lines.append(temp_line)
 
     price_line = f"Entry: {round(avg_price*100)}% → Now: {round(cur_price*100)}%"
     if forecast_prob is not None:
@@ -413,9 +474,10 @@ def run_portfolio_check() -> list[dict]:
         total_pnl  += float(pos.get("cashPnl") or 0)
         total_init += float(pos.get("initialValue") or 0)
 
-        forecast_prob = None
-        bucket_label  = ""
-        event_url     = None
+        forecast_prob  = None
+        forecast_data  = None
+        bucket_label   = ""
+        event_url      = None
 
         info = parse_position_title(title, end_date)
         if info:
@@ -423,11 +485,12 @@ def run_portfolio_check() -> list[dict]:
             event_date   = info["event_date"]
             bucket_label = info["bucket_label"]
             print(f"    🔍 Forecasting {city_slug} on {event_date} for '{bucket_label}'...")
-            forecast_prob = get_forecast_prob_for_bucket(city_slug, event_date, bucket_label)
+            forecast_data = get_forecast_data_for_bucket(city_slug, event_date, bucket_label)
+            forecast_prob = forecast_data["prob"]
             event_url     = get_event_url(city_slug, event_date)
 
         event_date_obj = info["event_date"] if info else None
-        text = format_position(pos, forecast_prob, bucket_label, event_date_obj)
+        text = format_position(pos, forecast_prob, bucket_label, event_date_obj, forecast_data)
         results.append({"text": text, "url": event_url})
 
     # Summary footer (no URL)
