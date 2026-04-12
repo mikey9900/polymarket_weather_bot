@@ -238,25 +238,39 @@ def get_recommendation(
     avg_price:     float,
     cur_price:     float,
     forecast_prob: Optional[float],
+    event_date:    Optional[date] = None,
 ) -> str:
     """
     Generate a trading recommendation based on current forecast vs position.
 
-    Logic:
-        - Edge = how much the forecast still favors your direction
-        - Positive edge = forecast still backs you → hold or buy more
-        - Negative edge = forecast has moved against you → consider selling
+    For YES positions: compare forecast YES prob vs current YES token price.
+    For NO positions:  compare forecast NO prob (1 - forecast) vs current NO token price.
+
+    If market expires today or is past: market price reflects real observations,
+    not forecast models — flag as resolving instead of recommending trades.
     """
+    today = date.today()
+
+    # Markets expiring today or already past — don't recommend trades
+    if event_date is not None:
+        if event_date < today:
+            return "🔴 EXPIRED — awaiting redemption"
+        if event_date == today:
+            return "⏰ RESOLVING TODAY — market price is now ground truth"
+
     if forecast_prob is None:
         return "❓ No forecast available"
 
     holding_yes = outcome.lower() == "yes"
 
     if holding_yes:
+        # Edge = how much forecast (YES prob) exceeds current YES market price
         edge = forecast_prob - cur_price
     else:
-        # Holding NO: you win if market falls, so you want forecast_prob low
-        edge = cur_price - forecast_prob
+        # Holding NO tokens: curPrice IS the NO token price
+        # Edge = how much forecast (NO prob) exceeds current NO token price
+        forecast_no_prob = 1.0 - forecast_prob
+        edge = forecast_no_prob - cur_price
 
     if edge >= 0.20:
         return "📈 BUY MORE — strong edge remains"
@@ -280,6 +294,7 @@ def format_position(
     position:      dict,
     forecast_prob: Optional[float],
     bucket_label:  str = "",
+    event_date:    Optional[date] = None,
 ) -> str:
     """Format a single position as a Telegram message block."""
 
@@ -297,7 +312,7 @@ def format_position(
     pnl_emoji = "📈" if cash_pnl >= 0 else "📉"
     pnl_sign  = "+" if cash_pnl >= 0 else ""
 
-    rec = get_recommendation(outcome, avg_price, cur_price, forecast_prob)
+    rec = get_recommendation(outcome, avg_price, cur_price, forecast_prob, event_date)
 
     lines = [f"*{title}*"]
     if bucket_label:
@@ -366,7 +381,8 @@ def run_portfolio_check() -> list[str]:
             print(f"    🔍 Forecasting {city_slug} on {event_date} for '{bucket_label}'...")
             forecast_prob = get_forecast_prob_for_bucket(city_slug, event_date, bucket_label)
 
-        messages.append(format_position(pos, forecast_prob, bucket_label))
+        event_date_obj = info["event_date"] if info else None
+        messages.append(format_position(pos, forecast_prob, bucket_label, event_date_obj))
 
     # Summary footer
     pnl_sign  = "+" if total_pnl >= 0 else ""
