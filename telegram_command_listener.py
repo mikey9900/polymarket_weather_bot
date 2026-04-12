@@ -151,7 +151,7 @@ def send_command_footer():
     """
     keyboard = [
         [
-            {"text": "🔍 Scan",      "callback_data": "cmd:scan"},
+            {"text": "🌡️ Temp",      "callback_data": "cmd:scan"},
             {"text": "💧 Precip",    "callback_data": "cmd:precip"},
             {"text": "📊 Portfolio", "callback_data": "cmd:portfolio"},
         ],
