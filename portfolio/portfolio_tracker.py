@@ -435,3 +435,37 @@ def run_portfolio_check() -> list[dict]:
     results.append({"text": "\n".join(footer_lines), "url": None})
 
     return results
+
+
+# =============================================================
+# BACKGROUND AUTO-TRACK (silent — no Telegram messages)
+# =============================================================
+
+def run_portfolio_auto_track():
+    """
+    Silently fetch open positions and auto-mark matching tracked edges as bought.
+    Called by background loop every 30 minutes. Sends no Telegram messages.
+    """
+    from tracking.scan_tracker import auto_mark_bought
+    try:
+        positions = fetch_positions()
+    except Exception as e:
+        print(f"    ⚠️  Portfolio auto-track fetch failed: {e}")
+        return
+
+    weather_positions = [p for p in positions if is_weather_market(p)]
+    for pos in weather_positions:
+        title     = pos.get("title", "")
+        end_date  = pos.get("endDate", "")
+        outcome   = pos.get("outcome", "")
+        cur_price = float(pos.get("curPrice") or 0)
+
+        info = parse_position_title(title, end_date)
+        if info and outcome:
+            auto_mark_bought(
+                city_slug    = info["city_slug"],
+                event_date   = info["event_date"],
+                bucket_label = info["bucket_label"],
+                outcome      = outcome,
+                market_prob  = cur_price,
+            )

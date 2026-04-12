@@ -22,8 +22,8 @@ import threading
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from run_scanner import run_weather_scan
-from portfolio.portfolio_tracker import run_portfolio_check
-from tracking.scan_tracker import get_stats, log_trade
+from portfolio.portfolio_tracker import run_portfolio_check, run_portfolio_auto_track
+from tracking.scan_tracker import get_stats
 from alerts.scan_cache import get_scan, get_edge
 from alerts.telegram_alerts import send_with_keyboard, answer_callback
 from logic.discrepancy_logic import format_discrepancy_message
@@ -32,8 +32,8 @@ from logic.discrepancy_logic import format_discrepancy_message
 # CONFIG
 # =============================================================
 
-AUTO_SCAN_HOURS = 4  # how often to auto-scan (change this as needed)
-SCAN_LIMIT = 300     # scan all possible events every time
+SCAN_LIMIT = 300              # scan all possible events every time
+PORTFOLIO_AUTO_MINUTES = 30   # how often to silently check portfolio + auto-mark bought
 
 # =============================================================
 # SETUP
@@ -53,8 +53,16 @@ if not BOT_TOKEN or not CHAT_ID:
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+def _next_even_hour() -> datetime:
+    """Return the next even-numbered clock hour (0, 2, 4, ..., 22)."""
+    candidate = datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    if candidate.hour % 2 != 0:
+        candidate += timedelta(hours=1)
+    return candidate
+
+
 # Track when the next auto-scan is scheduled
-next_auto_scan = datetime.now() + timedelta(hours=AUTO_SCAN_HOURS)
+next_auto_scan = _next_even_hour()
 
 
 # =============================================================
@@ -89,17 +97,14 @@ def _edge_url(d: dict) -> str:
 
 
 def _send_edge_with_buttons(d: dict, scan_id: str, index: int):
-    """Send a single edge message with Mark Bought + View on Polymarket buttons."""
+    """Send a single edge message with a View on Polymarket button."""
     text = format_discrepancy_message(d)
     url  = _edge_url(d)
 
-    keyboard = [[
-        {"text": "💰 Mark Bought", "callback_data": f"b:{scan_id}:{index}"},
-    ]]
     if url:
-        keyboard[0].append({"text": "📊 View →", "url": url})
-
-    send_with_keyboard(text, keyboard)
+        send_with_keyboard(text, [[{"text": "📊 View →", "url": url}]])
+    else:
+        send_message(text)
 
 
 def _handle_filter(scan_id: str, filt: str):
@@ -110,17 +115,14 @@ def _handle_filter(scan_id: str, filt: str):
         return
 
     if filt == "3p":
-        subset = [(i, d) for i, d in enumerate(edges) if d.get("source_count", 1) >= 3]
-        label  = "🔥 3+ Sources Agree"
+        subset = [(i, d) for i, d in enumerate(edges) if d.get("source_count", 1) >= 3 and d.get("edge_size") == "large"]
+        label  = "🔥 3+ Sources Agree (20%+)"
     elif filt == "2a":
-        subset = [(i, d) for i, d in enumerate(edges) if d.get("source_count", 1) == 2]
-        label  = "✅ 2 Sources Agree"
+        subset = [(i, d) for i, d in enumerate(edges) if d.get("source_count", 1) == 2 and d.get("edge_size") == "large"]
+        label  = "✅ 2 Sources Agree (20%+)"
     elif filt == "1s":
-        subset = [(i, d) for i, d in enumerate(edges) if d.get("source_count", 1) == 1]
-        label  = "🟡 Single Source"
-    elif filt == "lg":
-        subset = [(i, d) for i, d in enumerate(edges) if d.get("edge_size") == "large"]
-        label  = "🔴 Large Edges (20%+)"
+        subset = [(i, d) for i, d in enumerate(edges) if d.get("source_count", 1) == 1 and d.get("edge_size") == "large"]
+        label  = "🟡 Single Source (20%+)"
     else:
         send_message(f"❓ Unknown filter: {filt}")
         return
@@ -132,11 +134,6 @@ def _handle_filter(scan_id: str, filt: str):
     send_message(f"{label} — {len(subset)} edge(s)")
     for index, d in subset:
         _send_edge_with_buttons(d, scan_id, index)
-
-
-def _handle_buy(scan_id: str, edge_index: int):
-    """Log a trade when user clicks Mark Bought."""
-    log_trade(scan_id, edge_index)
 
 
 # =============================================================
@@ -177,15 +174,28 @@ def run_scan_with_lock(triggered_by: str = "manual"):
 
 def auto_scan_loop():
     """
-    Runs in a background thread. Triggers a scan every AUTO_SCAN_HOURS hours.
+    Runs in a background thread. Triggers a scan at every even clock hour (0, 2, 4, ..., 22).
     """
     global next_auto_scan
     while True:
         now = datetime.now()
         if now >= next_auto_scan:
-            next_auto_scan = now + timedelta(hours=AUTO_SCAN_HOURS)
+            next_auto_scan = _next_even_hour()
             run_scan_with_lock(triggered_by="auto")
         time.sleep(60)  # check every minute
+
+
+def portfolio_auto_loop():
+    """
+    Runs in a background thread. Silently checks portfolio every 30 minutes
+    and auto-marks any open positions as bought in the tracking file.
+    """
+    while True:
+        time.sleep(PORTFOLIO_AUTO_MINUTES * 60)
+        try:
+            run_portfolio_auto_track()
+        except Exception as e:
+            print(f"    ⚠️  Portfolio auto-track failed: {e}")
 
 
 # =============================================================
@@ -196,12 +206,13 @@ def main():
     global next_auto_scan
     print("✅ Telegram listener started — waiting for commands...")
 
-    # Start the auto-scan background thread
+    # Start background threads
     threading.Thread(target=auto_scan_loop, daemon=True).start()
+    threading.Thread(target=portfolio_auto_loop, daemon=True).start()
 
     send_message(
         f"✅ Weather scanner bot online\n\n"
-        f"Auto-scan every {AUTO_SCAN_HOURS}h\n"
+        f"Auto-scan at even hours (0, 2, 4 ... 22)\n"
         f"Next auto-scan: {next_auto_scan.strftime('%H:%M')}\n\n"
         "Commands:\n"
         "/scan       – run a full scan now\n"
@@ -231,11 +242,6 @@ def main():
                         threading.Thread(
                             target=_handle_filter, args=(scan_id, filt), daemon=True
                         ).start()
-
-                    elif cb_data.startswith("b:"):
-                        _, scan_id, idx_str = cb_data.split(":", 2)
-                        answer_callback(cb_id, "✅ Marked as bought!")
-                        _handle_buy(scan_id, int(idx_str))
 
                     else:
                         answer_callback(cb_id)

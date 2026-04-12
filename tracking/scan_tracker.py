@@ -97,8 +97,28 @@ def log_edge(d: dict):
 
 
 # =============================================================
-# TRADE LOGGING (user clicked "Mark Bought" button)
+# TRADE LOGGING
 # =============================================================
+
+def auto_mark_bought(city_slug: str, event_date, bucket_label: str, outcome: str, market_prob: float):
+    """
+    Automatically mark an edge as bought when a matching portfolio position is detected.
+    Called by the background portfolio scanner every 30 minutes.
+    Only stamps entries that haven't been marked yet.
+    """
+    edges    = _load()
+    entry_id = f"{city_slug}_{event_date}_{bucket_label}_{outcome.upper()}"
+    buy_time = datetime.now().isoformat(timespec="seconds")
+
+    for e in edges:
+        if e.get("id") == entry_id and not e.get("bought"):
+            e["bought"]    = True
+            e["buy_price"] = round(float(market_prob), 3)
+            e["buy_time"]  = buy_time
+            _save(edges)
+            print(f"    💰 Auto-marked bought: {entry_id}")
+            return
+
 
 def log_trade(scan_id: str, edge_index: int):
     """

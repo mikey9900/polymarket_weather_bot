@@ -220,21 +220,17 @@ def run_weather_scan(limit: int = 300):
     # Cache the full list — buttons reference this scan_id
     scan_id = store_scan(all_discrepancies)
 
-    s3p   = sum(1 for d in all_discrepancies if d.get("source_count", 1) >= 3)
-    s2a   = sum(1 for d in all_discrepancies if d.get("source_count", 1) == 2)
-    s1    = sum(1 for d in all_discrepancies if d.get("source_count", 1) == 1)
-    large = sum(1 for d in all_discrepancies if d["edge_size"] == "large")
+    s3p = sum(1 for d in all_discrepancies if d.get("source_count", 1) >= 3 and d["edge_size"] == "large")
+    s2a = sum(1 for d in all_discrepancies if d.get("source_count", 1) == 2 and d["edge_size"] == "large")
+    s1  = sum(1 for d in all_discrepancies if d.get("source_count", 1) == 1 and d["edge_size"] == "large")
 
     summary_text = summarize_discrepancies(all_discrepancies)
 
     keyboard = [
         [
-            {"text": f"🔥 3+ Agree ({s3p})",   "callback_data": f"f:{scan_id}:3p"},
-            {"text": f"✅ 2 Agree ({s2a})",     "callback_data": f"f:{scan_id}:2a"},
-        ],
-        [
-            {"text": f"🟡 1 Source ({s1})",     "callback_data": f"f:{scan_id}:1s"},
-            {"text": f"🔴 20%+ Edge ({large})", "callback_data": f"f:{scan_id}:lg"},
+            {"text": f"🔥 3+ Agree ({s3p})",  "callback_data": f"f:{scan_id}:3p"},
+            {"text": f"✅ 2 Agree ({s2a})",    "callback_data": f"f:{scan_id}:2a"},
+            {"text": f"🟡 1 Source ({s1})",    "callback_data": f"f:{scan_id}:1s"},
         ],
     ]
 
