@@ -2,7 +2,23 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:docs.polymarket.com)",
-      "WebFetch(domain:gist.github.com)"
+      "WebFetch(domain:gist.github.com)",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100&tag=weather\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100&keyword=rain\")",
+      "Bash(python3 -c ':*)",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100&keyword=snow\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100&keyword=precipitation\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100&keyword=temperature\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&tag=weather\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100&q=rain\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100&q=snow\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100&q=temperature\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&q=temperature\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100&search=temperature\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/tags\")",
+      "Bash(dir \"C:\\\\Users\\\\micha\\\\polymarket_weather_bot\\\\scanner\")",
+      "Bash(dir \"C:\\\\Users\\\\micha\\\\polymarket_weather_bot\\\\forecast\")"
     ]
   }
 }

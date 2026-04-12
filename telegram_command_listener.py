@@ -22,6 +22,7 @@ import threading
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from run_scanner import run_weather_scan
+from run_precipitation_scanner import run_precipitation_scan
 from portfolio.portfolio_tracker import run_portfolio_check, run_portfolio_auto_track
 from tracking.scan_tracker import get_stats
 from alerts.scan_cache import get_scan, get_edge, get_latest_scan_id
@@ -151,7 +152,10 @@ def send_command_footer():
     keyboard = [
         [
             {"text": "🔍 Scan",      "callback_data": "cmd:scan"},
+            {"text": "💧 Precip",    "callback_data": "cmd:precip"},
             {"text": "📊 Portfolio", "callback_data": "cmd:portfolio"},
+        ],
+        [
             {"text": "📈 Stats",     "callback_data": "cmd:stats"},
             {"text": "🔄 Status",    "callback_data": "cmd:status"},
         ],
@@ -190,6 +194,38 @@ def _run_portfolio():
         send_command_footer()
     except Exception as e:
         send_message(f"❌ Portfolio check failed:\n{e}")
+        import traceback
+        traceback.print_exc()
+
+
+# =============================================================
+# PRECIPITATION RUNNER
+# =============================================================
+
+def _run_precip():
+    try:
+        send_message("💧 Checking precipitation markets…")
+        items = run_precipitation_scan()
+        for item in items:
+            msg     = item["text"]
+            url     = item.get("url")
+            scan_id = item.get("scan_id")
+            s2a, s1 = item.get("edge_counts", (0, 0))
+
+            if scan_id:
+                # Summary message — add filter buttons
+                keyboard = [[
+                    {"text": f"✅ 2 Agree ({s2a})", "callback_data": f"f:{scan_id}:2a"},
+                    {"text": f"🟡 1 Source ({s1})", "callback_data": f"f:{scan_id}:1s"},
+                ]]
+                send_with_keyboard(msg, keyboard)
+            elif url:
+                send_with_keyboard(msg, [[{"text": "📊 View on Polymarket →", "url": url}]])
+            else:
+                send_message(msg)
+        send_command_footer()
+    except Exception as e:
+        send_message(f"❌ Precipitation scan failed:\n{e}")
         import traceback
         traceback.print_exc()
 
@@ -274,7 +310,8 @@ def main():
         f"Auto-scan at even hours (0, 2, 4 ... 22)\n"
         f"Next auto-scan: {next_auto_scan.strftime('%H:%M')}\n\n"
         "Commands:\n"
-        "/scan       – run a full scan now\n"
+        "/scan       – run a full temperature scan now\n"
+        "/precip     – scan monthly precipitation markets\n"
         "/portfolio  – check open positions + recommendations\n"
         "/stats      – win rate + edge performance tracker\n"
         "/status     – scan status + next auto-scan time"
@@ -309,6 +346,8 @@ def main():
                             run_scan_with_lock(triggered_by="manual")
                         elif cmd == "portfolio":
                             threading.Thread(target=_run_portfolio, daemon=True).start()
+                        elif cmd == "precip":
+                            threading.Thread(target=_run_precip, daemon=True).start()
                         elif cmd == "stats":
                             try:
                                 send_message(get_stats())
@@ -342,6 +381,9 @@ def main():
                 elif text == "/portfolio":
                     threading.Thread(target=_run_portfolio, daemon=True).start()
 
+                elif text == "/precip":
+                    threading.Thread(target=_run_precip, daemon=True).start()
+
                 elif text == "/stats":
                     try:
                         send_message(get_stats())
@@ -363,7 +405,7 @@ def main():
                     if text.startswith("/"):
                         send_message(
                             f"❓ Unknown command: {text}\n\n"
-                            "Try:\n/scan\n/portfolio\n/stats\n/status"
+                            "Try:\n/scan\n/precip\n/portfolio\n/stats\n/status"
                         )
 
             time.sleep(2)
