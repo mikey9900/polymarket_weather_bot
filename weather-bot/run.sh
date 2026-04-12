@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-REPO="https://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@github.com/mikey9900/polymarket_weather_bot.git"
+REPO="https://github.com/mikey9900/polymarket_weather_bot.git"
 BOT_DIR="/app/bot"
 
 if [ -d "$BOT_DIR/.git" ]; then
