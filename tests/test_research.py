@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -9,19 +11,30 @@ from weather_bot.models import ForecastSnapshot, WeatherSignal
 from weather_bot.paths import DEFAULT_CONFIG_TEMPLATE_PATH
 from weather_bot.research.artifacts import build_artifacts
 from weather_bot.research.runtime import ResearchSnapshotProvider
-from weather_bot.research.tuner import propose_tuning
+from weather_bot.research.tuner import promote_candidate, propose_tuning
 from weather_bot.strategy import WeatherStrategyEngine
 from weather_bot.tracker import WeatherTracker
 
 
 def _write_config(tmp_path: Path) -> Path:
     payload = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    payload["strategy"]["temperature"]["max_source_age_hours"] = 12.0
     config_path = tmp_path / "active_config.yaml"
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     return config_path
 
 
-def _signal(key: str, *, score: float, liquidity: float) -> WeatherSignal:
+def _signal(
+    key: str,
+    *,
+    score: float,
+    liquidity: float,
+    edge_abs: float,
+    source_count: int,
+    source_dispersion_pct: float,
+    source_age_hours: float,
+) -> WeatherSignal:
+    created_at = (datetime.now(timezone.utc) - timedelta(hours=source_age_hours)).isoformat()
     return WeatherSignal(
         signal_key=key,
         market_type="temperature",
@@ -34,14 +47,14 @@ def _signal(key: str, *, score: float, liquidity: float) -> WeatherSignal:
         direction="YES",
         market_prob=0.25,
         forecast_prob=0.75,
-        edge=0.50,
-        edge_abs=0.50,
-        edge_size="large",
-        confidence="confirmed",
-        source_count=3,
+        edge=edge_abs,
+        edge_abs=edge_abs,
+        edge_size="large" if edge_abs >= 0.2 else "small",
+        confidence="confirmed" if source_count >= 2 else "om_only",
+        source_count=source_count,
         liquidity=liquidity,
-        time_to_resolution_s=4 * 3600.0,
-        source_dispersion_pct=0.02,
+        time_to_resolution_s=12 * 3600.0,
+        source_dispersion_pct=source_dispersion_pct,
         score=score,
         forecast_snapshot=ForecastSnapshot(
             market_type="temperature",
@@ -53,27 +66,37 @@ def _signal(key: str, *, score: float, liquidity: float) -> WeatherSignal:
             source_probabilities={"openmeteo": 0.8, "visual_crossing": 0.79},
         ),
         raw_payload={"event_title": "Highest temperature in NYC on April 25", "label": "70-71F", "direction": "YES"},
+        created_at=created_at,
     )
 
 
-def test_research_artifacts_and_tuning(tmp_path: Path):
+def test_research_artifacts_tuning_and_promotion(tmp_path: Path):
     config_path = _write_config(tmp_path)
     config = load_config(config_path)
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
-    tracker.ensure_paper_capital(2000.0)
+    tracker.ensure_paper_capital(4000.0)
     strategy = WeatherStrategyEngine(config, tracker)
 
-    for index in range(8):
-        signal = _signal(f"sig-{index}", score=0.65 + index * 0.01, liquidity=100 + index * 10)
+    winners = [
+        _signal(f"win-{index}", score=0.72 + index * 0.01, liquidity=220 + index * 20, edge_abs=0.55, source_count=3, source_dispersion_pct=0.02, source_age_hours=0.5)
+        for index in range(5)
+    ]
+    losers = [
+        _signal(f"loss-{index}", score=0.80 + index * 0.01, liquidity=60 + index * 5, edge_abs=0.48, source_count=2, source_dispersion_pct=0.14, source_age_hours=8.0)
+        for index in range(5)
+    ]
+
+    for signal in winners + losers:
         result = strategy.process_signals([signal], auto_trade_enabled=True)[0]
-        tracker.settle_market(signal.market_slug, "YES" if index < 5 else "NO")
         assert result.position is not None
+        tracker.settle_market(signal.market_slug, "YES" if signal.signal_key.startswith("win-") else "NO")
 
     artifact_result = build_artifacts(
         tracker_db=tmp_path / "weatherbot.db",
         policy_path=tmp_path / "runtime_policy.json",
         report_json_path=tmp_path / "research_report.json",
         report_md_path=tmp_path / "research_report.md",
+        bundle_path=tmp_path / "latest_bundle.json",
         warehouse_path=tmp_path / "warehouse.duckdb",
         lookback_days=365,
     )
@@ -84,13 +107,55 @@ def test_research_artifacts_and_tuning(tmp_path: Path):
         report_json_path=tmp_path / "tuner_report.json",
         report_md_path=tmp_path / "tuner_report.md",
         patch_path=tmp_path / "tuner_patch.diff",
+        artifact_overrides={
+            "policy_path": tmp_path / "runtime_policy.json",
+            "report_json_path": tmp_path / "research_report.json",
+            "report_md_path": tmp_path / "research_report.md",
+            "bundle_path": tmp_path / "latest_bundle.json",
+            "warehouse_path": tmp_path / "warehouse.duckdb",
+            "lookback_days": 365,
+        },
     )
     runtime_provider = ResearchSnapshotProvider(tmp_path / "runtime_policy.json")
-    adjustment = runtime_provider.adjust_signal(_signal("probe", score=0.8, liquidity=150.0))
+    adjustment = runtime_provider.adjust_signal(
+        _signal(
+            "probe",
+            score=0.84,
+            liquidity=70.0,
+            edge_abs=0.46,
+            source_count=2,
+            source_dispersion_pct=0.13,
+            source_age_hours=10.0,
+        )
+    )
+
+    policy_payload = json.loads((tmp_path / "runtime_policy.json").read_text(encoding="utf-8"))
+    bundle_payload = json.loads((tmp_path / "latest_bundle.json").read_text(encoding="utf-8"))
 
     assert Path(artifact_result["policy_path"]).exists()
-    assert Path(tuning_result["artifact_result"]["report_json_path"]).exists()
+    assert Path(artifact_result["bundle_path"]).exists()
+    assert artifact_result["warehouse"]["ok"] is True
+    assert artifact_result["warehouse"]["resolved_outcomes"] == 10
+    assert policy_payload["dispersion_features"]
+    assert policy_payload["staleness_features"]
+    assert bundle_payload["summary"]["outcome_count"] == 10
     assert adjustment["cluster_id"]
+    assert adjustment["score_adjustment"] < 0
+    assert adjustment["feature_keys"]["staleness"] == "aging"
+    assert tuning_result["candidate_status"] == "ready"
+    assert any(change["path"] == "strategy.temperature.max_source_dispersion_pct" for change in tuning_result["changes"])
+    assert any(change["path"] == "strategy.temperature.max_source_age_hours" for change in tuning_result["changes"])
+
+    promote_result = promote_candidate(
+        config_path=config_path,
+        tuner_state_path=tmp_path / "tuner_state.json",
+        receipt_path=tmp_path / "last_apply_receipt.json",
+    )
+    active_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    assert promote_result["ok"] is True
+    assert promote_result["receipt"]["changed_paths"]
+    assert float(active_config["strategy"]["temperature"]["max_source_dispersion_pct"]) < 0.18
 
 
 def test_research_warehouse_optional_dependency(tmp_path: Path):

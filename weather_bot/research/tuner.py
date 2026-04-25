@@ -28,6 +28,9 @@ SAFE_TUNER_PATHS = {
     "strategy.temperature.min_score",
     "strategy.temperature.min_edge_abs",
     "strategy.temperature.min_liquidity",
+    "strategy.temperature.min_source_count",
+    "strategy.temperature.max_source_dispersion_pct",
+    "strategy.temperature.max_source_age_hours",
 }
 
 
@@ -39,6 +42,7 @@ def propose_tuning(
     report_json_path: str | Path = TUNER_REPORT_JSON_PATH,
     report_md_path: str | Path = TUNER_REPORT_MD_PATH,
     patch_path: str | Path = TUNER_ACTIVE_PATCH_PATH,
+    artifact_overrides: dict[str, str | Path] | None = None,
 ) -> dict[str, Any]:
     config_file = Path(config_path)
     current_config = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
@@ -73,7 +77,8 @@ def propose_tuning(
         encoding="utf-8",
     )
 
-    artifact_result = build_artifacts(tracker_db=tracker_path)
+    artifact_kwargs = dict(artifact_overrides or {})
+    artifact_result = build_artifacts(tracker_db=tracker_path, **artifact_kwargs)
     report = {
         "generated_at": generated_at.isoformat(),
         "candidate_id": candidate_id if candidate_path else None,
@@ -97,6 +102,7 @@ def propose_tuning(
             "candidate_path": str(candidate_path) if candidate_path else "",
             "generated_at": generated_at.isoformat(),
             "change_count": len(changes),
+            "changed_paths": [change["path"] for change in changes],
         },
     }
     Path(tuner_state_path).write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
@@ -108,9 +114,11 @@ def promote_candidate(
     candidate_path: str | Path | None = None,
     config_path: str | Path = ACTIVE_CONFIG_PATH,
     tuner_state_path: str | Path = TUNER_STATE_PATH,
+    receipt_path: str | Path = APPROVED_CONFIG_RECEIPT_PATH,
 ) -> dict[str, Any]:
     state = _load_json(Path(tuner_state_path), default={})
-    candidate_file = Path(candidate_path or (state.get("latest_candidate") or {}).get("candidate_path") or "")
+    latest_candidate = dict(state.get("latest_candidate") or {})
+    candidate_file = Path(candidate_path or latest_candidate.get("candidate_path") or "")
     if not candidate_file.exists():
         return {"ok": False, "status": 404, "message": "No candidate config is available to promote."}
     config_file = Path(config_path)
@@ -123,16 +131,20 @@ def promote_candidate(
     config_file.write_text(candidate_file.read_text(encoding="utf-8"), encoding="utf-8")
     receipt = {
         "applied_at": datetime.now(timezone.utc).isoformat(),
+        "candidate_id": latest_candidate.get("candidate_id", ""),
         "candidate_path": str(candidate_file),
         "backup_path": str(backup_path),
+        "changed_paths": list(latest_candidate.get("changed_paths") or []),
     }
-    APPROVED_CONFIG_RECEIPT_PATH.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
+    receipt_file = Path(receipt_path)
+    receipt_file.parent.mkdir(parents=True, exist_ok=True)
+    receipt_file.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
     Path(tuner_state_path).write_text(
         json.dumps(
             {
                 "status": "promoted",
                 "latest_candidate": {
-                    **(state.get("latest_candidate") or {}),
+                    **latest_candidate,
                     "candidate_path": str(candidate_file),
                     "promoted_at": receipt["applied_at"],
                 },
@@ -173,9 +185,21 @@ def _load_metrics(db_path: Path) -> dict[str, Any]:
                 pp.realized_pnl,
                 COALESCE(s.score, 0.0) AS score,
                 COALESCE(s.edge_abs, 0.0) AS edge_abs,
-                COALESCE(s.liquidity, 0.0) AS liquidity
+                COALESCE(s.liquidity, 0.0) AS liquidity,
+                COALESCE(s.source_count, 1) AS source_count,
+                COALESCE(s.source_dispersion_pct, 0.0) AS source_dispersion_pct,
+                d.metadata_json
             FROM paper_positions pp
             LEFT JOIN signals s ON s.id = pp.signal_id
+            LEFT JOIN (
+                SELECT d1.*
+                FROM decisions d1
+                JOIN (
+                    SELECT signal_id, MAX(id) AS latest_id
+                    FROM decisions
+                    GROUP BY signal_id
+                ) latest ON latest.latest_id = d1.id
+            ) d ON d.signal_id = pp.signal_id
             WHERE pp.status = 'resolved'
               AND pp.market_type = 'temperature'
             """
@@ -185,17 +209,38 @@ def _load_metrics(db_path: Path) -> dict[str, Any]:
     sample_size = len(rows)
     if not rows:
         return {"sample_size": 0}
-    wins = [row for row in rows if float(row["realized_pnl"] or 0.0) > 0]
-    losses = [row for row in rows if float(row["realized_pnl"] or 0.0) < 0]
+
+    enriched = []
+    for row in rows:
+        metadata = _load_json_blob(row["metadata_json"])
+        enriched.append(
+            {
+                "realized_pnl": float(row["realized_pnl"] or 0.0),
+                "score": float(row["score"] or 0.0),
+                "edge_abs": float(row["edge_abs"] or 0.0),
+                "liquidity": float(row["liquidity"] or 0.0),
+                "source_count": int(row["source_count"] or 1),
+                "source_dispersion_pct": float(row["source_dispersion_pct"] or 0.0),
+                "source_age_hours": _float_or_zero(metadata.get("source_age_hours")),
+            }
+        )
+    wins = [row for row in enriched if row["realized_pnl"] > 0]
+    losses = [row for row in enriched if row["realized_pnl"] < 0]
     return {
         "sample_size": sample_size,
         "win_rate": round(len(wins) / sample_size * 100.0, 2),
-        "avg_score_winner": _avg([float(row["score"] or 0.0) for row in wins]),
-        "avg_score_loser": _avg([float(row["score"] or 0.0) for row in losses]),
-        "avg_edge_winner": _avg([float(row["edge_abs"] or 0.0) for row in wins]),
-        "avg_edge_loser": _avg([float(row["edge_abs"] or 0.0) for row in losses]),
-        "avg_liquidity_winner": _avg([float(row["liquidity"] or 0.0) for row in wins]),
-        "avg_liquidity_loser": _avg([float(row["liquidity"] or 0.0) for row in losses]),
+        "avg_score_winner": _avg([row["score"] for row in wins]),
+        "avg_score_loser": _avg([row["score"] for row in losses]),
+        "avg_edge_winner": _avg([row["edge_abs"] for row in wins]),
+        "avg_edge_loser": _avg([row["edge_abs"] for row in losses]),
+        "avg_liquidity_winner": _avg([row["liquidity"] for row in wins]),
+        "avg_liquidity_loser": _avg([row["liquidity"] for row in losses]),
+        "avg_source_count_winner": _avg([float(row["source_count"]) for row in wins]),
+        "avg_source_count_loser": _avg([float(row["source_count"]) for row in losses]),
+        "avg_dispersion_winner": _avg([row["source_dispersion_pct"] for row in wins]),
+        "avg_dispersion_loser": _avg([row["source_dispersion_pct"] for row in losses]),
+        "avg_source_age_winner": _avg([row["source_age_hours"] for row in wins]),
+        "avg_source_age_loser": _avg([row["source_age_hours"] for row in losses]),
     }
 
 
@@ -207,6 +252,9 @@ def _recommend_changes(config_payload: dict[str, Any], metrics: dict[str, Any]) 
     current_score = float(_get_path(config_payload, "strategy.temperature.min_score") or 0.62)
     current_edge = float(_get_path(config_payload, "strategy.temperature.min_edge_abs") or 0.12)
     current_liquidity = float(_get_path(config_payload, "strategy.temperature.min_liquidity") or 25.0)
+    current_source_count = int(_get_path(config_payload, "strategy.temperature.min_source_count") or 2)
+    current_dispersion = float(_get_path(config_payload, "strategy.temperature.max_source_dispersion_pct") or 0.18)
+    current_source_age = float(_get_path(config_payload, "strategy.temperature.max_source_age_hours") or 6.0)
 
     win_rate = float(metrics.get("win_rate") or 0.0)
     avg_score_winner = float(metrics.get("avg_score_winner") or current_score)
@@ -215,6 +263,12 @@ def _recommend_changes(config_payload: dict[str, Any], metrics: dict[str, Any]) 
     avg_edge_winner = float(metrics.get("avg_edge_winner") or current_edge)
     avg_liq_loser = float(metrics.get("avg_liquidity_loser") or current_liquidity)
     avg_liq_winner = float(metrics.get("avg_liquidity_winner") or current_liquidity)
+    avg_source_count_winner = float(metrics.get("avg_source_count_winner") or current_source_count)
+    avg_source_count_loser = float(metrics.get("avg_source_count_loser") or current_source_count)
+    avg_dispersion_winner = float(metrics.get("avg_dispersion_winner") or current_dispersion)
+    avg_dispersion_loser = float(metrics.get("avg_dispersion_loser") or current_dispersion)
+    avg_source_age_winner = float(metrics.get("avg_source_age_winner") or current_source_age)
+    avg_source_age_loser = float(metrics.get("avg_source_age_loser") or current_source_age)
 
     recommended_score = current_score
     if win_rate < 50.0 and avg_score_loser >= current_score:
@@ -257,6 +311,49 @@ def _recommend_changes(config_payload: dict[str, Any], metrics: dict[str, Any]) 
             )
         )
 
+    recommended_source_count = current_source_count
+    if avg_source_count_winner > avg_source_count_loser and avg_source_count_winner >= current_source_count + 0.5 and win_rate < 55.0:
+        recommended_source_count = min(4, current_source_count + 1)
+    if recommended_source_count != current_source_count:
+        changes.append(
+            _change(
+                "strategy.temperature.min_source_count",
+                current_source_count,
+                recommended_source_count,
+                f"Winners average {avg_source_count_winner:.2f} agreeing sources versus {avg_source_count_loser:.2f} for losers.",
+            )
+        )
+
+    recommended_dispersion = current_dispersion
+    if avg_dispersion_loser > avg_dispersion_winner + 0.01 and win_rate < 55.0:
+        target = round(max(0.05, min(current_dispersion, (avg_dispersion_winner + avg_dispersion_loser) / 2.0)), 2)
+        if target < current_dispersion:
+            recommended_dispersion = target
+    if recommended_dispersion != current_dispersion:
+        changes.append(
+            _change(
+                "strategy.temperature.max_source_dispersion_pct",
+                current_dispersion,
+                recommended_dispersion,
+                f"Losing trades average {avg_dispersion_loser:.2%} dispersion versus {avg_dispersion_winner:.2%} for winners.",
+            )
+        )
+
+    recommended_source_age = current_source_age
+    if avg_source_age_loser > avg_source_age_winner + 0.5 and win_rate < 55.0:
+        target_age = round(max(1.0, min(current_source_age, avg_source_age_winner + 1.0)), 1)
+        if target_age < current_source_age:
+            recommended_source_age = target_age
+    if recommended_source_age != current_source_age:
+        changes.append(
+            _change(
+                "strategy.temperature.max_source_age_hours",
+                current_source_age,
+                recommended_source_age,
+                f"Losing trades average {avg_source_age_loser:.1f}h source age versus {avg_source_age_winner:.1f}h for winners.",
+            )
+        )
+
     return [change for change in changes if change["path"] in SAFE_TUNER_PATHS]
 
 
@@ -291,6 +388,24 @@ def _load_json(path: Path, *, default: dict[str, Any]) -> dict[str, Any]:
     except (FileNotFoundError, json.JSONDecodeError):
         return default
     return payload if isinstance(payload, dict) else default
+
+
+def _load_json_blob(value: object) -> dict[str, Any]:
+    raw = str(value or "").strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _float_or_zero(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _render_markdown(report: dict[str, Any]) -> str:

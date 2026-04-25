@@ -9,7 +9,16 @@ from typing import Any
 
 from .artifacts import build_artifacts
 from .tuner import promote_candidate, propose_tuning, reject_candidate
-from ..paths import CODEX_LATEST_PATH, CODEX_LOCK_PATH, CODEX_QUEUE_ROOT, CODEX_RUNS_ROOT, CODEX_STATE_PATH, TUNER_STATE_PATH
+from ..paths import (
+    APPROVED_CONFIG_RECEIPT_PATH,
+    CODEX_LATEST_PATH,
+    CODEX_LOCK_PATH,
+    CODEX_QUEUE_ROOT,
+    CODEX_RUNS_ROOT,
+    CODEX_STATE_PATH,
+    RESEARCH_BUNDLE_PATH,
+    TUNER_STATE_PATH,
+)
 
 
 class CodexAutomationManager:
@@ -49,6 +58,8 @@ class CodexAutomationManager:
     def snapshot(self) -> dict[str, Any]:
         state = self.read_state()
         tuner_state = _load_json(Path(TUNER_STATE_PATH), default={"status": "none", "latest_candidate": {}})
+        bundle = _load_json(Path(RESEARCH_BUNDLE_PATH), default={})
+        receipt = _load_json(Path(APPROVED_CONFIG_RECEIPT_PATH), default={})
         return {
             "codex": {
                 "healthy": bool((state.get("runner") or {}).get("healthy", False)),
@@ -56,10 +67,12 @@ class CodexAutomationManager:
                 "queue_depth": self.queue_depth(),
                 "active_run": state.get("active_run"),
                 "last_run": state.get("last_run"),
+                "latest_bundle": bundle,
             },
             "tuner": {
                 "candidate_status": tuner_state.get("status", "none"),
                 "latest_candidate": tuner_state.get("latest_candidate", {}),
+                "approved_receipt": receipt,
             },
         }
 
