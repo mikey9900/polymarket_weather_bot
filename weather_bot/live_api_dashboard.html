@@ -90,11 +90,11 @@
     .trade-stats .stat .lbl{font-size:11px;letter-spacing:.8px;text-transform:uppercase}
     .trade-stats .stat .val{font-size:20px;line-height:1.02}
     .trade-stats .stat .sub{margin-top:4px;min-height:28px;font-size:13px;line-height:1.12;white-space:normal;overflow:visible;text-overflow:clip}
-    .lblrow{display:inline-flex;align-items:center;gap:6px;min-width:0}
-    .tip{position:relative;display:inline-flex;align-items:center;justify-content:center;appearance:none;width:17px;height:17px;padding:0;border:1px solid rgba(67,102,194,.92);border-radius:999px;background:linear-gradient(180deg,rgba(15,26,60,.96),rgba(7,12,28,.98));color:var(--cyan);font:11px/1 "Press Start 2P","VT323",monospace;cursor:help;box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 0 10px rgba(0,240,255,.10)}
-    .tip:hover,.tip:focus-visible{border-color:rgba(0,240,255,.88);color:#dffcff;box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 0 12px rgba(0,240,255,.28);outline:none}
-    .tip:hover:before,.tip:focus-visible:before{content:"";position:absolute;left:50%;top:calc(100% + 2px);transform:translateX(-50%);border:6px solid transparent;border-bottom-color:rgba(42,64,122,.95)}
-    .tip:hover:after,.tip:focus-visible:after{content:attr(data-tip);position:absolute;left:50%;top:calc(100% + 12px);transform:translateX(-50%);z-index:12;width:min(230px,70vw);padding:8px 10px;border:1px solid rgba(67,102,194,.92);border-radius:11px;background:linear-gradient(180deg,rgba(14,23,55,.98),rgba(7,11,24,.99));color:var(--text);font:16px/1.08 "VT323","Courier New",monospace;letter-spacing:0;text-align:left;text-shadow:none;white-space:normal;box-shadow:0 8px 18px rgba(0,0,0,.42),0 0 16px rgba(0,240,255,.12)}
+    .lblrow{display:inline-flex;align-items:center;min-width:0}
+    .metric-tip{position:relative;display:inline-flex;align-items:center;min-width:0;cursor:help;border-bottom:1px dotted rgba(0,240,255,.34);transition:color .12s ease,border-color .12s ease}
+    .metric-tip:hover,.metric-tip:focus-visible{color:var(--cyan);border-bottom-color:rgba(0,240,255,.82);outline:none;text-shadow:0 0 5px rgba(0,240,255,.26)}
+    .metric-tip:hover:before,.metric-tip:focus-visible:before{content:"";position:absolute;left:50%;top:calc(100% + 2px);transform:translateX(-50%);border:6px solid transparent;border-bottom-color:rgba(42,64,122,.95)}
+    .metric-tip:hover:after,.metric-tip:focus-visible:after{content:attr(data-tip);position:absolute;left:50%;top:calc(100% + 12px);transform:translateX(-50%);z-index:12;width:min(230px,70vw);padding:8px 10px;border:1px solid rgba(67,102,194,.92);border-radius:11px;background:linear-gradient(180deg,rgba(14,23,55,.98),rgba(7,11,24,.99));color:var(--text);font:16px/1.08 "VT323","Courier New",monospace;letter-spacing:0;text-align:left;text-shadow:none;white-space:normal;box-shadow:0 8px 18px rgba(0,0,0,.42),0 0 16px rgba(0,240,255,.12)}
     .trade-actions{display:flex;gap:8px}
     .trade-actions .ctl{flex:1;justify-content:center}
     .trade-note{padding:9px 10px;border:1px solid rgba(72,102,183,.74);border-radius:16px;background:linear-gradient(180deg,rgba(15,24,56,.96),rgba(8,13,31,.94));box-shadow:inset 0 1px 0 rgba(111,136,199,.14)}
@@ -110,7 +110,7 @@
     @media (max-width:1240px){.summary{grid-template-columns:repeat(4,minmax(0,1fr))}.controls{grid-template-columns:repeat(3,minmax(0,1fr))}.span-7,.span-5,.span-4{grid-column:span 6}}
     @media (max-width:900px){.controls{grid-template-columns:1fr 1fr}.topbar{flex-direction:column;align-items:flex-start}.meta{justify-content:flex-start}.span-7,.span-5,.span-4{grid-column:span 12}}
     @media (max-width:640px){.summary,.dashboard-grid,.footer{padding-left:8px;padding-right:8px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.controls,.cards,.signals{grid-template-columns:1fr}.brand{font-size:11px}.head{flex-direction:column}.head-actions{justify-content:flex-start}}
-    @media (max-width:520px){.trade-stats{grid-template-columns:1fr}.trade-note-head{flex-direction:column;align-items:flex-start}.tip:hover:before,.tip:focus-visible:before{left:12px;transform:none}.tip:hover:after,.tip:focus-visible:after{left:0;transform:none;width:min(240px,84vw)}}
+    @media (max-width:520px){.trade-stats{grid-template-columns:1fr}.trade-note-head{flex-direction:column;align-items:flex-start}.metric-tip:hover:before,.metric-tip:focus-visible:before{left:12px;transform:none}.metric-tip:hover:after,.metric-tip:focus-visible:after{left:0;transform:none;width:min(240px,84vw)}}
   </style>
 </head>
 <body>
@@ -210,8 +210,7 @@
     const loud=v=>String(v||"").replaceAll("_"," ").trim().toUpperCase();
     const tone=v=>Number(v||0)>0?"good":Number(v||0)<0?"bad":"", yesno=v=>v?"ON":"OFF", badge=(txt,cls="")=>`<span class="badge ${cls}">${esc(txt)}</span>`;
     const read=(l,v,c="")=>`<div class="read"><span class="lbl">${esc(l)}</span><span class="val ${c}">${esc(v)}</span></div>`;
-    const tip=text=>`<button type="button" class="tip" aria-label="${esc(text)}" data-tip="${esc(text)}">?</button>`;
-    const metricLabel=(label,helpText="")=>`<span class="lblrow"><span class="lbl">${esc(label)}</span>${helpText?tip(helpText):""}</span>`;
+    const metricLabel=(label,helpText="")=>`<span class="lblrow">${helpText?`<span class="lbl metric-tip" tabindex="0" aria-label="${esc(`${label}: ${helpText}`)}" data-tip="${esc(helpText)}">${esc(label)}</span>`:`<span class="lbl">${esc(label)}</span>`}</span>`;
     const stat=(l,v,s,c="",opt={})=>`<div class="stat${opt.cls?` ${String(opt.cls)}`:""}"><div class="statline">${metricLabel(l,opt.tip||"")}<span class="val ${c}">${esc(v)}</span></div><span class="sub">${esc(s)}</span></div>`;
     const cells=()=>Array.from(document.querySelectorAll("#dashboard-grid .dashboard-cell")).filter(x=>!x.classList.contains("drag-placeholder"));
     function btn(label,action,value,opt={}){const dis=opt.dis?" disabled":"", actCls=opt.act?" active":"", warn=opt.warn?" warn":"", jsAction=JSON.stringify(String(action||"")), jsValue=value===undefined?"undefined":JSON.stringify(value); return `<button type="button" class="ctl js-control${actCls}${warn}" data-action="${esc(action)}" onclick='act(${jsAction},${jsValue});return false;'${dis}>${esc(label)}</button>`}
