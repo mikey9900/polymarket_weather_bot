@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import yaml
+
+from weather_bot.config import load_config
+from weather_bot.models import ForecastSnapshot, WeatherSignal
+from weather_bot.paths import DEFAULT_CONFIG_TEMPLATE_PATH
+from weather_bot.strategy import WeatherStrategyEngine
+from weather_bot.tracker import WeatherTracker
+
+
+def _write_config(tmp_path: Path) -> Path:
+    payload = yaml.safe_load(DEFAULT_CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    config_path = tmp_path / "active_config.yaml"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return config_path
+
+
+def _make_signal(
+    key: str = "sig-1",
+    *,
+    direction: str = "YES",
+    score: float = 0.8,
+    market_slug: str | None = None,
+    created_at: str | None = None,
+    source_dispersion_pct: float = 0.02,
+) -> WeatherSignal:
+    snapshot = ForecastSnapshot(
+        market_type="temperature",
+        city_slug="nyc",
+        event_date="2026-04-25",
+        unit="F",
+        om_temp=71.0,
+        vc_temp=72.0,
+        source_probabilities={"openmeteo": 0.74, "visual_crossing": 0.76},
+    )
+    return WeatherSignal(
+        signal_key=key,
+        market_type="temperature",
+        event_title="Highest temperature in NYC on April 25",
+        market_slug=market_slug or f"market-{key}",
+        event_slug=f"event-{key}",
+        city_slug="nyc",
+        event_date="2026-04-25",
+        label="70-71F",
+        direction=direction,
+        market_prob=0.3,
+        forecast_prob=0.75,
+        edge=0.45,
+        edge_abs=0.45,
+        edge_size="large",
+        confidence="confirmed",
+        source_count=3,
+        liquidity=500.0,
+        time_to_resolution_s=8 * 3600.0,
+        source_dispersion_pct=source_dispersion_pct,
+        score=score,
+        forecast_snapshot=snapshot,
+        raw_payload={"event_title": "Highest temperature in NYC on April 25", "label": "70-71F", "direction": direction},
+        created_at=created_at or datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def test_tracker_migrates_legacy_edges(tmp_path: Path):
+    legacy_file = tmp_path / "legacy_edges.json"
+    legacy_file.write_text(
+        """
+        [
+          {
+            "id": "legacy-1",
+            "scan_time": "2026-04-20T12:00:00+00:00",
+            "event_title": "Highest temperature in NYC on April 20",
+            "city_slug": "nyc",
+            "event_date": "2026-04-20",
+            "label": "70-71F",
+            "direction": "YES",
+            "confidence": "confirmed",
+            "edge_size": "large",
+            "market_price": 0.40,
+            "edge": 0.20,
+            "liquidity": 200,
+            "event_slug": "legacy-event",
+            "market_slug": "legacy-market",
+            "bought": true,
+            "buy_price": 0.40,
+            "resolved": true,
+            "resolution": "YES"
+          }
+        ]
+        """,
+        encoding="utf-8",
+    )
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    imported = tracker.migrate_legacy_edges(paths=[legacy_file])
+
+    assert imported == 1
+    assert len(tracker.get_recent_signals()) == 1
+    positions = tracker.get_recent_paper_positions()
+    assert len(positions) == 1
+    assert positions[0]["status"] == "resolved"
+
+
+def test_strategy_opens_paper_position(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    result = strategy.process_signals([_make_signal()], auto_trade_enabled=True)[0]
+
+    assert result.decision.accepted is True
+    assert result.position is not None
+    initial, available = tracker.get_paper_capital()
+    assert initial == 1000.0
+    assert available < initial
+
+
+def test_strategy_uses_final_score_after_research_adjustment(tmp_path: Path):
+    class ResearchProvider:
+        @staticmethod
+        def adjust_signal(_signal: WeatherSignal) -> dict:
+            return {"score_adjustment": -0.35}
+
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker, research_provider=ResearchProvider())
+
+    result = strategy.process_signals([_make_signal(score=0.76)], auto_trade_enabled=True)[0]
+
+    assert result.decision.accepted is False
+    assert "Final score" in result.decision.reason
+
+
+def test_strategy_enforces_market_position_cap(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    first = strategy.process_signals([_make_signal(key="cap-1", market_slug="shared-market", direction="YES")], auto_trade_enabled=True)[0]
+    second = strategy.process_signals([_make_signal(key="cap-2", market_slug="shared-market", direction="NO")], auto_trade_enabled=True)[0]
+
+    assert first.position is not None
+    assert second.position is None
+    assert second.decision.accepted is False
+    assert "Maximum paper positions reached for this market." in second.decision.reason
+
+
+def test_strategy_rejects_stale_signal(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    stale_created_at = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+
+    result = strategy.process_signals([_make_signal(key="stale", created_at=stale_created_at)], auto_trade_enabled=True)[0]
+
+    assert result.decision.accepted is False
+    assert "Signal is stale" in result.decision.reason

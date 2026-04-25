@@ -6,8 +6,6 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY . /app
-RUN chmod +x /app/weather-bot/run.sh
+RUN chmod +x /app/weather-codex/run.sh
 
-EXPOSE 8099
-
-CMD ["/app/weather-bot/run.sh"]
+CMD ["/app/weather-codex/run.sh"]

@@ -1,11 +1,44 @@
 name: "Polymarket Weather Bot"
-description: "Scans Polymarket for weather prediction market edges"
-version: "1.5.0"
+description: "Weather-market paper trader with HA ingress, research artifacts, and Telegram backup controls"
+version: "3.0.0"
 slug: "polymarket_weather_bot"
+startup: application
+boot: auto
 init: false
+ingress: true
+ingress_port: 8099
+ingress_stream: true
+panel_icon: mdi:weather-partly-lightning
+panel_title: Weather Bot
 arch:
   - aarch64
   - amd64
   - armv7
 map:
   - config:rw
+  - share:rw
+  - data:rw
+options:
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  wu_api_key: ""
+  visual_crossing_api_key: ""
+  temperature_scan_minutes: 120
+  precipitation_scan_minutes: 360
+  resolution_check_minutes: 15
+  paper_initial_capital: 5000
+  paper_stake_usd: 10
+  dashboard_port: 8099
+  timezone: "America/Edmonton"
+schema:
+  telegram_bot_token: password
+  telegram_chat_id: str
+  wu_api_key: password
+  visual_crossing_api_key: password
+  temperature_scan_minutes: int(15,720)
+  precipitation_scan_minutes: int(30,1440)
+  resolution_check_minutes: int(5,240)
+  paper_initial_capital: float(100,1000000)
+  paper_stake_usd: float(1,10000)
+  dashboard_port: int(1024,65535)
+  timezone: str

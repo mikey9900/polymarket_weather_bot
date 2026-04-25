@@ -27,15 +27,28 @@
 import os
 import requests
 import math
+import json
 from datetime import date
 from typing import Optional, Dict, Tuple
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# API keys from .env
-WU_API_KEY             = os.getenv("WU_API_KEY")
-VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY")
+
+def _ha_option(name: str) -> str:
+    try:
+        with open("/data/options.json", "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get(name) or "").strip()
+
+
+# API keys from .env or HA options
+WU_API_KEY = os.getenv("WU_API_KEY") or _ha_option("wu_api_key")
+VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY") or _ha_option("visual_crossing_api_key")
 
 # -------------------------------------------------------------
 # CITY → WU STATION + COORDINATES + UNIT

@@ -28,13 +28,26 @@ import os
 import math
 import requests
 import calendar
+import json
 from datetime import date, timedelta
 from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
 
-VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY")
+
+def _ha_option(name: str) -> str:
+    try:
+        with open("/data/options.json", "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get(name) or "").strip()
+
+
+VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY") or _ha_option("visual_crossing_api_key")
 
 # Import city coordinates and CDF from the existing forecast engine
 from forecast.forecast_engine import CITY_COORDS, _normal_cdf
