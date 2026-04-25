@@ -7,6 +7,7 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 
 _DASHBOARD_PATH = Path(__file__).with_name("live_api_dashboard.html")
@@ -49,22 +50,24 @@ class LiveApiServer:
                 return
 
             def do_GET(self) -> None:  # noqa: N802
-                if self.path in {"/", "/index.html"}:
+                route = urlsplit(self.path).path
+                if route in {"/", "/index.html"}:
                     self._send_text(render_dashboard_html(), content_type="text/html; charset=utf-8")
                     return
-                if self.path == "/health":
+                if route == "/health":
                     self._send_json({"status": "ok"})
                     return
-                if self.path == "/api/state":
+                if route == "/api/state":
                     self._send_json(dashboard_state.get_state_threadsafe())
                     return
-                if self.path == "/api/history":
+                if route == "/api/history":
                     self._send_json(dashboard_state.get_history_threadsafe())
                     return
                 self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
             def do_POST(self) -> None:  # noqa: N802
-                if self.path != "/api/control":
+                route = urlsplit(self.path).path
+                if route != "/api/control" and not route.startswith("/api/control/"):
                     self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
                     return
                 length = int(self.headers.get("Content-Length", "0") or 0)
@@ -74,6 +77,11 @@ class LiveApiServer:
                 except json.JSONDecodeError:
                     self._send_json({"ok": False, "message": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
                     return
+                if not isinstance(payload, dict):
+                    payload = {}
+                path_action = _control_action_from_path(route)
+                if path_action and not payload.get("action"):
+                    payload["action"] = path_action
                 response = dashboard_state.apply_control_threadsafe(payload)
                 self._send_json(response, status=HTTPStatus(int(response.get("status", 200))))
 
@@ -101,3 +109,10 @@ class LiveApiServer:
                 self.send_header("Expires", "0")
 
         return Handler
+
+
+def _control_action_from_path(path: str) -> str:
+    prefix = "/api/control/"
+    if not path.startswith(prefix):
+        return ""
+    return unquote(path[len(prefix):]).strip().lower()
