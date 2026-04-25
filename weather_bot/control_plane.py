@@ -142,7 +142,7 @@ class ControlPlane:
             return self._record(ControlResult(True, 200, f"Paper capital reset to ${amount:.2f}.", action))
         if action == "set_paper_max_open_positions":
             try:
-                amount = int(request.value)
+                amount = _coerce_int(request.value, keys=("limit", "value", "paper_max_open_positions", "max_open_positions"))
             except (TypeError, ValueError):
                 return self._record(ControlResult(False, 400, "Open-position cap must be numeric.", action))
             limit = self.runtime.set_paper_max_open_positions(amount)
@@ -191,3 +191,19 @@ class ControlPlane:
 
 def _coerce_bool(value: Any) -> bool:
     return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _coerce_int(value: Any, *, keys: tuple[str, ...] = ()) -> int:
+    raw = value
+    if isinstance(raw, dict):
+        for key in keys:
+            if key in raw:
+                raw = raw.get(key)
+                break
+        else:
+            raise ValueError("missing numeric value")
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if raw == "":
+            raise ValueError("empty numeric value")
+    return int(float(raw))

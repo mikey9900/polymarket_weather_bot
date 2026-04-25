@@ -236,6 +236,8 @@ def test_scheduled_interval_seconds_prefers_fast_second_overrides():
     assert _scheduled_interval_seconds(5, 120, minimum_seconds=5) == 5
     assert _scheduled_interval_seconds(0, 15, minimum_seconds=5) == 900
     assert _scheduled_interval_seconds(1, 15, minimum_seconds=5) == 5
+    assert _scheduled_interval_seconds(15, 0, minimum_seconds=10) == 15
+    assert _scheduled_interval_seconds(5, 0, minimum_seconds=10) == 10
 
 
 def test_runtime_processes_queued_scan_and_exports_results(tmp_path: Path):
@@ -303,6 +305,25 @@ def test_control_updates_open_position_cap(tmp_path: Path):
     assert response["state"]["controls"]["paper_max_open_positions"] == 40
     assert runtime.get_status_snapshot()["paper_max_open_positions"] == 40
     assert strategy.paper_max_open_positions == 40
+
+
+def test_control_updates_open_position_cap_from_string_payload(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe(
+        {"action": "set_paper_max_open_positions", "value": {"limit": "60"}}
+    )
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["paper_max_open_positions"] == 60
+    assert runtime.get_status_snapshot()["paper_max_open_positions"] == 60
+    assert strategy.paper_max_open_positions == 60
 
 
 def test_runtime_respects_live_open_position_cap_override(tmp_path: Path):

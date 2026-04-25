@@ -22,7 +22,7 @@ class AppSettings:
     resolution_check_minutes: int
     auto_temperature_scan_seconds: int = 0
     auto_precipitation_scan_seconds: int = 0
-    open_position_review_seconds: int = 30
+    open_position_review_seconds: int = 15
 
 
 @dataclass(frozen=True)
@@ -60,7 +60,7 @@ class PaperSettings:
     fee_bps: float = 50.0
     entry_slippage_bps: float = 15.0
     exit_slippage_bps: float = 15.0
-    mark_stale_after_seconds: int = 45
+    mark_stale_after_seconds: int = 75
 
 
 @dataclass(frozen=True)
@@ -192,7 +192,7 @@ def _load_env_overrides() -> dict[str, Any]:
     if os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES"):
         payload.setdefault("app", {})["resolution_check_minutes"] = int(os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES", "15"))
     if os.getenv("WEATHER_OPEN_POSITION_REVIEW_SECONDS"):
-        payload.setdefault("app", {})["open_position_review_seconds"] = int(os.getenv("WEATHER_OPEN_POSITION_REVIEW_SECONDS", "30"))
+        payload.setdefault("app", {})["open_position_review_seconds"] = int(os.getenv("WEATHER_OPEN_POSITION_REVIEW_SECONDS", "15"))
     return payload
 
 

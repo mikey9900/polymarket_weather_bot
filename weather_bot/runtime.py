@@ -621,12 +621,12 @@ class WeatherRuntime:
         interval_s = _scheduled_interval_seconds(
             self.config.app.open_position_review_seconds,
             0,
-            minimum_seconds=30,
+            minimum_seconds=10,
         )
         while not self._stop_event.wait(interval_s):
             try:
                 state = self.get_status_snapshot()
-                if state.get("scan_in_progress") or int(state.get("scan_queue_depth") or 0) > 0:
+                if state.get("scan_in_progress"):
                     continue
                 if not self.tracker.get_paper_stats().get("open_positions"):
                     continue
