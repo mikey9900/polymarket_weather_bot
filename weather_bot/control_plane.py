@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -206,4 +207,10 @@ def _coerce_int(value: Any, *, keys: tuple[str, ...] = ()) -> int:
         raw = raw.strip()
         if raw == "":
             raise ValueError("empty numeric value")
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                parsed = _coerce_int(json.loads(raw), keys=keys)
+            except Exception as exc:  # pragma: no cover - defensive parsing fallback
+                raise ValueError("invalid numeric value") from exc
+            return parsed
     return int(float(raw))

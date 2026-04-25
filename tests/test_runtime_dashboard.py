@@ -326,6 +326,25 @@ def test_control_updates_open_position_cap_from_string_payload(tmp_path: Path):
     assert strategy.paper_max_open_positions == 60
 
 
+def test_control_updates_open_position_cap_from_stringified_json_payload(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe(
+        {"action": "set_paper_max_open_positions", "value": '{"limit":"70"}'}
+    )
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["paper_max_open_positions"] == 70
+    assert runtime.get_status_snapshot()["paper_max_open_positions"] == 70
+    assert strategy.paper_max_open_positions == 70
+
+
 def test_runtime_respects_live_open_position_cap_override(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
