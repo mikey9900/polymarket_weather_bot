@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import threading
-from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,7 +12,6 @@ from pathlib import Path
 _DASHBOARD_PATH = Path(__file__).with_name("live_api_dashboard.html")
 
 
-@lru_cache(maxsize=1)
 def render_dashboard_html() -> str:
     return _DASHBOARD_PATH.read_text(encoding="utf-8")
 
@@ -84,6 +82,7 @@ class LiveApiServer:
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(payload)))
+                self._send_cache_headers()
                 self.end_headers()
                 self.wfile.write(payload)
 
@@ -92,7 +91,13 @@ class LiveApiServer:
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
+                self._send_cache_headers()
                 self.end_headers()
                 self.wfile.write(data)
+
+            def _send_cache_headers(self) -> None:
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
 
         return Handler
