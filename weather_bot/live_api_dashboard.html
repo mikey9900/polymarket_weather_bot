@@ -77,6 +77,12 @@
     .prompt-actions{display:flex;flex-wrap:wrap;gap:6px}
     .status{margin-top:12px;padding:7px 9px;border:1px dashed #2b3b78;border-radius:4px;background:rgba(8,13,31,.75);color:var(--dim);min-height:22px}
     .cards,.signals{display:grid;gap:10px}.cards{grid-template-columns:repeat(auto-fill,minmax(318px,1fr));gap:12px}.signals{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+    .outcome-strip{display:flex;flex-wrap:wrap;gap:10px}
+    .outcome-pill{appearance:none;display:inline-flex;align-items:center;justify-content:center;min-width:112px;padding:10px 14px;border:1px solid rgba(72,102,183,.82);border-radius:999px;background:linear-gradient(180deg,rgba(23,34,74,.98),rgba(10,16,39,.96));color:var(--text);font:22px/1 "VT323","Courier New",monospace;cursor:pointer;box-shadow:inset 0 1px 0 rgba(111,136,199,.18),0 0 10px rgba(0,240,255,.08);transition:transform .12s ease,box-shadow .12s ease,border-color .12s ease}
+    .outcome-pill:hover,.outcome-pill:focus-visible{transform:translateY(-1px);border-color:rgba(0,240,255,.82);box-shadow:inset 0 1px 0 rgba(111,136,199,.22),0 0 14px rgba(0,240,255,.20);outline:none}
+    .outcome-pill.pos{color:var(--lime);text-shadow:0 0 6px rgba(77,255,116,.28)}
+    .outcome-pill.neg{color:#ff9898;text-shadow:0 0 6px rgba(255,92,108,.24)}
+    .outcome-pill.neutral{color:#d7edff}
     .card,.item{position:relative;border-color:var(--line);border-radius:6px;background:linear-gradient(180deg,rgba(17,25,57,.96),rgba(8,13,31,.95))}.card:before,.item:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(0,240,255,.05),transparent 48%)} .card.pos:before{background:linear-gradient(180deg,rgba(77,255,116,.08),transparent 46%)} .card.neg:before{background:linear-gradient(180deg,rgba(255,92,108,.08),transparent 46%)}
     .item{overflow:hidden}
     .card{overflow:visible;border-radius:14px;box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 0 12px rgba(0,240,255,.08),0 6px 18px rgba(0,0,0,.22);z-index:0}
@@ -104,12 +110,31 @@
     .trade-note-body{color:#dbefff;font-size:17px;line-height:1.1}
     .trade-slug{color:var(--dim);font-size:13px;word-break:break-word;opacity:.9}
     .footline{margin-top:8px;color:var(--dim);font-size:14px;word-break:break-word}.placeholder{display:grid;place-items:center;min-height:120px;padding:18px;color:var(--dim);text-align:center;font-size:20px}
-    .bars{display:grid;grid-template-columns:repeat(auto-fit,minmax(18px,1fr));gap:6px;align-items:end;min-height:170px;padding-top:6px}.bar{position:relative;min-height:10px;border:1px solid rgba(49,69,128,.62);border-radius:4px 4px 2px 2px;background:linear-gradient(180deg,rgba(0,240,255,.95),rgba(0,240,255,.20));box-shadow:0 0 8px rgba(0,240,255,.18)} .bar.neg{background:linear-gradient(180deg,rgba(255,92,108,.95),rgba(255,92,108,.20));box-shadow:0 0 8px rgba(255,92,108,.18)} .bar span{position:absolute;left:50%;bottom:-20px;transform:translateX(-50%);color:var(--dim);font-size:11px;white-space:nowrap}
+    .modal-backdrop{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(2,5,12,.76);backdrop-filter:blur(3px);z-index:1000}
+    .modal-backdrop.open{display:flex}
+    .modal-window{width:min(980px,96vw);max-height:min(88vh,920px);overflow:auto;padding:14px;border:2px solid var(--chrome);border-radius:18px;background:linear-gradient(180deg,rgba(15,24,56,.98),rgba(8,13,31,.98));box-shadow:inset 0 1px 0 rgba(111,136,199,.18),0 18px 40px rgba(0,0,0,.45),0 0 22px rgba(0,240,255,.16)}
+    .modal-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}
+    .modal-title{margin:0;color:var(--text);font-size:28px;line-height:1.04}
+    .modal-sub{margin-top:5px;color:var(--dim);font-size:15px}
+    .modal-close{appearance:none;min-width:42px;padding:7px 10px;border:1px solid var(--chrome);border-radius:999px;background:linear-gradient(180deg,#1b244a,#0d1530);color:var(--text);font:10px "Press Start 2P","VT323",monospace;cursor:pointer}
+    .modal-close:hover,.modal-close:focus-visible{border-color:rgba(0,240,255,.82);box-shadow:0 0 12px rgba(0,240,255,.18);outline:none}
+    .modal-body{display:grid;gap:12px}
+    .modal-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .modal-section{padding:10px 11px;border:1px solid rgba(72,102,183,.74);border-radius:16px;background:linear-gradient(180deg,rgba(15,24,56,.96),rgba(8,13,31,.94));box-shadow:inset 0 1px 0 rgba(111,136,199,.14)}
+    .modal-section-title{margin-bottom:8px;color:#d7e7ff;font:9px "Press Start 2P","VT323",monospace;letter-spacing:1px}
+    .detail-list{display:grid;gap:6px}
+    .detail-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid rgba(49,69,128,.34)}
+    .detail-row:last-child{border-bottom:none}
+    .detail-row.wrap{display:block}
+    .detail-label{color:var(--dim);font-size:14px}
+    .detail-value{color:var(--text);font-size:17px;text-align:right;word-break:break-word}
+    .detail-row.wrap .detail-value{display:block;margin-top:4px;text-align:left}
+    .detail-pre{margin:0;padding:9px 10px;border:1px solid rgba(49,69,128,.52);border-radius:12px;background:rgba(7,12,28,.78);color:#dbefff;font:15px/1.1 "VT323","Courier New",monospace;white-space:pre-wrap;word-break:break-word}
     .footer{margin-top:8px;padding:6px 12px 16px;color:var(--dim);font-size:15px;text-align:right}
     @keyframes blink{0%,60%{opacity:1}70%,100%{opacity:.28}}
     @media (max-width:1240px){.summary{grid-template-columns:repeat(4,minmax(0,1fr))}.controls{grid-template-columns:repeat(3,minmax(0,1fr))}.span-7,.span-5,.span-4{grid-column:span 6}}
     @media (max-width:900px){.controls{grid-template-columns:1fr 1fr}.topbar{flex-direction:column;align-items:flex-start}.meta{justify-content:flex-start}.span-7,.span-5,.span-4{grid-column:span 12}}
-    @media (max-width:640px){.summary,.dashboard-grid,.footer{padding-left:8px;padding-right:8px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.controls,.cards,.signals{grid-template-columns:1fr}.brand{font-size:11px}.head{flex-direction:column}.head-actions{justify-content:flex-start}}
+    @media (max-width:640px){.summary,.dashboard-grid,.footer{padding-left:8px;padding-right:8px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.controls,.cards,.signals,.modal-grid{grid-template-columns:1fr}.brand{font-size:11px}.head{flex-direction:column}.head-actions{justify-content:flex-start}.modal-window{padding:12px}}
     @media (max-width:520px){.trade-stats{grid-template-columns:1fr}.trade-note-head{flex-direction:column;align-items:flex-start}.metric-tip:hover:before,.metric-tip:focus-visible:before{left:12px;transform:none}.metric-tip:hover:after,.metric-tip:focus-visible:after{left:0;transform:none;width:min(240px,84vw)}}
   </style>
 </head>
@@ -141,6 +166,20 @@
         <div class="status" id="status">CONTROL LINK STANDBY</div>
       </div>
     </section>
+    <section class="dashboard-cell span-12" data-cell-id="outcomes" data-cell-label="Recent Outcomes">
+      <div class="panel">
+        <div class="head">
+          <div><span class="kicker">Exit Tape</span><h2>RECENT OUTCOMES</h2><div class="subtxt">Last 10 finished paper trades. Tap a P/L pill for the full trade record.</div></div>
+          <div class="head-actions">
+            <div class="meta-note" id="outcomes-meta">Closed trades and settled markets.</div>
+            <button class="cellbtn" type="button" onclick="shiftCell('outcomes', -1)">UP</button>
+            <button class="cellbtn" type="button" onclick="shiftCell('outcomes', 1)">DOWN</button>
+            <button class="handle" type="button" data-handle>DRAG</button>
+          </div>
+        </div>
+        <div class="outcome-strip" id="outcomes"></div>
+      </div>
+    </section>
     <section class="dashboard-cell span-12" data-cell-id="open-trades" data-cell-label="Open Trades">
       <div class="panel">
         <div class="head">
@@ -169,38 +208,22 @@
         <div class="signals" id="signals"></div>
       </div>
     </section>
-    <section class="dashboard-cell span-5" data-cell-id="resolutions" data-cell-label="Recent Outcomes">
-      <div class="panel">
-        <div class="head">
-          <div><span class="kicker">Exit Tape</span><h2>RECENT OUTCOMES</h2></div>
-          <div class="head-actions">
-            <div class="meta-note" id="res-meta">Closed trades and settled markets.</div>
-            <button class="cellbtn" type="button" onclick="shiftCell('resolutions', -1)">UP</button>
-            <button class="cellbtn" type="button" onclick="shiftCell('resolutions', 1)">DOWN</button>
-            <button class="handle" type="button" data-handle>DRAG</button>
-          </div>
-        </div>
-        <div class="signals" id="resolutions"></div>
-      </div>
-    </section>
-    <section class="dashboard-cell span-12" data-cell-id="bars" data-cell-label="PnL Barometer">
-      <div class="panel">
-        <div class="head">
-          <div><span class="kicker">Paper Pulse</span><h2>PNL BAROMETER</h2></div>
-          <div class="head-actions">
-            <div class="meta-note">Recent dashboard samples.</div>
-            <button class="cellbtn" type="button" onclick="shiftCell('bars', -1)">UP</button>
-            <button class="cellbtn" type="button" onclick="shiftCell('bars', 1)">DOWN</button>
-            <button class="handle" type="button" data-handle>DRAG</button>
-          </div>
-        </div>
-        <div class="bars" id="bars"></div>
-      </div>
-    </section>
   </main>
+  <div id="trade-modal" class="modal-backdrop" onclick="closeOutcomeModal(event)">
+    <div class="modal-window" role="dialog" aria-modal="true" aria-labelledby="trade-modal-title" onclick="event.stopPropagation()">
+      <div class="modal-head">
+        <div>
+          <h3 class="modal-title" id="trade-modal-title">TRADE DETAIL</h3>
+          <div class="modal-sub" id="trade-modal-sub">Finished paper trade record.</div>
+        </div>
+        <button type="button" class="modal-close" onclick="closeOutcomeModal()">CLOSE</button>
+      </div>
+      <div class="modal-body" id="trade-modal-body"></div>
+    </div>
+  </div>
   <div class="footer" id="footer">INITIALIZING WEATHER OPS TERMINAL</div>
   <script>
-    const POLL_MS=5000,STALE_AFTER=9000,DEAD_AFTER=18000,LAYOUT_KEY="weather-ops-layout-v2",DEFAULT_LAYOUT=["control-deck","open-trades","signals","resolutions","bars"]; let state=null,history=[],lastFrame=0,busy=false,dragState=null,statusMsg={text:"CONTROL LINK STANDBY",tone:""};
+    const POLL_MS=5000,STALE_AFTER=9000,DEAD_AFTER=18000,LAYOUT_KEY="weather-ops-layout-v3",DEFAULT_LAYOUT=["control-deck","outcomes","open-trades","signals"]; let state=null,lastFrame=0,busy=false,dragState=null,statusMsg={text:"CONTROL LINK STANDBY",tone:""},activeOutcomeId=null;
     const $=id=>document.getElementById(id), api=p=>new URL(p,window.location.href).toString(), esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
     const usd=v=>"$"+Number(v||0).toFixed(2), sUsd=v=>`${Number(v||0)>0?"+":""}$${Number(v||0).toFixed(2)}`, pct=(v,d=1)=>v==null?"--":(Number(v)*100).toFixed(d)+"%", compact=v=>Math.abs(Number(v||0))>=1000?(Number(v||0)/1000).toFixed(1)+"K":Number(v||0).toFixed(0);
     const dt=v=>{if(!v)return"never";const x=new Date(v);return Number.isNaN(x.getTime())?String(v):x.toLocaleString()}, short=v=>{if(!v)return"--";const x=new Date(v);return Number.isNaN(x.getTime())?String(v):x.toISOString().slice(11,19)};
@@ -283,18 +306,95 @@
       return `<article class="card ${cls}"><div class="cardhead"><div><div class="title">${esc(x.event_title||x.market_slug)}</div><div class="tiny">${esc(String(x.city_slug||"").toUpperCase())} | ${esc(String(x.market_type||"").toUpperCase())} | ${esc(x.event_date||"--")}</div></div><div class="badges">${badge(String(x.direction||"--"),String(x.direction||"").toUpperCase()==="YES"?"good":"bad")}${badge(x.target_label||"TARGET","")}${badge(String(x.confidence||"signal").toUpperCase(),x.confidence==="confirmed"?"good":"warn")}</div></div><div class="body"><div class="stats trade-stats">${stat("Size",usd(x.cost),sizeSub,"",{tip:TRADE_HELP.size})}${stat(isClosed?"Realized P/L":"Mark P/L",sUsd(pnl),markSub,tone(pnl),{tip:isClosed?TRADE_HELP.realizedPnl:TRADE_HELP.markPnl})}${stat("Model P/L",sUsd(modelPnl),modelSub,tone(modelPnl),{tip:TRADE_HELP.modelPnl})}${stat("Held",dur(x.holding_seconds),x.created_at?`since ${dt(x.created_at)}`:"--","",{tip:TRADE_HELP.held})}${stat("Model Odds",pct(x.outcome_probability,1),`mark ${pct(x.market_probability,1)}`,"",{tip:TRADE_HELP.modelOdds})}${stat("Review Score",scoreValue,reviewStamp,"",{tip:TRADE_HELP.reviewScore})}${stat("Edge",pct((x.mark_edge_abs==null?x.edge_abs:x.mark_edge_abs),1),`${x.source_count||0} src | liq ${compact(x.liquidity||0)}`,"",{tip:TRADE_HELP.edge})}${stat("Target",x.target_label||"--","bucket / contract","",{tip:TRADE_HELP.target})}${stat("To Resolution",dur(x.remaining_to_resolution_s),x.remaining_to_resolution_s==null?"date-based market":"remaining window","",{tip:TRADE_HELP.toResolution})}</div>${sellButton}${noteCard(isClosed?"Exit Note":"Review Note",reviewText,reviewStamp,TRADE_HELP.reviewNote)}<div class="trade-slug">${esc(x.market_slug||"")}</div></div></article>`
     }
     function signalCard(x){return `<article class="item"><div class="itemhead"><div><div class="title">${esc(x.event_title||x.market_slug)}</div><div class="tiny">${esc(String(x.city_slug||"").toUpperCase())} | ${esc(x.event_date||"--")}</div></div><div class="badges">${badge(String(x.market_type||"signal").toUpperCase(),String(x.market_type||"").toLowerCase()==="temperature"?"":"warn")}${badge(String(x.direction||"--"),String(x.direction||"").toUpperCase()==="YES"?"good":"bad")}</div></div><div class="body"><div class="stats">${stat("Score",Number(x.score||0).toFixed(2),String(x.confidence||"unknown").toUpperCase())}${stat("Edge",pct(Math.abs(Number(x.edge||0)),1),`market ${pct(x.market_prob,1)}`,tone(x.edge))}${stat("Forecast",pct(x.forecast_prob,1),x.label||"--")}${stat("Sources",String(x.source_count||0),`liq ${compact(x.liquidity||0)}`)}</div><div class="footline">${esc(x.market_slug||"")}</div></div></article>`}
-    function simpleCard(title,sub,b1,b2){return `<article class="item"><div class="itemhead"><div><div class="title">${esc(title)}</div><div class="tiny">${esc(sub)}</div></div><div class="badges">${b1||""}${b2||""}</div></div></article>`}
+    function outcomePillClass(v){return Number(v||0)>0?"pos":Number(v||0)<0?"neg":"neutral"}
+    function findOutcomeById(id){const xs=(state&&state.recent_outcomes)||[]; return xs.find(x=>Number(x.id||0)===Number(id||0))||null}
+    function outcomeLabel(x){if(String(x.status||"")==="resolved"&&x.resolution)return `Resolved ${String(x.resolution||"").toUpperCase()}`; if(x.exit_reason)return loud(x.exit_reason); return loud(x.status||"closed")}
+    function outcomePill(x){const pnl=Number(x.realized_pnl||0); return `<button type="button" class="outcome-pill ${outcomePillClass(pnl)}" aria-label="${esc(`${x.event_title||x.market_slug}: final P/L ${sUsd(pnl)}`)}" onclick="openOutcome(${Number(x.id||0)})">${esc(sUsd(pnl))}</button>`}
+    function detailRow(label,value){return `<div class="detail-row"><span class="detail-label">${esc(label)}</span><span class="detail-value">${esc(value==null||value===""?"--":value)}</span></div>`}
+    function detailTextRow(label,value){return `<div class="detail-row wrap"><span class="detail-label">${esc(label)}</span><span class="detail-value">${esc(value==null||value===""?"--":value)}</span></div>`}
+    function detailSection(title,rows){return `<section class="modal-section"><div class="modal-section-title">${esc(title)}</div><div class="detail-list">${rows.join("")}</div></section>`}
+    function detailJsonSection(title,value){if(!value|| (typeof value==="object" && !Array.isArray(value) && Object.keys(value).length===0)) return ""; return `<section class="modal-section"><div class="modal-section-title">${esc(title)}</div><pre class="detail-pre">${esc(JSON.stringify(value,null,2))}</pre></section>`}
+    function openOutcome(id){activeOutcomeId=Number(id||0); renderOutcomeModal()}
+    function closeOutcomeModal(event){const modal=$("trade-modal"); if(event&&event.target&&event.target!==modal)return; activeOutcomeId=null; if(modal)modal.classList.remove("open")}
+    function renderOutcomeModal(){const modal=$("trade-modal"), body=$("trade-modal-body"), titleEl=$("trade-modal-title"), subEl=$("trade-modal-sub"); if(!modal||!body||!titleEl||!subEl)return; const trade=findOutcomeById(activeOutcomeId); if(!trade){modal.classList.remove("open"); return} const pnl=Number(trade.realized_pnl||0), modelPnl=Number(trade.expected_value_pnl||0), decisionMeta=trade.decision_metadata||{}, reasonText=trade.mark_reason||trade.decision_reason||trade.notes||"No recorded rationale."; titleEl.textContent=String(trade.event_title||trade.market_slug||"Trade Detail"); subEl.textContent=`${String(trade.city_slug||"").toUpperCase()} | ${String(trade.market_type||"").toUpperCase()} | ${outcomeLabel(trade)} | ${dt(trade.resolved_at)}`; body.innerHTML=[
+      `<div class="modal-grid">${detailSection("Overview",[
+        detailRow("Final P/L",sUsd(pnl)),
+        detailRow("Status",String(trade.status||"--").toUpperCase()),
+        detailRow("Direction",String(trade.direction||"--").toUpperCase()),
+        detailRow("Target",trade.target_label||"--"),
+        detailRow("Confidence",String(trade.confidence||"--").toUpperCase()),
+        detailRow("Outcome",outcomeLabel(trade)),
+        detailTextRow("Market Slug",trade.market_slug||"--"),
+        detailTextRow("Signal Key",trade.signal_key||"--"),
+      ])}${detailSection("Timing",[
+        detailRow("Opened",dt(trade.created_at)),
+        detailRow("Reviewed",dt(trade.mark_updated_at)),
+        detailRow("Closed / Resolved",dt(trade.resolved_at)),
+        detailRow("Held",dur(trade.holding_seconds)),
+        detailRow("Event Date",trade.event_date||"--"),
+        detailRow("Remaining Window",dur(trade.remaining_to_resolution_s)),
+        detailRow("Review Age",dur(trade.mark_age_seconds)),
+        detailRow("Resolution",String(trade.resolution||"--").toUpperCase()),
+      ])}</div>`,
+      `<div class="modal-grid">${detailSection("Pricing",[
+        detailRow("Stake / Cost",usd(trade.cost)),
+        detailRow("Shares",Number(trade.shares||0).toFixed(4)),
+        detailRow("Entry Price",pct(trade.entry_price,2)),
+        detailRow("Entry Reference",pct(trade.entry_reference_price,2)),
+        detailRow("Entry Fee",`${usd(trade.entry_fee_paid)} | ${Number(trade.entry_fee_bps||0).toFixed(0)}bps`),
+        detailRow("Entry Slippage",`${Number(trade.entry_slippage_bps||0).toFixed(0)}bps`),
+        detailRow("Exit Price",pct(trade.exit_price,2)),
+        detailRow("Exit Reference",pct(trade.exit_reference_price,2)),
+        detailRow("Gross Exit",usd(trade.gross_exit_payout)),
+        detailRow("Exit Fee",`${usd(trade.exit_fee_paid)} | ${Number(trade.exit_fee_bps||0).toFixed(0)}bps`),
+        detailRow("Exit Slippage",`${Number(trade.exit_slippage_bps||0).toFixed(0)}bps`),
+        detailRow("Net Exit",usd(trade.net_exit_payout)),
+      ])}${detailSection("Probabilities",[
+        detailRow("Contract Mark",pct(trade.market_probability,2)),
+        detailRow("Model Odds",pct(trade.outcome_probability,2)),
+        detailRow("Expected Payout",usd(trade.expected_payout)),
+        detailRow("Model Exit Price",pct(trade.model_exit_price,2)),
+        detailRow("Model Exit Fee",usd(trade.model_exit_fee_paid)),
+        detailRow("Gross Model Value",usd(trade.gross_model_value)),
+        detailRow("Net Model Value",usd(trade.net_model_value)),
+        detailRow("Model P/L",sUsd(modelPnl)),
+        detailRow("Review Score",trade.mark_final_score==null?"--":Number(trade.mark_final_score).toFixed(2)),
+        detailRow("Decision Score",trade.decision_final_score==null?"--":Number(trade.decision_final_score).toFixed(2)),
+        detailRow("Edge",pct((trade.mark_edge_abs==null?trade.edge_abs:trade.mark_edge_abs),2)),
+        detailRow("Liquidity",compact(trade.liquidity)),
+      ])}</div>`,
+      `<div class="modal-grid">${detailSection("Reasoning",[
+        detailTextRow("Decision Reason",trade.decision_reason||"--"),
+        detailTextRow("Review / Exit Note",reasonText),
+        detailRow("Exit Reason",trade.exit_reason||"--"),
+        detailRow("Policy Action",trade.decision_policy_action||"--"),
+        detailRow("Adapter Score",trade.adapter_score==null?"--":Number(trade.adapter_score).toFixed(2)),
+        detailRow("Signal Score",trade.score==null?"--":Number(trade.score).toFixed(2)),
+        detailTextRow("Notes",trade.notes||"--"),
+        detailRow("Sources",`${trade.source_count||0} | dispersion ${pct(trade.source_dispersion_pct,1)}`),
+      ])}${detailSection("Mark Snapshot",[
+        detailRow("Mark Price",pct(trade.mark_price,2)),
+        detailRow("Mark Mode",trade.mark_to_market_mode||"--"),
+        detailRow("Mark Payout",usd(trade.mark_to_market_payout)),
+        detailRow("Mark P/L",sUsd(trade.mark_to_market_pnl)),
+        detailRow("Est. Exit Price",pct(trade.estimated_exit_price,2)),
+        detailRow("Est. Exit Fee",usd(trade.estimated_exit_fee_paid)),
+        detailRow("Gross Liquidation",usd(trade.gross_liquidation_value)),
+        detailRow("Net Liquidation",usd(trade.net_liquidation_value)),
+      ])}</div>`,
+      detailJsonSection("Decision Metadata",decisionMeta),
+    ].join(""); modal.classList.add("open")}
     function renderTrades(){const xs=state.open_positions||[], exp=xs.reduce((a,x)=>a+Number(x.cost||0),0), ev=xs.reduce((a,x)=>a+Number(x.expected_value_pnl||0),0); $("trades-meta").textContent=xs.length?`${xs.length} live cards | ${usd(exp)} staked | model ${sUsd(ev)}`:"No paper positions are open right now."; $("open-trades").innerHTML=xs.length?xs.map(tradeCard).join(""):empty("NO LIVE PAPER TRADES YET")}
     function renderSignals(){const xs=state.recent_signals||[], total=Object.values(state.signal_summary_24h||{}).reduce((a,v)=>a+Number(v||0),0); $("signals-meta").textContent=xs.length?`${xs.length} recent signals | ${total} in the last 24h`:"Waiting for scans to write fresh signal cards."; $("signals").innerHTML=xs.length?xs.map(signalCard).join(""):empty("SIGNAL RADAR IS QUIET")}
-    function renderRes(){const xs=state.recent_resolutions||[]; $("res-meta").textContent=xs.length?`${xs.length} recent exits and settlements`:"No exits recorded yet."; $("resolutions").innerHTML=xs.length?xs.map(x=>simpleCard(x.market_slug||"market",`${String(x.outcome_label||x.resolution||x.status||"--").toUpperCase()} | ${dt(x.resolved_at)}`,badge(`${x.resolved_positions||0} pos`,Number(x.resolved_positions||0)>1?"warn":""),badge(sUsd(x.total_realized_pnl||0),tone(x.total_realized_pnl)))).join(""):empty("NO EXITS ON TAPE")}
-    function renderBars(){const xs=(history||[]).slice(-18); if(!xs.length){$("bars").innerHTML=empty("BAROMETER WILL FILL AFTER A FEW REFRESH CYCLES"); return} const max=Math.max(1,...xs.map(x=>Math.abs(Number(x.paper_pnl||0)))); $("bars").innerHTML=xs.map((x,i)=>`<div class="bar ${Number(x.paper_pnl||0)<0?"neg":""}" style="height:${Math.max(10,Math.round(Math.abs(Number(x.paper_pnl||0))/max*126))}px;opacity:${(0.44+i/Math.max(xs.length,1)*0.5).toFixed(2)}"><span>${Number(x.paper_pnl||0).toFixed(0)}</span></div>`).join("")}
-    function render(){if(!state)return; renderSummary(); renderControls(); renderTrades(); renderSignals(); renderRes(); renderBars(); $("footer").textContent=`Updated ${dt(state.timestamp_utc)} | Resolution check ${dt((state.runtime||{}).last_resolution_check_at)} | Export mirror ${state.exports&&!state.exports.dashboard_state_error?"ready":"attention"} | HA ingress weather deck online`}
-    async function load(){try{const [s,h]=await Promise.all([fetch(api("./api/state"),{cache:"no-store"}),fetch(api("./api/history"),{cache:"no-store"})]); if(!s.ok||!h.ok)throw new Error("dashboard endpoints returned an error"); state=await s.json(); history=await h.json(); lastFrame=performance.now(); if(!busy){const c=state.controls||{}; statusMsg={text:controlMessage(c)||"CONTROL LINK STANDBY",tone:controlTone(c)}} render()}catch(e){statusMsg={text:`LINK ERROR: ${e.message||e}`,tone:"bad"}; if(state)render()}}
-    async function act(action,value=null){action=String(action||"").trim(); if(!action){setStatus("Dashboard command was empty. Reload the page and try again.","bad"); return} if(value==="__from_input__"){const input=$("cap-input"), parsed=Number(input&&input.value?input.value:0); if(!parsed){if(input)input.focus(); return} value=parsed} busy=true; statusMsg={text:`SENDING ${String(action||"").toUpperCase()}...`,tone:"warn"}; if(state)render(); try{const r=await fetch(api(`./api/control/${encodeURIComponent(action)}`),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({value})}); const payload=await r.json(); if(payload.state)state=payload.state; const h=await fetch(api("./api/history"),{cache:"no-store"}); if(h.ok)history=await h.json(); statusMsg={text:payload.message||"Control applied.",tone:payload.ok?"good":"bad"}; if(payload.state)lastFrame=performance.now(); if(state)render()}catch(e){statusMsg={text:`CONTROL ERROR: ${e.message||e}`,tone:"bad"}; if(state)render()}finally{busy=false; if(state)render()}}
+    function renderOutcomes(){const xs=state.recent_outcomes||[]; $("outcomes-meta").textContent=xs.length?`${xs.length} finished trades ready to inspect`:"No finished paper trades yet."; $("outcomes").innerHTML=xs.length?xs.map(outcomePill).join(""):empty("NO FINISHED TRADES YET")}
+    function render(){if(!state)return; renderSummary(); renderControls(); renderOutcomes(); renderTrades(); renderSignals(); renderOutcomeModal(); $("footer").textContent=`Updated ${dt(state.timestamp_utc)} | Resolution check ${dt((state.runtime||{}).last_resolution_check_at)} | Export mirror ${state.exports&&!state.exports.dashboard_state_error?"ready":"attention"} | HA ingress weather deck online`}
+    async function load(){try{const s=await fetch(api("./api/state"),{cache:"no-store"}); if(!s.ok)throw new Error("dashboard endpoint returned an error"); state=await s.json(); lastFrame=performance.now(); if(!busy){const c=state.controls||{}; statusMsg={text:controlMessage(c)||"CONTROL LINK STANDBY",tone:controlTone(c)}} render()}catch(e){statusMsg={text:`LINK ERROR: ${e.message||e}`,tone:"bad"}; if(state)render()}}
+    async function act(action,value=null){action=String(action||"").trim(); if(!action){setStatus("Dashboard command was empty. Reload the page and try again.","bad"); return} if(value==="__from_input__"){const input=$("cap-input"), parsed=Number(input&&input.value?input.value:0); if(!parsed){if(input)input.focus(); return} value=parsed} busy=true; statusMsg={text:`SENDING ${String(action||"").toUpperCase()}...`,tone:"warn"}; if(state)render(); try{const r=await fetch(api(`./api/control/${encodeURIComponent(action)}`),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({value})}); const payload=await r.json(); if(payload.state)state=payload.state; statusMsg={text:payload.message||"Control applied.",tone:payload.ok?"good":"bad"}; if(payload.state)lastFrame=performance.now(); if(state)render()}catch(e){statusMsg={text:`CONTROL ERROR: ${e.message||e}`,tone:"bad"}; if(state)render()}finally{busy=false; if(state)render()}}
     function preset(v){const i=$("cap-input"); if(i)i.value=String(v)}
     function setOpenLimit(){const i=$("open-limit-input"), raw=i&&i.value!=null?String(i.value).trim():""; if(!raw){if(i)i.focus(); return} act("set_paper_max_open_positions",{limit:raw})}
     function sellTrade(id){if(!id){setStatus("Paper position id missing from the card payload.","bad"); return} act("close_position",{position_id:Number(id),reason:"manual_dashboard_sell"})}
     function uplink(){const dtm=lastFrame?(performance.now()-lastFrame):Infinity, el=$("uplink"); let cls="uplink dead", label="OFFLINE"; if(dtm<STALE_AFTER){cls="uplink ok"; label="LINK"} else if(dtm<DEAD_AFTER){cls="uplink stale"; label="STALE"} el.className=cls; $("uplabel").textContent=label; $("upage").textContent=Number.isFinite(dtm)?Math.round(dtm)+"ms":"--"}
+    document.addEventListener("keydown", event=>{if(event.key==="Escape")closeOutcomeModal()});
     initControlBindings(); initLayout(); load(); setInterval(load,POLL_MS); setInterval(uplink,200);
   </script>
 </body>

@@ -97,6 +97,11 @@ class DashboardStateService:
                 limit=12,
                 mark_stale_after_seconds=stale_after_s,
             ),
+            "recent_outcomes": self.tracker.get_dashboard_paper_positions(
+                limit=10,
+                statuses=("closed", "resolved"),
+                mark_stale_after_seconds=stale_after_s,
+            ),
             "recent_resolutions": self.tracker.get_recent_resolutions(limit=12),
             "recent_operator_actions": self.tracker.get_recent_operator_actions(limit=12),
             "signal_summary_24h": self.tracker.get_signal_summary(),

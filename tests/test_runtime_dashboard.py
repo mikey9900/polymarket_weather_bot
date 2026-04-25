@@ -166,6 +166,53 @@ def test_dashboard_exposes_recent_resolutions(tmp_path: Path):
     assert state["recent_resolutions"][0]["outcome_label"] == "Resolved YES"
 
 
+def test_dashboard_exposes_recent_outcomes_with_trade_details_and_limit(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(5000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    for idx in range(12):
+        strategy.process_signals([_signal(f"outcome-{idx}")], auto_trade_enabled=True)
+
+    open_positions = tracker.get_dashboard_paper_positions(limit=20, status="open")
+    assert len(open_positions) == 12
+
+    for idx, position in enumerate(open_positions):
+        result = tracker.close_paper_position(
+            int(position["id"]),
+            exit_price=0.56,
+            reason=f"manual_outcome_{idx}",
+            mark_probability=0.64,
+            edge_abs=0.14,
+            final_score=0.73,
+            mark_reason=f"closed outcome {idx}",
+        )
+        assert result is not None
+
+    dashboard.refresh_once()
+    state = dashboard.get_state_threadsafe()
+    outcomes = state["recent_outcomes"]
+
+    assert len(outcomes) == 10
+    assert all(item["status"] == "closed" for item in outcomes)
+    latest = outcomes[0]
+    assert latest["market_slug"].startswith("market-outcome-")
+    assert latest["signal_key"].startswith("outcome-")
+    assert latest["resolved_at"]
+    assert latest["exit_reason"].startswith("manual_outcome_")
+    assert latest["mark_reason"].startswith("closed outcome ")
+    assert latest["exit_fee_paid"] is not None
+    assert latest["net_exit_payout"] is not None
+    assert latest["gross_exit_payout"] is not None
+    assert latest["net_exit_payout"] <= latest["gross_exit_payout"]
+    assert latest["decision_reason"]
+    assert isinstance(latest["decision_metadata"], dict)
+
+
 def test_dashboard_exposes_enriched_open_trade_cards(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")

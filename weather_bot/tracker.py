@@ -606,13 +606,20 @@ class WeatherTracker:
         limit: int = 20,
         *,
         status: str | None = None,
+        statuses: list[str] | tuple[str, ...] | set[str] | None = None,
         mark_stale_after_seconds: int | None = None,
     ) -> list[dict[str, Any]]:
         params: list[Any] = []
         where = ""
-        if status:
-            where = "WHERE p.status = ?"
-            params.append(str(status))
+        status_values: list[str] = []
+        if statuses:
+            status_values = [str(item) for item in statuses if str(item).strip()]
+        elif status:
+            status_values = [str(status)]
+        if status_values:
+            placeholders = ", ".join("?" for _ in status_values)
+            where = f"WHERE p.status IN ({placeholders})"
+            params.extend(status_values)
         params.append(int(limit))
         rows = self.conn.execute(
             f"""
