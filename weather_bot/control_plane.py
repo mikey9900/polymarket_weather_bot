@@ -15,7 +15,13 @@ class ControlRequest:
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "ControlRequest":
         payload = payload or {}
-        return cls(str(payload.get("action") or "").strip().lower(), payload.get("value"))
+        action = str(payload.get("action") or "").strip().lower()
+        if "value" in payload:
+            value = payload.get("value")
+        else:
+            value_payload = {key: value for key, value in payload.items() if key != "action"}
+            value = value_payload or None
+        return cls(action, value)
 
 
 @dataclass
@@ -143,7 +149,12 @@ class ControlPlane:
             return self._record(ControlResult(True, 200, f"Paper capital reset to ${amount:.2f}.", action))
         if action == "set_paper_max_open_positions":
             try:
-                amount = _coerce_int(request.value, keys=("limit", "value", "paper_max_open_positions", "max_open_positions"))
+                value = _coerce_mapping(
+                    request.value,
+                    fallback_key="limit",
+                    nested_keys=("value", "payload", "data"),
+                )
+                amount = _coerce_int(value, keys=("limit", "value", "paper_max_open_positions", "max_open_positions"))
             except (TypeError, ValueError):
                 return self._record(ControlResult(False, 400, "Open-position cap must be numeric.", action))
             limit = self.runtime.set_paper_max_open_positions(amount)
