@@ -57,6 +57,10 @@ class PaperSettings:
     stake_usd: float
     max_open_positions: int
     max_positions_per_market: int
+    fee_bps: float = 50.0
+    entry_slippage_bps: float = 15.0
+    exit_slippage_bps: float = 15.0
+    mark_stale_after_seconds: int = 45
 
 
 @dataclass(frozen=True)

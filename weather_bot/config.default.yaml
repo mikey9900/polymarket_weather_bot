@@ -24,6 +24,10 @@ paper:
   stake_usd: 10.0
   max_open_positions: 20
   max_positions_per_market: 1
+  fee_bps: 50.0
+  entry_slippage_bps: 15.0
+  exit_slippage_bps: 15.0
+  mark_stale_after_seconds: 45
 strategy:
   temperature:
     min_score: 0.62

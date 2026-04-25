@@ -69,6 +69,8 @@ class DashboardStateService:
     def _build_snapshot(self) -> dict[str, Any]:
         paper_stats = self.tracker.get_paper_stats()
         runtime_status = self.runtime.get_status_snapshot()
+        stale_after_s = getattr(getattr(self.runtime, "config", None), "paper", None)
+        stale_after_s = getattr(stale_after_s, "mark_stale_after_seconds", None)
         payload = {
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "controls": self.control_plane.build_controls_payload(),
@@ -85,9 +87,16 @@ class DashboardStateService:
                     "win_rate": paper_stats["win_rate"],
                 }
             },
-            "open_positions": self.tracker.get_dashboard_paper_positions(limit=12, status="open"),
+            "open_positions": self.tracker.get_dashboard_paper_positions(
+                limit=12,
+                status="open",
+                mark_stale_after_seconds=stale_after_s,
+            ),
             "recent_signals": self.tracker.get_recent_signals(limit=12),
-            "recent_trades": self.tracker.get_dashboard_paper_positions(limit=12),
+            "recent_trades": self.tracker.get_dashboard_paper_positions(
+                limit=12,
+                mark_stale_after_seconds=stale_after_s,
+            ),
             "recent_resolutions": self.tracker.get_recent_resolutions(limit=12),
             "recent_operator_actions": self.tracker.get_recent_operator_actions(limit=12),
             "signal_summary_24h": self.tracker.get_signal_summary(),

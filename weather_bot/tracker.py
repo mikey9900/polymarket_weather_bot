@@ -81,6 +81,10 @@ class WeatherTracker:
                 direction TEXT NOT NULL,
                 score REAL NOT NULL,
                 entry_price REAL NOT NULL,
+                entry_reference_price REAL,
+                entry_fee_paid REAL,
+                entry_fee_bps REAL,
+                entry_slippage_bps REAL,
                 shares REAL NOT NULL,
                 cost REAL NOT NULL,
                 status TEXT NOT NULL,
@@ -93,6 +97,12 @@ class WeatherTracker:
                 mark_updated_at TEXT,
                 mark_reason TEXT,
                 exit_price REAL,
+                exit_reference_price REAL,
+                exit_fee_paid REAL,
+                exit_fee_bps REAL,
+                exit_slippage_bps REAL,
+                gross_exit_payout REAL,
+                net_exit_payout REAL,
                 exit_reason TEXT,
                 notes TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -255,52 +265,81 @@ class WeatherTracker:
         stake_usd: float,
         decision_final_score: float | None = None,
         notes: str = "auto",
+        fee_bps: float = 0.0,
+        entry_slippage_bps: float = 0.0,
+        exit_fee_bps: float = 0.0,
+        exit_slippage_bps: float = 0.0,
     ) -> PaperPosition | None:
-        entry_price = _contract_probability(signal.direction, signal.market_prob)
+        entry_reference_price = _contract_probability(signal.direction, signal.market_prob)
         mark_probability = _contract_probability(signal.direction, signal.forecast_prob)
-        if entry_price is None or entry_price <= 0:
+        entry_price = _apply_entry_slippage(entry_reference_price, entry_slippage_bps)
+        if entry_reference_price is None or entry_price is None or entry_price <= 0:
             return None
         with self._lock:
             initial, available = self.get_paper_capital()
             cost = round(min(float(stake_usd), available), 6)
             if cost <= 0:
                 return None
-            shares = round(cost / float(entry_price), 6)
+            entry_fee_paid = _fee_amount(cost, fee_bps)
+            net_entry_notional = round(cost - entry_fee_paid, 6)
+            if net_entry_notional <= 0:
+                return None
+            shares = round(net_entry_notional / float(entry_price), 6)
             self.set_setting("paper_capital", {"initial": initial, "available": round(available - cost, 6)})
+            values = (
+                signal_id,
+                decision_id,
+                signal.signal_key,
+                signal.market_type,
+                signal.market_slug,
+                signal.event_slug,
+                signal.city_slug,
+                signal.event_date,
+                signal.label,
+                signal.direction,
+                signal.score,
+                entry_price,
+                entry_reference_price,
+                entry_fee_paid,
+                _bps(fee_bps),
+                _bps(entry_slippage_bps),
+                shares,
+                cost,
+                "open",
+                None,
+                None,
+                entry_reference_price,
+                mark_probability,
+                signal.edge_abs,
+                decision_final_score,
+                signal.created_at,
+                "Entry mark captured from signal.",
+                None,
+                None,
+                None,
+                _bps(exit_fee_bps),
+                _bps(exit_slippage_bps),
+                None,
+                None,
+                None,
+                notes,
+                signal.created_at,
+                None,
+            )
+            placeholders = ", ".join(["?"] * len(values))
             cursor = self.conn.execute(
-                """
+                f"""
                 INSERT INTO paper_positions (
                     signal_id, decision_id, signal_key, market_type, market_slug, event_slug, city_slug,
-                    event_date, label, direction, score, entry_price, shares, cost, status,
-                    resolution, realized_pnl, mark_price, mark_probability, mark_edge_abs, mark_final_score,
-                    mark_updated_at, mark_reason, exit_price, exit_reason, notes, created_at, resolved_at
+                    event_date, label, direction, score, entry_price, entry_reference_price, entry_fee_paid,
+                    entry_fee_bps, entry_slippage_bps, shares, cost, status, resolution, realized_pnl,
+                    mark_price, mark_probability, mark_edge_abs, mark_final_score, mark_updated_at, mark_reason,
+                    exit_price, exit_reference_price, exit_fee_paid, exit_fee_bps, exit_slippage_bps,
+                    gross_exit_payout, net_exit_payout, exit_reason, notes, created_at, resolved_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)
+                VALUES ({placeholders})
                 """,
-                (
-                    signal_id,
-                    decision_id,
-                    signal.signal_key,
-                    signal.market_type,
-                    signal.market_slug,
-                    signal.event_slug,
-                    signal.city_slug,
-                    signal.event_date,
-                    signal.label,
-                    signal.direction,
-                    signal.score,
-                    entry_price,
-                    shares,
-                    cost,
-                    entry_price,
-                    mark_probability,
-                    signal.edge_abs,
-                    decision_final_score,
-                    signal.created_at,
-                    "Entry mark captured from signal.",
-                    notes,
-                    signal.created_at,
-                ),
+                values,
             )
             self.conn.commit()
             return PaperPosition(
@@ -332,6 +371,8 @@ class WeatherTracker:
         final_score: float | None,
         reviewed_at: str | None = None,
         reason: str = "",
+        exit_fee_bps: float | None = None,
+        exit_slippage_bps: float | None = None,
     ) -> bool:
         reviewed_at = str(reviewed_at or iso_now())
         with self._lock:
@@ -343,7 +384,9 @@ class WeatherTracker:
                     mark_edge_abs = ?,
                     mark_final_score = ?,
                     mark_updated_at = ?,
-                    mark_reason = ?
+                    mark_reason = ?,
+                    exit_fee_bps = COALESCE(?, exit_fee_bps),
+                    exit_slippage_bps = COALESCE(?, exit_slippage_bps)
                 WHERE id = ? AND status = 'open'
                 """,
                 (
@@ -353,6 +396,8 @@ class WeatherTracker:
                     _as_float(final_score),
                     reviewed_at,
                     str(reason or ""),
+                    _as_float(_bps(exit_fee_bps)) if exit_fee_bps is not None else None,
+                    _as_float(_bps(exit_slippage_bps)) if exit_slippage_bps is not None else None,
                     int(position_id),
                 ),
             )
@@ -370,6 +415,8 @@ class WeatherTracker:
         edge_abs: float | None = None,
         final_score: float | None = None,
         mark_reason: str | None = None,
+        exit_fee_bps: float | None = None,
+        exit_slippage_bps: float | None = None,
     ) -> dict[str, Any] | None:
         closed_at = str(closed_at or iso_now())
         with self._lock:
@@ -383,13 +430,28 @@ class WeatherTracker:
             initial, available = self.get_paper_capital()
             shares = float(row["shares"] or 0.0)
             cost = float(row["cost"] or 0.0)
-            mark_price = _bounded_probability(exit_price)
-            if mark_price is None:
-                mark_price = _bounded_probability(row["mark_price"])
-            if mark_price is None:
-                mark_price = _bounded_probability(row["entry_price"]) or 0.0
-            payout = round(shares * mark_price, 6)
-            pnl = round(payout - cost, 6)
+            reference_price = _bounded_probability(exit_price)
+            if reference_price is None:
+                reference_price = _bounded_probability(row["mark_price"])
+            if reference_price is None:
+                reference_price = _bounded_probability(row["entry_reference_price"])
+            if reference_price is None:
+                reference_price = _bounded_probability(row["entry_price"]) or 0.0
+            applied_exit_fee_bps = _bps(exit_fee_bps if exit_fee_bps is not None else row["exit_fee_bps"])
+            applied_exit_slippage_bps = _bps(
+                exit_slippage_bps if exit_slippage_bps is not None else row["exit_slippage_bps"]
+            )
+            fill_exit_price, gross_payout, exit_fee_paid, net_payout = _estimate_net_exit_value(
+                shares,
+                reference_price,
+                fee_bps=applied_exit_fee_bps,
+                slippage_bps=applied_exit_slippage_bps,
+            )
+            fill_exit_price = fill_exit_price or 0.0
+            gross_payout = gross_payout or 0.0
+            exit_fee_paid = exit_fee_paid or 0.0
+            net_payout = net_payout or 0.0
+            pnl = round(net_payout - cost, 6)
 
             self.conn.execute(
                 """
@@ -403,25 +465,37 @@ class WeatherTracker:
                     mark_updated_at = ?,
                     mark_reason = ?,
                     exit_price = ?,
+                    exit_reference_price = ?,
+                    exit_fee_paid = ?,
+                    exit_fee_bps = ?,
+                    exit_slippage_bps = ?,
+                    gross_exit_payout = ?,
+                    net_exit_payout = ?,
                     exit_reason = ?,
                     resolved_at = ?
                 WHERE id = ?
                 """,
                 (
                     pnl,
-                    mark_price,
+                    reference_price,
                     _bounded_probability(mark_probability),
                     _as_float(edge_abs),
                     _as_float(final_score),
                     closed_at,
                     str(mark_reason or reason or ""),
-                    mark_price,
+                    fill_exit_price,
+                    reference_price,
+                    exit_fee_paid,
+                    applied_exit_fee_bps,
+                    applied_exit_slippage_bps,
+                    gross_payout,
+                    net_payout,
                     str(reason or "manual"),
                     closed_at,
                     int(position_id),
                 ),
             )
-            self.set_setting("paper_capital", {"initial": initial, "available": round(available + payout, 6)})
+            self.set_setting("paper_capital", {"initial": initial, "available": round(available + net_payout, 6)})
             self.conn.commit()
             return {
                 "ok": True,
@@ -429,8 +503,12 @@ class WeatherTracker:
                 "market_slug": str(row["market_slug"] or ""),
                 "direction": str(row["direction"] or ""),
                 "status": "closed",
-                "exit_price": mark_price,
+                "exit_price": fill_exit_price,
+                "exit_reference_price": reference_price,
                 "exit_reason": str(reason or "manual"),
+                "exit_fee_paid": exit_fee_paid,
+                "gross_exit_payout": gross_payout,
+                "net_exit_payout": net_payout,
                 "realized_pnl": pnl,
                 "closed_at": closed_at,
             }
@@ -452,9 +530,12 @@ class WeatherTracker:
             total_payout = 0.0
             total_pnl = 0.0
             for row in rows:
-                payout = float(row["shares"]) if str(row["direction"]).upper() == resolution else 0.0
-                pnl = round(payout - float(row["cost"]), 6)
-                total_payout += payout
+                gross_payout = float(row["shares"]) if str(row["direction"]).upper() == resolution else 0.0
+                applied_exit_fee_bps = _bps(row["exit_fee_bps"])
+                exit_fee_paid = _fee_amount(gross_payout, applied_exit_fee_bps) if gross_payout > 0 else 0.0
+                net_payout = round(gross_payout - exit_fee_paid, 6)
+                pnl = round(net_payout - float(row["cost"]), 6)
+                total_payout += net_payout
                 total_pnl += pnl
                 self.conn.execute(
                     """
@@ -462,10 +543,29 @@ class WeatherTracker:
                     SET status = 'resolved',
                         resolution = ?,
                         realized_pnl = ?,
+                        mark_price = ?,
+                        exit_price = ?,
+                        exit_reference_price = ?,
+                        exit_fee_paid = ?,
+                        gross_exit_payout = ?,
+                        net_exit_payout = ?,
+                        exit_reason = ?,
                         resolved_at = ?
                     WHERE id = ?
                     """,
-                    (resolution, pnl, resolved_at, int(row["id"])),
+                    (
+                        resolution,
+                        pnl,
+                        1.0 if str(row["direction"]).upper() == resolution else 0.0,
+                        1.0 if str(row["direction"]).upper() == resolution else 0.0,
+                        1.0 if str(row["direction"]).upper() == resolution else 0.0,
+                        exit_fee_paid,
+                        gross_payout,
+                        net_payout,
+                        f"resolved:{resolution}",
+                        resolved_at,
+                        int(row["id"]),
+                    ),
                 )
             self.conn.execute(
                 """
@@ -501,7 +601,13 @@ class WeatherTracker:
         rows = self.conn.execute("SELECT * FROM paper_positions ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
         return [dict(row) for row in rows]
 
-    def get_dashboard_paper_positions(self, limit: int = 20, *, status: str | None = None) -> list[dict[str, Any]]:
+    def get_dashboard_paper_positions(
+        self,
+        limit: int = 20,
+        *,
+        status: str | None = None,
+        mark_stale_after_seconds: int | None = None,
+    ) -> list[dict[str, Any]]:
         params: list[Any] = []
         where = ""
         if status:
@@ -537,7 +643,14 @@ class WeatherTracker:
             """,
             tuple(params),
         ).fetchall()
-        return [_serialize_dashboard_position(row) for row in rows]
+        items = [_serialize_dashboard_position(row) for row in rows]
+        if mark_stale_after_seconds is None:
+            return items
+        threshold = max(0, int(mark_stale_after_seconds))
+        for item in items:
+            mark_age = _as_float(item.get("mark_age_seconds"))
+            item["mark_is_stale"] = mark_age is not None and mark_age > threshold
+        return items
 
     def get_recent_resolutions(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -597,8 +710,7 @@ class WeatherTracker:
                 SUM(CASE WHEN status IN ('resolved', 'closed') AND realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN status IN ('resolved', 'closed') AND realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
                 SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_positions,
-                COALESCE(SUM(CASE WHEN status IN ('resolved', 'closed') THEN realized_pnl ELSE 0 END), 0.0) AS realized_pnl,
-                COALESCE(SUM(CASE WHEN status = 'open' THEN shares * COALESCE(mark_price, entry_price) ELSE 0 END), 0.0) AS open_mark_value
+                COALESCE(SUM(CASE WHEN status IN ('resolved', 'closed') THEN realized_pnl ELSE 0 END), 0.0) AS realized_pnl
             FROM paper_positions
             """
         ).fetchone()
@@ -606,7 +718,10 @@ class WeatherTracker:
         losses = int(summary["losses"] or 0)
         open_positions = int(summary["open_positions"] or 0)
         realized_pnl = float(summary["realized_pnl"] or 0.0)
-        open_mark_value = float(summary["open_mark_value"] or 0.0)
+        open_mark_value = sum(
+            float(item.get("net_liquidation_value") or 0.0)
+            for item in self.get_dashboard_paper_positions(limit=500, status="open")
+        )
         current_equity = float(available) + open_mark_value
         total_pnl = current_equity - float(initial)
         total_closed = wins + losses
@@ -628,6 +743,10 @@ class WeatherTracker:
             for row in self.conn.execute("PRAGMA table_info(paper_positions)").fetchall()
         }
         required_columns = {
+            "entry_reference_price": "REAL",
+            "entry_fee_paid": "REAL",
+            "entry_fee_bps": "REAL",
+            "entry_slippage_bps": "REAL",
             "mark_price": "REAL",
             "mark_probability": "REAL",
             "mark_edge_abs": "REAL",
@@ -635,6 +754,12 @@ class WeatherTracker:
             "mark_updated_at": "TEXT",
             "mark_reason": "TEXT",
             "exit_price": "REAL",
+            "exit_reference_price": "REAL",
+            "exit_fee_paid": "REAL",
+            "exit_fee_bps": "REAL",
+            "exit_slippage_bps": "REAL",
+            "gross_exit_payout": "REAL",
+            "net_exit_payout": "REAL",
             "exit_reason": "TEXT",
         }
         for column, column_type in required_columns.items():
@@ -813,29 +938,53 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
     direction = str(payload.get("direction") or "").upper()
     default_market_probability = _contract_probability(direction, payload.get("signal_market_prob"))
     default_outcome_probability = _contract_probability(direction, payload.get("signal_forecast_prob"))
+    entry_reference_price = _bounded_probability(payload.get("entry_reference_price"))
     entry_price = _bounded_probability(payload.get("entry_price"))
+    if entry_reference_price is None:
+        entry_reference_price = default_market_probability
     if entry_price is None:
-        entry_price = default_market_probability or 0.0
+        entry_price = entry_reference_price or default_market_probability or 0.0
     shares = _as_float(payload.get("shares")) or 0.0
     cost = _as_float(payload.get("cost")) or 0.0
+    entry_fee_paid = _as_float(payload.get("entry_fee_paid")) or 0.0
+    entry_fee_bps = _bps(payload.get("entry_fee_bps"))
+    entry_slippage_bps = _bps(payload.get("entry_slippage_bps"))
+    exit_fee_bps = _bps(payload.get("exit_fee_bps"))
+    exit_slippage_bps = _bps(payload.get("exit_slippage_bps"))
     mark_price = _bounded_probability(payload.get("mark_price"))
     if mark_price is None:
         mark_price = default_market_probability
     outcome_probability = _bounded_probability(payload.get("mark_probability"))
     if outcome_probability is None:
         outcome_probability = default_outcome_probability
+    estimated_exit_price, gross_liquidation_value, estimated_exit_fee_paid, net_liquidation_value = _estimate_net_exit_value(
+        shares,
+        mark_price,
+        fee_bps=exit_fee_bps,
+        slippage_bps=exit_slippage_bps,
+    )
+    model_exit_price, gross_model_value, model_exit_fee_paid, net_model_value = _estimate_net_exit_value(
+        shares,
+        outcome_probability,
+        fee_bps=exit_fee_bps,
+        slippage_bps=exit_slippage_bps,
+    )
     if outcome_probability is not None:
         expected_payout = round(shares * outcome_probability, 6)
-        expected_value_pnl = round(expected_payout - cost, 6)
+        expected_value_pnl = round((net_model_value or 0.0) - cost, 6)
     else:
         expected_payout = None
         expected_value_pnl = None
     if mark_price is not None:
         mark_to_market_payout = round(shares * mark_price, 6)
-        mark_to_market_pnl = round(mark_to_market_payout - cost, 6)
+        mark_to_market_pnl = round((net_liquidation_value or 0.0) - cost, 6)
     else:
         mark_to_market_payout = None
         mark_to_market_pnl = None
+    mark_updated_at = _parse_iso_datetime(payload.get("mark_updated_at"))
+    mark_age_seconds = None
+    if mark_updated_at is not None:
+        mark_age_seconds = max(0.0, (now - mark_updated_at).total_seconds())
 
     decision_metadata = {}
     try:
@@ -864,6 +1013,10 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
         "decision_policy_action": str(payload.get("decision_policy_action") or ""),
         "decision_metadata": decision_metadata,
         "entry_price": entry_price,
+        "entry_reference_price": entry_reference_price,
+        "entry_fee_paid": entry_fee_paid,
+        "entry_fee_bps": entry_fee_bps,
+        "entry_slippage_bps": entry_slippage_bps,
         "market_probability": mark_price,
         "outcome_probability": outcome_probability,
         "shares": shares,
@@ -875,6 +1028,14 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
         "mark_probability": outcome_probability,
         "mark_to_market_payout": mark_to_market_payout,
         "mark_to_market_pnl": mark_to_market_pnl,
+        "estimated_exit_price": estimated_exit_price,
+        "estimated_exit_fee_paid": estimated_exit_fee_paid,
+        "gross_liquidation_value": gross_liquidation_value,
+        "net_liquidation_value": net_liquidation_value,
+        "model_exit_price": model_exit_price,
+        "model_exit_fee_paid": model_exit_fee_paid,
+        "gross_model_value": gross_model_value,
+        "net_model_value": net_model_value,
         "mark_edge_abs": _as_float(payload.get("mark_edge_abs")),
         "mark_final_score": _as_float(payload.get("mark_final_score")),
         "mark_updated_at": str(payload.get("mark_updated_at") or ""),
@@ -882,7 +1043,15 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
         "mark_to_market_mode": "reviewed_contract_mark" if payload.get("mark_updated_at") else "entry_contract_mark",
         "expected_value_mode": "reviewed_model_prob" if payload.get("mark_probability") is not None else "entry_model_prob",
         "exit_price": _bounded_probability(payload.get("exit_price")),
+        "exit_reference_price": _bounded_probability(payload.get("exit_reference_price")),
+        "exit_fee_paid": _as_float(payload.get("exit_fee_paid")),
+        "exit_fee_bps": exit_fee_bps,
+        "exit_slippage_bps": exit_slippage_bps,
+        "gross_exit_payout": _as_float(payload.get("gross_exit_payout")),
+        "net_exit_payout": _as_float(payload.get("net_exit_payout")),
         "exit_reason": str(payload.get("exit_reason") or ""),
+        "mark_age_seconds": mark_age_seconds,
+        "mark_is_stale": False,
         "edge": _as_float(payload.get("signal_edge")),
         "edge_abs": _as_float(payload.get("signal_edge_abs")),
         "edge_size": str(payload.get("signal_edge_size") or ""),
@@ -935,3 +1104,49 @@ def _contract_probability(direction: Any, yes_probability: Any) -> float | None:
     if raw is None:
         return None
     return raw if str(direction or "").upper() == "YES" else round(1.0 - raw, 6)
+
+
+def _bps(value: Any) -> float:
+    raw = _as_float(value)
+    if raw is None:
+        return 0.0
+    return round(max(0.0, raw), 6)
+
+
+def _apply_entry_slippage(probability: Any, slippage_bps: Any) -> float | None:
+    raw = _bounded_probability(probability)
+    if raw is None:
+        return None
+    return _bounded_probability(raw * (1.0 + (_bps(slippage_bps) / 10000.0)))
+
+
+def _apply_exit_slippage(probability: Any, slippage_bps: Any) -> float | None:
+    raw = _bounded_probability(probability)
+    if raw is None:
+        return None
+    return _bounded_probability(raw * (1.0 - (_bps(slippage_bps) / 10000.0)))
+
+
+def _fee_amount(notional: Any, fee_bps: Any) -> float:
+    raw = max(0.0, _as_float(notional) or 0.0)
+    return round(raw * (_bps(fee_bps) / 10000.0), 6)
+
+
+def _estimate_net_exit_value(
+    shares: Any,
+    reference_price: Any,
+    *,
+    fee_bps: Any,
+    slippage_bps: Any,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    raw_reference = _bounded_probability(reference_price)
+    if raw_reference is None:
+        return None, None, None, None
+    shares_value = max(0.0, _as_float(shares) or 0.0)
+    fill_exit_price = _apply_exit_slippage(raw_reference, slippage_bps)
+    if fill_exit_price is None:
+        return None, None, None, None
+    gross_payout = round(shares_value * fill_exit_price, 6)
+    exit_fee_paid = _fee_amount(gross_payout, fee_bps)
+    net_payout = round(gross_payout - exit_fee_paid, 6)
+    return fill_exit_price, gross_payout, exit_fee_paid, net_payout

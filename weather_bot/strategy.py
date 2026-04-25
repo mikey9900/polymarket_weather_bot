@@ -57,6 +57,10 @@ class WeatherStrategyEngine:
                     stake_usd=self.config.paper.stake_usd,
                     decision_final_score=decision.final_score,
                     notes="auto_paper_trade",
+                    fee_bps=self.config.paper.fee_bps,
+                    entry_slippage_bps=self.config.paper.entry_slippage_bps,
+                    exit_fee_bps=self.config.paper.fee_bps,
+                    exit_slippage_bps=self.config.paper.exit_slippage_bps,
                 )
                 if position is None:
                     decision = WeatherDecision(

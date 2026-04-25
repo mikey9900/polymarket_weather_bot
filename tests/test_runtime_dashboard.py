@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -27,6 +28,7 @@ def _signal(
     key: str = "rt-1",
     *,
     direction: str = "YES",
+    market_slug: str | None = None,
     market_prob: float = 0.25,
     forecast_prob: float = 0.80,
     edge: float = 0.55,
@@ -36,7 +38,7 @@ def _signal(
         signal_key=key,
         market_type="temperature",
         event_title="Highest temperature in NYC on April 25",
-        market_slug=f"market-{key}",
+        market_slug=market_slug or f"market-{key}",
         event_slug=f"event-{key}",
         city_slug="nyc",
         event_date="2026-04-25",
@@ -180,8 +182,11 @@ def test_dashboard_exposes_enriched_open_trade_cards(tmp_path: Path):
     assert trade["event_title"] == "Highest temperature in NYC on April 25"
     assert trade["target_label"] == "70-71F"
     assert trade["outcome_probability"] == 0.8
+    assert trade["entry_fee_paid"] > 0
+    assert trade["estimated_exit_fee_paid"] > 0
     assert trade["expected_value_pnl"] > 0
     assert trade["mark_to_market_pnl"] is not None
+    assert trade["mark_to_market_pnl"] < (trade["mark_to_market_payout"] - trade["cost"])
     assert trade["mark_to_market_mode"] == "reviewed_contract_mark"
     assert trade["holding_seconds"] is not None
 
@@ -437,3 +442,49 @@ def test_dashboard_manual_close_action_closes_open_trade(tmp_path: Path):
     assert response["state"]["summary"]["paper"]["open_positions"] == 0
     assert latest_trade["status"] == "closed"
     assert latest_trade["exit_reason"] == "manual_test_close"
+    assert latest_trade["exit_fee_paid"] > 0
+    assert latest_trade["net_exit_payout"] < latest_trade["gross_exit_payout"]
+
+
+def test_manual_close_refreshes_stale_mark_before_closing(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    signal = _signal("stale-close-1", market_prob=0.25, forecast_prob=0.8, edge=0.55, edge_abs=0.55)
+    strategy.process_signals([signal], auto_trade_enabled=True)
+    open_position = tracker.get_dashboard_paper_positions(limit=12, status="open")[0]
+    stale_reviewed_at = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    tracker.update_paper_position_review(
+        int(open_position["id"]),
+        mark_price=0.25,
+        mark_probability=0.8,
+        edge_abs=0.55,
+        final_score=0.85,
+        reviewed_at=stale_reviewed_at,
+        reason="stale seed",
+    )
+    refreshed_signal = _signal(
+        "stale-close-1-refresh",
+        market_slug=signal.market_slug,
+        direction=signal.direction,
+        market_prob=0.60,
+        forecast_prob=0.8,
+        edge=0.20,
+        edge_abs=0.20,
+    )
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        temperature_scanner=lambda *, limit=300: _batch(refreshed_signal),
+    )
+
+    result = runtime.close_position(int(open_position["id"]), reason="manual_test_close")
+    latest_trade = tracker.get_dashboard_paper_positions(limit=12)[0]
+
+    assert result["ok"] is True
+    assert latest_trade["status"] == "closed"
+    assert latest_trade["exit_reference_price"] == 0.6
+    assert latest_trade["mark_reason"].startswith("manual_close_refresh:")

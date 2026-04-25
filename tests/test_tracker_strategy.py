@@ -188,4 +188,5 @@ def test_strategy_prices_no_contract_using_complement_price(tmp_path: Path):
     )[0]
 
     assert result.position is not None
-    assert result.position.entry_price == 0.2
+    expected_entry_price = round(0.2 * (1.0 + config.paper.entry_slippage_bps / 10000.0), 6)
+    assert result.position.entry_price == expected_entry_price

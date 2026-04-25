@@ -247,11 +247,38 @@ class WeatherRuntime:
     def close_position(self, position_id: int, *, reason: str = "manual_dashboard_sell") -> dict[str, Any]:
         positions = {
             int(item["id"]): item
-            for item in self.tracker.get_dashboard_paper_positions(limit=500, status="open")
+            for item in self.tracker.get_dashboard_paper_positions(
+                limit=500,
+                status="open",
+                mark_stale_after_seconds=self.config.paper.mark_stale_after_seconds,
+            )
         }
         position = positions.get(int(position_id))
         if position is None:
             return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
+        mark_age_seconds = _as_float(position.get("mark_age_seconds"))
+        if (
+            position.get("mark_updated_at") in {None, ""}
+            or (mark_age_seconds is not None and mark_age_seconds > float(self.config.paper.mark_stale_after_seconds))
+        ):
+            try:
+                self.review_open_positions(
+                    reason="manual_close_refresh",
+                    market_types={str(position.get("market_type") or "")},
+                )
+            except Exception:
+                pass
+            positions = {
+                int(item["id"]): item
+                for item in self.tracker.get_dashboard_paper_positions(
+                    limit=500,
+                    status="open",
+                    mark_stale_after_seconds=self.config.paper.mark_stale_after_seconds,
+                )
+            }
+            position = positions.get(int(position_id))
+            if position is None:
+                return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
         exit_price = _as_probability(
             position.get("mark_price") or position.get("market_probability") or position.get("entry_price")
         )
@@ -263,6 +290,8 @@ class WeatherRuntime:
             edge_abs=_as_float(position.get("mark_edge_abs") or position.get("edge_abs")),
             final_score=_as_float(position.get("mark_final_score") or position.get("decision_final_score")),
             mark_reason=str(position.get("mark_reason") or "Manual dashboard sell."),
+            exit_fee_bps=self.config.paper.fee_bps,
+            exit_slippage_bps=self.config.paper.exit_slippage_bps,
         )
         if result is None:
             return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
@@ -545,6 +574,8 @@ class WeatherRuntime:
                 final_score=decision.final_score,
                 reviewed_at=reviewed_at,
                 reason=f"{trigger}: {decision.reason}",
+                exit_fee_bps=self.config.paper.fee_bps,
+                exit_slippage_bps=self.config.paper.exit_slippage_bps,
             )
             reviewed += 1
             if not decision.should_close:
