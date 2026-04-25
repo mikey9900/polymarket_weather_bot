@@ -12,13 +12,19 @@
     *{box-sizing:border-box} html,body{margin:0;min-height:100%;background:radial-gradient(circle at 15% 12%,rgba(0,240,255,.14),transparent 20%),radial-gradient(circle at 82% 16%,rgba(255,70,209,.10),transparent 18%),linear-gradient(180deg,var(--bg2),var(--bg1) 42%,var(--bg0));color:var(--text);font:18px/1.12 "VT323","Courier New",monospace;overflow-x:hidden}
     body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:999;background:repeating-linear-gradient(to bottom,rgba(0,240,255,.04) 0,rgba(0,240,255,.04) 1px,transparent 1px,transparent 3px)}
     body:after{content:"";position:fixed;inset:0;pointer-events:none;z-index:998;background:radial-gradient(ellipse at center,transparent 52%,rgba(0,0,0,.58) 100%)}
-    .wrap,.summary,.deck,main,.footer{max-width:1440px;margin:0 auto;padding:0 12px}
+    .summary,.dashboard-grid,.footer{max-width:1440px;margin:0 auto;padding:0 12px}
     .topbar{position:sticky;top:0;z-index:40;display:flex;justify-content:space-between;gap:14px;align-items:center;padding:12px 18px;background:linear-gradient(180deg,#1a2344,#0b1022);border-bottom:2px solid var(--chrome);box-shadow:inset 0 1px 0 #2e3965,inset 0 -2px 0 #000,0 0 20px rgba(0,240,255,.12)}
     .brand{display:flex;align-items:center;gap:10px;font:13px "Press Start 2P","VT323",monospace;color:var(--cyan);letter-spacing:1.4px;text-shadow:0 0 6px rgba(0,240,255,.92),0 0 14px rgba(0,240,255,.45)}
     .pulse{width:10px;height:10px;border-radius:50%;background:var(--lime);box-shadow:0 0 10px var(--lime);animation:blink 1.4s infinite}
     .meta{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:10px}
-    .chip,.uplink,.pill,.block,.panel,.card,.item{border:1px solid var(--chrome);background:linear-gradient(180deg,rgba(24,34,72,.96),rgba(11,17,35,.96));box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 0 10px rgba(0,240,255,.08)}
+    .chip,.uplink,.pill,.block,.panel,.card,.item,.topctl,.cellbtn,.handle{border:1px solid var(--chrome);background:linear-gradient(180deg,rgba(24,34,72,.96),rgba(11,17,35,.96));box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 0 10px rgba(0,240,255,.08)}
     .chip,.uplink{display:inline-flex;align-items:center;gap:7px;padding:5px 9px;border-radius:4px;font-size:15px;letter-spacing:1px}
+    .topctl,.cellbtn,.handle{appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:5px 8px;border-radius:4px;color:var(--text);font:8px "Press Start 2P","VT323",monospace;letter-spacing:1px;cursor:pointer;text-transform:uppercase}
+    .topctl:hover,.cellbtn:hover,.handle:hover{transform:translateY(-1px);box-shadow:inset 0 1px 0 #2c3865,0 3px 0 #000,0 0 11px rgba(0,240,255,.28)}
+    .topctl{min-height:28px}
+    .cellbtn{min-width:42px;padding-inline:7px}
+    .handle{min-width:58px;touch-action:none;cursor:grab}
+    .handle:active{cursor:grabbing}
     .chip .lbl,.uplink .age,.stat .lbl,.read .lbl{color:var(--dim);font-size:12px}
     .uplink .dot{width:8px;height:8px;border-radius:50%;background:var(--lime);box-shadow:0 0 8px var(--lime)}
     .uplink.ok{color:var(--lime)} .uplink.stale{color:var(--amber);background:#281c09;animation:blink .9s infinite} .uplink.stale .dot{background:var(--amber);box-shadow:0 0 8px var(--amber)} .uplink.dead{color:var(--red);background:#2b0913;animation:blink .55s infinite} .uplink.dead .dot{background:var(--red);box-shadow:0 0 10px var(--red)}
@@ -26,8 +32,15 @@
     .pill{padding:6px 8px;border-radius:5px;min-width:0}.pill .lbl{display:block;color:#d7e7ff;font:10px "Press Start 2P","VT323",monospace;letter-spacing:1px;margin-bottom:4px}.pill .val{display:block;font-size:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pill .sub{display:block;margin-top:3px;color:var(--dim);font-size:14px}
     .good{color:var(--lime)!important;text-shadow:0 0 5px rgba(77,255,116,.35)} .bad{color:#ff9898!important;text-shadow:0 0 5px rgba(255,92,108,.28)} .warn{color:#ffd37a!important;text-shadow:0 0 5px rgba(255,187,57,.28)}
     .shell,.panel{background:linear-gradient(180deg,#0f1737,#070d20);border:2px solid var(--chrome);border-radius:8px;box-shadow:inset 0 1px 0 #2c3865,inset 0 -2px 0 #000,0 0 18px rgba(0,240,255,.10),0 4px 0 #000}
-    .deck{margin-top:12px}.shell,.panel{padding:12px}
+    .shell,.panel{padding:12px}
+    .dashboard-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:12px;margin-top:12px;padding-bottom:18px;align-items:start}
+    .dashboard-cell{position:relative;min-width:0;grid-column:span 12}
+    .span-12{grid-column:span 12}.span-7{grid-column:span 7}.span-5{grid-column:span 5}.span-4{grid-column:span 4}
+    .dashboard-cell.dragging{opacity:.97;transform:rotate(.35deg) scale(1.01);filter:drop-shadow(0 0 18px rgba(0,240,255,.24));cursor:grabbing}
+    .dashboard-cell.drag-placeholder{min-height:180px;border:2px dashed rgba(0,240,255,.42);border-radius:8px;background:rgba(7,12,28,.56);box-shadow:inset 0 0 18px rgba(0,240,255,.12),0 0 12px rgba(0,240,255,.08)}
+    .dashboard-cell.drag-placeholder:before{content:"DROP CELL";display:grid;place-items:center;height:100%;min-height:180px;color:var(--cyan);font:9px "Press Start 2P","VT323",monospace;letter-spacing:1px;text-shadow:0 0 8px rgba(0,240,255,.35)}
     .head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}
+    .head-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;align-items:center}
     .kicker{display:block;color:var(--cyan);font:9px "Press Start 2P","VT323",monospace;letter-spacing:1px;text-transform:uppercase;margin-bottom:5px}
     h2{margin:0;color:#ffe3a6;font:11px "Press Start 2P","VT323",monospace;letter-spacing:1.3px;text-shadow:0 0 4px rgba(255,187,57,.45)}
     .subtxt,.meta-note,.foot{color:var(--dim)} .meta-note{font-size:15px}
@@ -38,7 +51,7 @@
     input[type=number]{width:120px;padding:6px 8px;border-radius:4px;border:1px solid #314580;background:rgba(8,13,31,.72);color:var(--text);font:18px "VT323","Courier New",monospace}
     .note{margin-top:8px;padding:6px 7px;border:1px solid #314580;border-radius:4px;background:rgba(8,13,31,.74);color:var(--dim);min-height:34px}
     .status{margin-top:12px;padding:7px 9px;border:1px dashed #2b3b78;border-radius:4px;background:rgba(8,13,31,.75);color:var(--dim);min-height:22px}
-    main{display:flex;flex-direction:column;gap:12px;margin-top:12px;padding-bottom:18px}.two,.three,.cards,.signals{display:grid;gap:10px}.cards{grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}.signals{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}.two{grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr)}.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .cards,.signals{display:grid;gap:10px}.cards{grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}.signals{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
     .card,.item{position:relative;border-color:var(--line);border-radius:6px;background:linear-gradient(180deg,rgba(17,25,57,.96),rgba(8,13,31,.95));overflow:hidden}.card:before,.item:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(0,240,255,.05),transparent 48%)} .card.pos:before{background:linear-gradient(180deg,rgba(77,255,116,.08),transparent 46%)} .card.neg:before{background:linear-gradient(180deg,rgba(255,92,108,.08),transparent 46%)}
     .cardhead,.itemhead{display:flex;justify-content:space-between;gap:8px;align-items:flex-start;padding:9px 10px 7px;border-bottom:1px solid rgba(39,56,109,.72)} .title{margin:0;color:var(--text);font-size:22px;line-height:1.02}.tiny{margin-top:4px;color:var(--dim);font-size:15px}.badges{display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-end}
     .badge{display:inline-flex;align-items:center;padding:3px 6px;border:1px solid #314580;border-radius:999px;background:rgba(8,13,31,.8);font-size:14px;white-space:nowrap}
@@ -46,9 +59,9 @@
     .bars{display:grid;grid-template-columns:repeat(auto-fit,minmax(18px,1fr));gap:6px;align-items:end;min-height:170px;padding-top:6px}.bar{position:relative;min-height:10px;border:1px solid rgba(49,69,128,.62);border-radius:4px 4px 2px 2px;background:linear-gradient(180deg,rgba(0,240,255,.95),rgba(0,240,255,.20));box-shadow:0 0 8px rgba(0,240,255,.18)} .bar.neg{background:linear-gradient(180deg,rgba(255,92,108,.95),rgba(255,92,108,.20));box-shadow:0 0 8px rgba(255,92,108,.18)} .bar span{position:absolute;left:50%;bottom:-20px;transform:translateX(-50%);color:var(--dim);font-size:11px;white-space:nowrap}
     .footer{margin-top:8px;padding:6px 12px 16px;color:var(--dim);font-size:15px;text-align:right}
     @keyframes blink{0%,60%{opacity:1}70%,100%{opacity:.28}}
-    @media (max-width:1240px){.summary{grid-template-columns:repeat(4,minmax(0,1fr))}.controls{grid-template-columns:repeat(3,minmax(0,1fr))}.three{grid-template-columns:1fr}}
-    @media (max-width:900px){.two{grid-template-columns:1fr}.controls{grid-template-columns:1fr 1fr}.topbar{flex-direction:column;align-items:flex-start}.meta{justify-content:flex-start}}
-    @media (max-width:640px){.wrap,.summary,.deck,main,.footer{padding-left:8px;padding-right:8px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.controls,.cards,.signals,.three{grid-template-columns:1fr}.brand{font-size:11px}}
+    @media (max-width:1240px){.summary{grid-template-columns:repeat(4,minmax(0,1fr))}.controls{grid-template-columns:repeat(3,minmax(0,1fr))}.span-7,.span-5,.span-4{grid-column:span 6}}
+    @media (max-width:900px){.controls{grid-template-columns:1fr 1fr}.topbar{flex-direction:column;align-items:flex-start}.meta{justify-content:flex-start}.span-7,.span-5,.span-4{grid-column:span 12}}
+    @media (max-width:640px){.summary,.dashboard-grid,.footer{padding-left:8px;padding-right:8px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.controls,.cards,.signals{grid-template-columns:1fr}.brand{font-size:11px}.head{flex-direction:column}.head-actions{justify-content:flex-start}}
   </style>
 </head>
 <body>
@@ -58,49 +71,114 @@
       <div class="chip"><span class="lbl">STATE</span><span id="chip-state">BOOT</span></div>
       <div class="chip"><span class="lbl">UTC</span><span id="chip-time">--</span></div>
       <div id="uplink" class="uplink dead"><span class="dot"></span><span id="uplabel">OFFLINE</span><span class="age" id="upage">--</span></div>
+      <button class="topctl" type="button" onclick="resetLayout()">RESET LAYOUT</button>
     </div>
   </header>
   <section class="summary" id="summary"></section>
-  <section class="deck">
-    <div class="shell">
-      <div class="head"><div><span class="kicker">Home Assistant Primary Deck</span><h2>CONTROL DECK</h2></div><div class="meta-note" id="deck-meta">Weather runtime controls and paper-learning switches.</div></div>
-      <div class="controls" id="controls"></div>
-      <div class="status" id="status">CONTROL LINK STANDBY</div>
-    </div>
-  </section>
-  <main>
-    <section class="panel">
-      <div class="head"><div><span class="kicker">Paper Desk</span><h2>OPEN TRADES</h2><div class="subtxt">Compact cards for every live paper position.</div></div><div class="meta-note" id="trades-meta">Awaiting positions.</div></div>
-      <div class="cards" id="open-trades"></div>
+  <main class="dashboard-grid" id="dashboard-grid">
+    <section class="dashboard-cell span-12" data-cell-id="control-deck" data-cell-label="Control Deck">
+      <div class="shell">
+        <div class="head">
+          <div><span class="kicker">Home Assistant Primary Deck</span><h2>CONTROL DECK</h2></div>
+          <div class="head-actions">
+            <div class="meta-note" id="deck-meta">Weather runtime controls and paper-learning switches.</div>
+            <button class="cellbtn" type="button" onclick="shiftCell('control-deck', -1)">UP</button>
+            <button class="cellbtn" type="button" onclick="shiftCell('control-deck', 1)">DOWN</button>
+            <button class="handle" type="button" data-handle>DRAG</button>
+          </div>
+        </div>
+        <div class="controls" id="controls"></div>
+        <div class="status" id="status">CONTROL LINK STANDBY</div>
+      </div>
     </section>
-    <div class="two">
-      <section class="panel">
-        <div class="head"><div><span class="kicker">Signal Radar</span><h2>RECENT SIGNALS</h2></div><div class="meta-note" id="signals-meta">Latest adapter output.</div></div>
+    <section class="dashboard-cell span-12" data-cell-id="open-trades" data-cell-label="Open Trades">
+      <div class="panel">
+        <div class="head">
+          <div><span class="kicker">Paper Desk</span><h2>OPEN TRADES</h2><div class="subtxt">Compact cards for every live paper position.</div></div>
+          <div class="head-actions">
+            <div class="meta-note" id="trades-meta">Awaiting positions.</div>
+            <button class="cellbtn" type="button" onclick="shiftCell('open-trades', -1)">UP</button>
+            <button class="cellbtn" type="button" onclick="shiftCell('open-trades', 1)">DOWN</button>
+            <button class="handle" type="button" data-handle>DRAG</button>
+          </div>
+        </div>
+        <div class="cards" id="open-trades"></div>
+      </div>
+    </section>
+    <section class="dashboard-cell span-7" data-cell-id="signals" data-cell-label="Recent Signals">
+      <div class="panel">
+        <div class="head">
+          <div><span class="kicker">Signal Radar</span><h2>RECENT SIGNALS</h2></div>
+          <div class="head-actions">
+            <div class="meta-note" id="signals-meta">Latest adapter output.</div>
+            <button class="cellbtn" type="button" onclick="shiftCell('signals', -1)">UP</button>
+            <button class="cellbtn" type="button" onclick="shiftCell('signals', 1)">DOWN</button>
+            <button class="handle" type="button" data-handle>DRAG</button>
+          </div>
+        </div>
         <div class="signals" id="signals"></div>
-      </section>
-      <section class="panel">
-        <div class="head"><div><span class="kicker">Resolution Tape</span><h2>RECENT SETTLEMENTS</h2></div><div class="meta-note" id="res-meta">Resolved market tape.</div></div>
+      </div>
+    </section>
+    <section class="dashboard-cell span-5" data-cell-id="resolutions" data-cell-label="Recent Settlements">
+      <div class="panel">
+        <div class="head">
+          <div><span class="kicker">Resolution Tape</span><h2>RECENT SETTLEMENTS</h2></div>
+          <div class="head-actions">
+            <div class="meta-note" id="res-meta">Resolved market tape.</div>
+            <button class="cellbtn" type="button" onclick="shiftCell('resolutions', -1)">UP</button>
+            <button class="cellbtn" type="button" onclick="shiftCell('resolutions', 1)">DOWN</button>
+            <button class="handle" type="button" data-handle>DRAG</button>
+          </div>
+        </div>
         <div class="signals" id="resolutions"></div>
-      </section>
-    </div>
-    <div class="three">
-      <section class="panel">
-        <div class="head"><div><span class="kicker">Paper Pulse</span><h2>PNL BAROMETER</h2></div><div class="meta-note">Recent dashboard samples.</div></div>
+      </div>
+    </section>
+    <section class="dashboard-cell span-4" data-cell-id="bars" data-cell-label="PnL Barometer">
+      <div class="panel">
+        <div class="head">
+          <div><span class="kicker">Paper Pulse</span><h2>PNL BAROMETER</h2></div>
+          <div class="head-actions">
+            <div class="meta-note">Recent dashboard samples.</div>
+            <button class="cellbtn" type="button" onclick="shiftCell('bars', -1)">UP</button>
+            <button class="cellbtn" type="button" onclick="shiftCell('bars', 1)">DOWN</button>
+            <button class="handle" type="button" data-handle>DRAG</button>
+          </div>
+        </div>
         <div class="bars" id="bars"></div>
-      </section>
-      <section class="panel">
-        <div class="head"><div><span class="kicker">Codex + System</span><h2>RESEARCH BUS</h2></div><div class="meta-note" id="sys-meta">Automation and export mirrors.</div></div>
+      </div>
+    </section>
+    <section class="dashboard-cell span-4" data-cell-id="system" data-cell-label="Research Bus">
+      <div class="panel">
+        <div class="head">
+          <div><span class="kicker">Codex + System</span><h2>RESEARCH BUS</h2></div>
+          <div class="head-actions">
+            <div class="meta-note" id="sys-meta">Automation and export mirrors.</div>
+            <button class="cellbtn" type="button" onclick="shiftCell('system', -1)">UP</button>
+            <button class="cellbtn" type="button" onclick="shiftCell('system', 1)">DOWN</button>
+            <button class="handle" type="button" data-handle>DRAG</button>
+          </div>
+        </div>
         <div class="signals" id="system"></div>
-      </section>
-      <section class="panel">
-        <div class="head"><div><span class="kicker">Ops Log</span><h2>OPERATOR ACTIONS</h2></div><div class="meta-note">Control plane history.</div></div>
+      </div>
+    </section>
+    <section class="dashboard-cell span-4" data-cell-id="ops" data-cell-label="Operator Actions">
+      <div class="panel">
+        <div class="head">
+          <div><span class="kicker">Ops Log</span><h2>OPERATOR ACTIONS</h2></div>
+          <div class="head-actions">
+            <div class="meta-note">Control plane history.</div>
+            <button class="cellbtn" type="button" onclick="shiftCell('ops', -1)">UP</button>
+            <button class="cellbtn" type="button" onclick="shiftCell('ops', 1)">DOWN</button>
+            <button class="handle" type="button" data-handle>DRAG</button>
+          </div>
+        </div>
         <div class="signals" id="ops"></div>
-      </section>
-    </div>
+      </div>
+    </section>
   </main>
   <div class="footer" id="footer">INITIALIZING WEATHER OPS TERMINAL</div>
   <script>
-    const POLL_MS=5000,STALE_AFTER=9000,DEAD_AFTER=18000; let state=null,history=[],lastFrame=0,busy=false,statusMsg={text:"CONTROL LINK STANDBY",tone:""};
+    const POLL_MS=5000,STALE_AFTER=9000,DEAD_AFTER=18000,LAYOUT_KEY="weather-ops-layout-v1",DEFAULT_LAYOUT=["control-deck","open-trades","signals","resolutions","bars","system","ops"]; let state=null,history=[],lastFrame=0,busy=false,dragState=null,statusMsg={text:"CONTROL LINK STANDBY",tone:""};
     const $=id=>document.getElementById(id), api=p=>new URL(p,window.location.href).toString(), esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
     const usd=v=>"$"+Number(v||0).toFixed(2), sUsd=v=>`${Number(v||0)>0?"+":""}$${Number(v||0).toFixed(2)}`, pct=(v,d=1)=>v==null?"--":(Number(v)*100).toFixed(d)+"%", compact=v=>Math.abs(Number(v||0))>=1000?(Number(v||0)/1000).toFixed(1)+"K":Number(v||0).toFixed(0);
     const dt=v=>{if(!v)return"never";const x=new Date(v);return Number.isNaN(x.getTime())?String(v):x.toLocaleString()}, short=v=>{if(!v)return"--";const x=new Date(v);return Number.isNaN(x.getTime())?String(v):x.toISOString().slice(11,19)};
@@ -108,6 +186,7 @@
     const tone=v=>Number(v||0)>0?"good":Number(v||0)<0?"bad":"", yesno=v=>v?"ON":"OFF", badge=(txt,cls="")=>`<span class="badge ${cls}">${esc(txt)}</span>`;
     const read=(l,v,c="")=>`<div class="read"><span class="lbl">${esc(l)}</span><span class="val ${c}">${esc(v)}</span></div>`;
     const stat=(l,v,s,c="")=>`<div class="stat"><span class="lbl">${esc(l)}</span><span class="val ${c}">${esc(v)}</span><span class="lbl">${esc(s)}</span></div>`;
+    const cells=()=>Array.from(document.querySelectorAll("#dashboard-grid .dashboard-cell")).filter(x=>!x.classList.contains("drag-placeholder"));
     function btn(label,action,value,opt={}){const dis=opt.dis?" disabled":"", act=opt.act?" active":"", warn=opt.warn?" warn":"", args=value===undefined?"":`, ${JSON.stringify(value)}`; return `<button class="ctl${act}${warn}"${dis} onclick="act('${esc(action)}'${args})">${esc(label)}</button>`}
     function block(title,reads,buttons,note){return `<div class="block"><span class="title">${esc(title)}</span><div class="reads">${reads}</div><div class="row">${buttons}</div><div class="note">${esc(note)}</div></div>`}
     function empty(text){return `<div class="placeholder">${esc(text)}</div>`}
@@ -115,6 +194,18 @@
     function scanTone(status,errs){status=String(status||"").toLowerCase(); if(status==="failed")return"bad"; if(Number(errs||0)>0||status==="running")return"warn"; if(status==="completed")return"good"; return""}
     function qDetail(c){if((c.pending_scan_types||[]).length)return c.pending_scan_types.join(" / ").toUpperCase(); if(c.active_scan_type)return String(c.active_scan_type).toUpperCase()+" RUNNING"; return c.scan_worker_healthy?"worker healthy":"worker attention"}
     function sSub(r,p){const b=p==="temperature"?"last_temperature":"last_precipitation", fr=[`${Number(r[b+"_signal_count"]||0)} sig`]; if(r[b+"_scan_duration_ms"]!=null)fr.push(`${r[b+"_scan_duration_ms"]}ms`); if(Number(r[b+"_error_count"]||0)>0)fr.push(`${r[b+"_error_count"]} err`); return fr.join(" | ")}
+    function setStatus(text,toneValue=""){statusMsg={text,tone:toneValue}; if(state)renderControls()}
+    function saveLayout(){try{localStorage.setItem(LAYOUT_KEY, JSON.stringify(cells().map(x=>x.dataset.cellId)))}catch(e){}}
+    function applyLayout(order){const grid=$("dashboard-grid"); if(!grid)return; const byId=new Map(cells().map(x=>[x.dataset.cellId,x])); const seen=new Set(); for(const id of order||[]){const cell=byId.get(id); if(!cell)continue; seen.add(id); grid.appendChild(cell)} for(const id of DEFAULT_LAYOUT){const cell=byId.get(id); if(cell&&!seen.has(id))grid.appendChild(cell)} for(const cell of cells()){if(!seen.has(cell.dataset.cellId)&&!DEFAULT_LAYOUT.includes(cell.dataset.cellId))grid.appendChild(cell)}}
+    function loadLayout(){try{const raw=localStorage.getItem(LAYOUT_KEY); if(!raw)return; const order=JSON.parse(raw); if(Array.isArray(order)&&order.length)applyLayout(order)}catch(e){}}
+    function resetLayout(){applyLayout(DEFAULT_LAYOUT); try{localStorage.removeItem(LAYOUT_KEY)}catch(e){} setStatus("Layout reset to the default control deck stack.","good")}
+    function shiftCell(cellId,direction){const list=cells(), index=list.findIndex(x=>x.dataset.cellId===cellId); if(index<0)return; const next=index+Number(direction||0); if(next<0||next>=list.length)return; const grid=$("dashboard-grid"), cell=list[index], anchor=direction<0?list[next]:list[next].nextSibling; grid.insertBefore(cell,anchor); saveLayout(); setStatus(`${cell.dataset.cellLabel||cellId} moved ${direction<0?"up":"down"}.`,"good")}
+    function pointerWithin(event,rect){return event.clientY<rect.top+rect.height*.38 || (event.clientY<rect.bottom && event.clientX<rect.left+rect.width*.5)}
+    function clearDrag(){if(!dragState)return; document.removeEventListener("pointermove", onDragMove); document.removeEventListener("pointerup", onDragEnd); document.removeEventListener("pointercancel", onDragEnd); dragState=null}
+    function onDragMove(event){if(!dragState||event.pointerId!==dragState.pointerId)return; event.preventDefault(); const {cell,offsetX,offsetY,grid,placeholder}=dragState; cell.style.left=`${event.clientX-offsetX}px`; cell.style.top=`${event.clientY-offsetY}px`; const hit=document.elementFromPoint(event.clientX,event.clientY), target=hit&&hit.closest(".dashboard-cell"); if(!target||target===cell||target===placeholder)return; const before=pointerWithin(event,target.getBoundingClientRect()); grid.insertBefore(placeholder,before?target:target.nextSibling)}
+    function onDragEnd(event){if(!dragState||event.pointerId!==dragState.pointerId)return; const {cell,placeholder,grid,label}=dragState; clearDrag(); cell.classList.remove("dragging"); cell.removeAttribute("style"); grid.insertBefore(cell,placeholder); placeholder.remove(); saveLayout(); setStatus(`${label} moved and saved for this browser.`,"good")}
+    function startDrag(event){if((event.button!=null&&event.button!==0)||dragState)return; const handle=event.currentTarget, cell=handle.closest(".dashboard-cell"), grid=$("dashboard-grid"); if(!cell||!grid)return; event.preventDefault(); const rect=cell.getBoundingClientRect(), placeholder=document.createElement("section"); placeholder.className=`${cell.className} drag-placeholder`; placeholder.dataset.cellId=`${cell.dataset.cellId}-placeholder`; placeholder.style.height=`${Math.max(rect.height,180)}px`; grid.insertBefore(placeholder,cell); document.body.appendChild(cell); cell.classList.add("dragging"); cell.style.position="fixed"; cell.style.left=`${rect.left}px`; cell.style.top=`${rect.top}px`; cell.style.width=`${rect.width}px`; cell.style.height=`${rect.height}px`; cell.style.margin="0"; cell.style.zIndex="999"; cell.style.pointerEvents="none"; dragState={cell,grid,placeholder,pointerId:event.pointerId,offsetX:event.clientX-rect.left,offsetY:event.clientY-rect.top,label:cell.dataset.cellLabel||cell.dataset.cellId}; document.addEventListener("pointermove", onDragMove); document.addEventListener("pointerup", onDragEnd); document.addEventListener("pointercancel", onDragEnd); handle.setPointerCapture&&handle.setPointerCapture(event.pointerId)}
+    function initLayout(){for(const handle of document.querySelectorAll("[data-handle]")){handle.addEventListener("pointerdown", startDrag)} loadLayout()}
     function renderSummary(){const c=state.controls||{},r=state.runtime||{},p=(state.summary||{}).paper||{},sig=Object.values(state.signal_summary_24h||{}).reduce((a,v)=>a+Number(v||0),0); $("summary").innerHTML=[
       pill("Runtime",c.state||"unknown",c.last_message||"Operator link ready.", String(c.state||"").toLowerCase()==="running"?"good":"warn"),
       pill("Balance",usd(p.balance),`Equity ${usd(p.equity)}`),
@@ -155,7 +246,7 @@
     async function act(action,value=null){if(value==="__from_input__"){const input=$("cap-input"), parsed=Number(input&&input.value?input.value:0); if(!parsed){if(input)input.focus(); return} value=parsed} busy=true; statusMsg={text:`SENDING ${String(action||"").toUpperCase()}...`,tone:"warn"}; if(state)render(); try{const r=await fetch(api("./api/control"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,value})}); const payload=await r.json(); if(payload.state)state=payload.state; const h=await fetch(api("./api/history"),{cache:"no-store"}); if(h.ok)history=await h.json(); statusMsg={text:payload.message||"Control applied.",tone:payload.ok?"good":"bad"}; if(payload.state)lastFrame=performance.now(); if(state)render()}catch(e){statusMsg={text:`CONTROL ERROR: ${e.message||e}`,tone:"bad"}; if(state)render()}finally{busy=false; if(state)render()}}
     function preset(v){const i=$("cap-input"); if(i)i.value=String(v)}
     function uplink(){const dtm=lastFrame?(performance.now()-lastFrame):Infinity, el=$("uplink"); let cls="uplink dead", label="OFFLINE"; if(dtm<STALE_AFTER){cls="uplink ok"; label="LINK"} else if(dtm<DEAD_AFTER){cls="uplink stale"; label="STALE"} el.className=cls; $("uplabel").textContent=label; $("upage").textContent=Number.isFinite(dtm)?Math.round(dtm)+"ms":"--"}
-    load(); setInterval(load,POLL_MS); setInterval(uplink,200);
+    initLayout(); load(); setInterval(load,POLL_MS); setInterval(uplink,200);
   </script>
 </body>
 </html>
