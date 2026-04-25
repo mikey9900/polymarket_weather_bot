@@ -196,7 +196,7 @@ class ResearchWarehouse:
         self.conn.execute("DELETE FROM decisions")
         self.conn.execute("DELETE FROM paper_positions")
         self.conn.execute("DELETE FROM resolved_outcomes")
-        self.conn.executemany(
+        self._insert_many(
             """
             INSERT INTO signals(
                 signal_id, signal_key, market_type, event_title, market_slug, event_slug, city_slug,
@@ -207,7 +207,7 @@ class ResearchWarehouse:
             """,
             [tuple(row) for row in signals],
         )
-        self.conn.executemany(
+        self._insert_many(
             """
             INSERT INTO decisions(
                 decision_id, signal_id, signal_key, accepted, reason, final_score, policy_action, source_age_hours, created_at
@@ -229,7 +229,7 @@ class ResearchWarehouse:
                 for row in decisions
             ],
         )
-        self.conn.executemany(
+        self._insert_many(
             """
             INSERT INTO paper_positions(
                 position_id, signal_id, decision_id, signal_key, market_type, market_slug, event_slug,
@@ -295,6 +295,11 @@ class ResearchWarehouse:
             "resolved_outcomes": int(resolved_count),
             "warehouse_path": str(self.db_path),
         }
+
+    def _insert_many(self, query: str, rows: list[tuple[object, ...]]) -> None:
+        if not rows:
+            return
+        self.conn.executemany(query, rows)
 
 
 def _metadata_source_age_hours(metadata_json: object) -> float | None:

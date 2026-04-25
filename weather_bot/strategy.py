@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from .config import WeatherBotConfig
 from .models import PaperPosition, WeatherDecision, WeatherSignal
@@ -17,11 +18,24 @@ class StrategyResult:
     position: PaperPosition | None
 
 
+@dataclass(frozen=True)
+class PositionExitDecision:
+    should_close: bool
+    reason: str
+    reason_code: str
+    final_score: float | None
+    signal_age_hours: float | None
+    mark_price: float | None
+    mark_probability: float | None
+    edge_abs: float | None
+
+
 class WeatherStrategyEngine:
     def __init__(self, config: WeatherBotConfig, tracker: WeatherTracker, research_provider=None):
         self.config = config
         self.tracker = tracker
         self.research_provider = research_provider
+        self._paper_max_open_positions = max(1, int(self.config.paper.max_open_positions))
 
     def process_signals(
         self,
@@ -41,6 +55,7 @@ class WeatherStrategyEngine:
                     decision_id=decision_id,
                     signal=signal,
                     stake_usd=self.config.paper.stake_usd,
+                    decision_final_score=decision.final_score,
                     notes="auto_paper_trade",
                 )
                 if position is None:
@@ -56,14 +71,197 @@ class WeatherStrategyEngine:
             results.append(StrategyResult(signal=signal, decision=decision, position=position))
         return results
 
+    @property
+    def paper_max_open_positions(self) -> int:
+        return int(self._paper_max_open_positions)
+
+    def set_paper_max_open_positions(self, value: int) -> int:
+        self._paper_max_open_positions = max(1, int(value))
+        return int(self._paper_max_open_positions)
+
     def evaluate_signal(self, signal: WeatherSignal, *, auto_trade_enabled: bool) -> WeatherDecision:
         thresholds = self._thresholds(signal.market_type)
+        profile = self._signal_profile(signal, thresholds)
         reasons: list[str] = []
+        final_score = float(profile["final_score"] or 0.0)
+        policy_action = str(profile["policy_action"] or "advisory")
+        metadata = dict(profile["metadata"])
+        if policy_action == "paper_blocked":
+            reasons.append("Runtime policy blocked this signal.")
+        if not auto_trade_enabled:
+            reasons.append("Automatic paper trading is disabled.")
+        if not self.config.paper.enabled:
+            reasons.append("Paper trading is disabled in config.")
+        reasons.extend(self._entry_gate_reasons(signal, thresholds, final_score, profile["signal_age_hours"]))
+        if self.tracker.count_open_positions() >= self.paper_max_open_positions:
+            reasons.append("Maximum open paper positions reached.")
+        if self.tracker.count_open_positions_for_market(signal.market_slug) >= self.config.paper.max_positions_per_market:
+            reasons.append("Maximum paper positions reached for this market.")
+        if self.tracker.has_open_position(signal.market_slug, signal.direction):
+            reasons.append("A matching open paper position already exists.")
+
+        accepted = not reasons
+        return WeatherDecision(
+            signal_key=signal.signal_key,
+            accepted=accepted,
+            reason="Accepted for paper trade." if accepted else " ".join(reasons),
+            final_score=final_score,
+            policy_action="paper_trade_candidate" if accepted and policy_action == "advisory" else policy_action,
+            metadata=metadata,
+        )
+
+    def evaluate_position_exit(
+        self,
+        position: dict[str, Any],
+        *,
+        signal: WeatherSignal | None,
+        opposite_signal: WeatherSignal | None = None,
+        allow_close_on_missing_signal: bool = True,
+    ) -> PositionExitDecision:
+        thresholds = self._thresholds(str(position.get("market_type") or getattr(signal, "market_type", "temperature")))
+        position_direction = str(position.get("direction") or "").upper()
+
+        if signal is not None:
+            profile = self._signal_profile(signal, thresholds)
+            final_score = float(profile["final_score"] or 0.0)
+            signal_age_hours = profile["signal_age_hours"]
+            mark_price = _contract_probability(position_direction, signal.market_prob)
+            mark_probability = _contract_probability(position_direction, signal.forecast_prob)
+            edge_abs = float(signal.edge_abs or 0.0)
+        else:
+            profile = None
+            final_score = None
+            signal_age_hours = None
+            mark_price = _as_float(position.get("mark_price"))
+            mark_probability = _as_float(position.get("mark_probability"))
+            edge_abs = _as_float(position.get("edge_abs")) or _as_float(position.get("mark_edge_abs"))
+
+        if opposite_signal is not None:
+            opposite_profile = self._signal_profile(opposite_signal, thresholds)
+            if self._is_entry_candidate(opposite_signal, thresholds, opposite_profile):
+                return PositionExitDecision(
+                    should_close=True,
+                    reason="Opposite side now qualifies as a fresh entry.",
+                    reason_code="opposite_entry",
+                    final_score=final_score,
+                    signal_age_hours=signal_age_hours,
+                    mark_price=mark_price,
+                    mark_probability=mark_probability,
+                    edge_abs=edge_abs,
+                )
+
+        if signal is None:
+            reason = "No fresh qualifying signal in the latest clean review."
+            return PositionExitDecision(
+                should_close=allow_close_on_missing_signal,
+                reason=reason if allow_close_on_missing_signal else "No matching signal; holding until a clean review confirms the edge is gone.",
+                reason_code="missing_signal",
+                final_score=final_score,
+                signal_age_hours=signal_age_hours,
+                mark_price=mark_price,
+                mark_probability=mark_probability,
+                edge_abs=edge_abs,
+            )
+
+        if profile is not None and str(profile["policy_action"] or "") == "paper_blocked":
+            return PositionExitDecision(
+                should_close=True,
+                reason="Runtime policy now blocks this trade setup.",
+                reason_code="runtime_blocked",
+                final_score=final_score,
+                signal_age_hours=signal_age_hours,
+                mark_price=mark_price,
+                mark_probability=mark_probability,
+                edge_abs=edge_abs,
+            )
+
+        if final_score is not None and final_score < thresholds.exit_min_score:
+            return PositionExitDecision(
+                should_close=True,
+                reason=f"Final score {final_score:.2f} dropped below the exit floor {thresholds.exit_min_score:.2f}.",
+                reason_code="score_breakdown",
+                final_score=final_score,
+                signal_age_hours=signal_age_hours,
+                mark_price=mark_price,
+                mark_probability=mark_probability,
+                edge_abs=edge_abs,
+            )
+
+        if edge_abs is not None and edge_abs <= thresholds.exit_near_fair_edge_abs:
+            return PositionExitDecision(
+                should_close=True,
+                reason=f"Remaining edge {edge_abs:.2%} is at or below the near-fair threshold {thresholds.exit_near_fair_edge_abs:.2%}.",
+                reason_code="edge_near_fair",
+                final_score=final_score,
+                signal_age_hours=signal_age_hours,
+                mark_price=mark_price,
+                mark_probability=mark_probability,
+                edge_abs=edge_abs,
+            )
+
+        if signal_age_hours is not None and signal_age_hours > thresholds.exit_max_source_age_hours:
+            return PositionExitDecision(
+                should_close=True,
+                reason=f"Live signal aged past the exit freshness guardrail ({signal_age_hours:.1f}h > {thresholds.exit_max_source_age_hours:.1f}h).",
+                reason_code="stale_signal",
+                final_score=final_score,
+                signal_age_hours=signal_age_hours,
+                mark_price=mark_price,
+                mark_probability=mark_probability,
+                edge_abs=edge_abs,
+            )
+
+        if signal.source_dispersion_pct > thresholds.exit_max_source_dispersion_pct:
+            return PositionExitDecision(
+                should_close=True,
+                reason=f"Source dispersion {signal.source_dispersion_pct:.1%} breached the exit ceiling {thresholds.exit_max_source_dispersion_pct:.1%}.",
+                reason_code="dispersion_risk",
+                final_score=final_score,
+                signal_age_hours=signal_age_hours,
+                mark_price=mark_price,
+                mark_probability=mark_probability,
+                edge_abs=edge_abs,
+            )
+
+        if signal.time_to_resolution_s is not None:
+            hours = signal.time_to_resolution_s / 3600.0
+            if hours < thresholds.exit_min_hours_to_event and (
+                (final_score or 0.0) < thresholds.min_score or (edge_abs or 0.0) < thresholds.min_edge_abs
+            ):
+                return PositionExitDecision(
+                    should_close=True,
+                    reason=f"Only {hours:.1f}h remain and the edge no longer clears the entry-quality bar.",
+                    reason_code="time_risk",
+                    final_score=final_score,
+                    signal_age_hours=signal_age_hours,
+                    mark_price=mark_price,
+                    mark_probability=mark_probability,
+                    edge_abs=edge_abs,
+                )
+
+        hold_reason = f"Holding: score {final_score:.2f} and edge {(edge_abs or 0.0):.2%} still clear the exit rails."
+        return PositionExitDecision(
+            should_close=False,
+            reason=hold_reason,
+            reason_code="hold",
+            final_score=final_score,
+            signal_age_hours=signal_age_hours,
+            mark_price=mark_price,
+            mark_probability=mark_probability,
+            edge_abs=edge_abs,
+        )
+
+    def _thresholds(self, market_type: str):
+        if market_type == "precipitation":
+            return self.config.strategy.precipitation
+        return self.config.strategy.temperature
+
+    def _signal_profile(self, signal: WeatherSignal, thresholds) -> dict[str, Any]:
         signal_age_hours = _signal_age_hours(signal)
         component_scores = self._component_scores(signal, thresholds, signal_age_hours)
         final_score = component_scores["composite"]
         policy_action = "advisory"
-        metadata = {
+        metadata: dict[str, Any] = {
             "edge_abs": signal.edge_abs,
             "source_count": signal.source_count,
             "liquidity": signal.liquidity,
@@ -72,23 +270,23 @@ class WeatherStrategyEngine:
             "source_dispersion_pct": signal.source_dispersion_pct,
             "component_scores": component_scores,
         }
-
         if self.research_provider is not None and hasattr(self.research_provider, "adjust_signal"):
             research_result = self.research_provider.adjust_signal(signal)
             if isinstance(research_result, dict):
                 final_score += float(research_result.get("score_adjustment", 0.0) or 0.0)
                 policy_action = str(research_result.get("policy_action") or policy_action)
                 metadata["research"] = research_result
-
         final_score = round(max(0.0, min(0.99, final_score)), 4)
         metadata["final_score"] = final_score
+        return {
+            "final_score": final_score,
+            "policy_action": policy_action,
+            "metadata": metadata,
+            "signal_age_hours": signal_age_hours,
+        }
 
-        if policy_action == "paper_blocked":
-            reasons.append("Runtime policy blocked this signal.")
-        if not auto_trade_enabled:
-            reasons.append("Automatic paper trading is disabled.")
-        if not self.config.paper.enabled:
-            reasons.append("Paper trading is disabled in config.")
+    def _entry_gate_reasons(self, signal: WeatherSignal, thresholds, final_score: float, signal_age_hours: float | None) -> list[str]:
+        reasons: list[str] = []
         if final_score < thresholds.min_score:
             reasons.append(f"Final score {final_score:.2f} below minimum {thresholds.min_score:.2f}.")
         if signal.edge_abs < thresholds.min_edge_abs:
@@ -109,27 +307,12 @@ class WeatherStrategyEngine:
                 reasons.append(f"Too close to resolution ({hours:.1f}h).")
             if hours > thresholds.max_hours_to_event:
                 reasons.append(f"Too far from resolution ({hours:.1f}h).")
-        if self.tracker.count_open_positions() >= self.config.paper.max_open_positions:
-            reasons.append("Maximum open paper positions reached.")
-        if self.tracker.count_open_positions_for_market(signal.market_slug) >= self.config.paper.max_positions_per_market:
-            reasons.append("Maximum paper positions reached for this market.")
-        if self.tracker.has_open_position(signal.market_slug, signal.direction):
-            reasons.append("A matching open paper position already exists.")
+        return reasons
 
-        accepted = not reasons
-        return WeatherDecision(
-            signal_key=signal.signal_key,
-            accepted=accepted,
-            reason="Accepted for paper trade." if accepted else " ".join(reasons),
-            final_score=final_score,
-            policy_action="paper_trade_candidate" if accepted and policy_action == "advisory" else policy_action,
-            metadata=metadata,
-        )
-
-    def _thresholds(self, market_type: str):
-        if market_type == "precipitation":
-            return self.config.strategy.precipitation
-        return self.config.strategy.temperature
+    def _is_entry_candidate(self, signal: WeatherSignal, thresholds, profile: dict[str, Any]) -> bool:
+        if str(profile["policy_action"] or "") == "paper_blocked":
+            return False
+        return not self._entry_gate_reasons(signal, thresholds, float(profile["final_score"] or 0.0), profile["signal_age_hours"])
 
     def _component_scores(self, signal: WeatherSignal, thresholds, signal_age_hours: float | None) -> dict[str, float]:
         edge_score = min(1.0, signal.edge_abs / max(0.01, thresholds.min_edge_abs * 2.0))
@@ -209,3 +392,20 @@ def _timing_score(
     center = (min_hours_to_event + max_hours_to_event) / 2.0
     span = max((max_hours_to_event - min_hours_to_event) / 2.0, 1.0)
     return max(0.2, 1.0 - abs(hours - center) / span)
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _contract_probability(direction: str, yes_probability: float | None) -> float | None:
+    raw = _as_float(yes_probability)
+    if raw is None:
+        return None
+    raw = max(0.0, min(1.0, raw))
+    return raw if str(direction or "").upper() == "YES" else round(1.0 - raw, 6)

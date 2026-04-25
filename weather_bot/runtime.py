@@ -13,7 +13,7 @@ from typing import Any
 import requests
 
 from .messages import format_resolution_message, format_scan_summary, format_signal_message
-from .models import ResolutionOutcome, ScanBatch
+from .models import ResolutionOutcome, ScanBatch, WeatherSignal
 from .precipitation_signals import scan_precipitation_signals
 from .temperature import scan_temperature_signals
 
@@ -47,44 +47,54 @@ class WeatherRuntime:
                 scan_export_error = str(exc)
                 self.scan_export_root = None
         self._state_lock = threading.RLock()
-        self._scan_lock = threading.Lock()
+        self._scan_lock = threading.RLock()
         self._queue_condition = threading.Condition()
         self._scan_queue: deque[dict[str, Any]] = deque()
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
-        self._state = self.tracker.get_runtime_state(
-            "runtime_status",
-            default={
-                "state": "running",
-                "temperature_enabled": bool(self.config.temperature.enabled),
-                "precipitation_enabled": bool(self.config.precipitation.enabled),
-                "paper_auto_trade": True,
-                "scan_in_progress": False,
-                "scan_queue_depth": 0,
-                "pending_scan_types": [],
-                "active_scan_type": None,
-                "active_scan_started_at": None,
-                "scan_worker_healthy": False,
-                "last_scan_worker_error": None,
-                "last_scan_export_error": scan_export_error,
-                "last_temperature_scan_at": None,
-                "last_precipitation_scan_at": None,
-                "last_temperature_signal_count": 0,
-                "last_precipitation_signal_count": 0,
-                "last_temperature_scan_status": None,
-                "last_precipitation_scan_status": None,
-                "last_temperature_scan_duration_ms": None,
-                "last_precipitation_scan_duration_ms": None,
-                "last_temperature_scan_reason": None,
-                "last_precipitation_scan_reason": None,
-                "last_temperature_scan_error": None,
-                "last_precipitation_scan_error": None,
-                "last_temperature_error_count": 0,
-                "last_precipitation_error_count": 0,
-                "last_resolution_check_at": None,
-                "last_resolution_error": None,
-            },
-        )
+        default_state = {
+            "state": "running",
+            "temperature_enabled": bool(self.config.temperature.enabled),
+            "precipitation_enabled": bool(self.config.precipitation.enabled),
+            "paper_auto_trade": True,
+            "paper_max_open_positions": int(getattr(self.strategy_engine, "paper_max_open_positions", self.config.paper.max_open_positions)),
+            "scan_in_progress": False,
+            "scan_queue_depth": 0,
+            "pending_scan_types": [],
+            "active_scan_type": None,
+            "active_scan_started_at": None,
+            "scan_worker_healthy": False,
+            "last_scan_worker_error": None,
+            "last_scan_export_error": scan_export_error,
+            "last_temperature_scan_at": None,
+            "last_precipitation_scan_at": None,
+            "last_temperature_signal_count": 0,
+            "last_precipitation_signal_count": 0,
+            "last_temperature_scan_status": None,
+            "last_precipitation_scan_status": None,
+            "last_temperature_scan_duration_ms": None,
+            "last_precipitation_scan_duration_ms": None,
+            "last_temperature_scan_reason": None,
+            "last_precipitation_scan_reason": None,
+            "last_temperature_scan_error": None,
+            "last_precipitation_scan_error": None,
+            "last_temperature_error_count": 0,
+            "last_precipitation_error_count": 0,
+            "open_position_review_in_progress": False,
+            "last_open_position_review_at": None,
+            "last_open_position_review_status": None,
+            "last_open_position_review_error": None,
+            "last_open_position_review_reason": None,
+            "last_open_position_review_count": 0,
+            "last_open_position_close_count": 0,
+            "last_resolution_check_at": None,
+            "last_resolution_error": None,
+        }
+        saved_state = self.tracker.get_runtime_state("runtime_status", default=default_state)
+        self._state = {**default_state, **saved_state}
+        if hasattr(self.strategy_engine, "set_paper_max_open_positions"):
+            limit = self.strategy_engine.set_paper_max_open_positions(int(self._state.get("paper_max_open_positions") or self.config.paper.max_open_positions))
+            self._state["paper_max_open_positions"] = int(limit)
 
     def start_background_loops(self) -> None:
         if self._threads:
@@ -94,6 +104,7 @@ class WeatherRuntime:
             (self._scan_worker_loop, "weather-scan-worker"),
             (self._temperature_loop, "weather-temp-loop"),
             (self._precipitation_loop, "weather-precip-loop"),
+            (self._open_position_review_loop, "weather-position-review"),
             (self._resolution_loop, "weather-resolution-loop"),
         ]
         for target, name in loops:
@@ -130,6 +141,13 @@ class WeatherRuntime:
     def set_paper_auto_trade(self, enabled: bool) -> bool:
         self._update_state(paper_auto_trade=bool(enabled))
         return bool(enabled)
+
+    def set_paper_max_open_positions(self, value: int) -> int:
+        limit = max(1, min(100, int(value)))
+        if hasattr(self.strategy_engine, "set_paper_max_open_positions"):
+            limit = int(self.strategy_engine.set_paper_max_open_positions(limit))
+        self._update_state(paper_max_open_positions=limit)
+        return limit
 
     def get_status_snapshot(self) -> dict:
         with self._state_lock:
@@ -226,6 +244,102 @@ class WeatherRuntime:
                     self.telegram.send_message(format_resolution_message(outcome))
         return outcomes
 
+    def close_position(self, position_id: int, *, reason: str = "manual_dashboard_sell") -> dict[str, Any]:
+        positions = {
+            int(item["id"]): item
+            for item in self.tracker.get_dashboard_paper_positions(limit=500, status="open")
+        }
+        position = positions.get(int(position_id))
+        if position is None:
+            return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
+        exit_price = _as_probability(
+            position.get("mark_price") or position.get("market_probability") or position.get("entry_price")
+        )
+        result = self.tracker.close_paper_position(
+            int(position_id),
+            exit_price=exit_price,
+            reason=str(reason or "manual_dashboard_sell"),
+            mark_probability=_as_probability(position.get("mark_probability") or position.get("outcome_probability")),
+            edge_abs=_as_float(position.get("mark_edge_abs") or position.get("edge_abs")),
+            final_score=_as_float(position.get("mark_final_score") or position.get("decision_final_score")),
+            mark_reason=str(position.get("mark_reason") or "Manual dashboard sell."),
+        )
+        if result is None:
+            return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
+        return {
+            "ok": True,
+            "status": 200,
+            "message": f"Closed paper position {position_id} at {float(result['exit_price']):.1%}.",
+            "position": result,
+        }
+
+    def review_open_positions(
+        self,
+        *,
+        reason: str = "scheduled_review",
+        market_types: set[str] | None = None,
+    ) -> dict[str, Any]:
+        with self._scan_lock:
+            positions = self.tracker.get_dashboard_paper_positions(limit=500, status="open")
+            if market_types:
+                positions = [item for item in positions if str(item.get("market_type") or "") in market_types]
+            if not positions:
+                reviewed_at = datetime.now(timezone.utc).isoformat()
+                self._update_state(
+                    open_position_review_in_progress=False,
+                    last_open_position_review_at=reviewed_at,
+                    last_open_position_review_status="idle",
+                    last_open_position_review_error=None,
+                    last_open_position_review_reason=str(reason or "scheduled_review"),
+                    last_open_position_review_count=0,
+                    last_open_position_close_count=0,
+                )
+                return {"ok": True, "reviewed": 0, "closed": 0, "reason": reason}
+
+            self._update_state(open_position_review_in_progress=True)
+            reviewed_count = 0
+            closed_count = 0
+            market_groups = sorted({str(item.get("market_type") or "") for item in positions})
+            try:
+                self.settle_due_positions(send_alerts=False)
+                for market_type in market_groups:
+                    if market_type == "temperature":
+                        batch = self.temperature_scanner(limit=self.config.temperature.scan_limit)
+                    elif market_type == "precipitation":
+                        batch = self.precipitation_scanner()
+                    else:
+                        continue
+                    allow_missing_signal_close = int(batch.error_count or 0) == 0
+                    summary = self._review_positions_for_signals(
+                        scan_type=market_type,
+                        signals=batch.signals,
+                        trigger=reason,
+                        allow_close_on_missing_signal=allow_missing_signal_close,
+                    )
+                    reviewed_count += int(summary["reviewed"])
+                    closed_count += int(summary["closed"])
+                reviewed_at = datetime.now(timezone.utc).isoformat()
+                self._update_state(
+                    open_position_review_in_progress=False,
+                    last_open_position_review_at=reviewed_at,
+                    last_open_position_review_status="completed",
+                    last_open_position_review_error=None,
+                    last_open_position_review_reason=str(reason or "scheduled_review"),
+                    last_open_position_review_count=reviewed_count,
+                    last_open_position_close_count=closed_count,
+                )
+                return {"ok": True, "reviewed": reviewed_count, "closed": closed_count, "reason": reason}
+            except Exception as exc:
+                reviewed_at = datetime.now(timezone.utc).isoformat()
+                self._update_state(
+                    open_position_review_in_progress=False,
+                    last_open_position_review_at=reviewed_at,
+                    last_open_position_review_status="failed",
+                    last_open_position_review_error=str(exc),
+                    last_open_position_review_reason=str(reason or "scheduled_review"),
+                )
+                raise
+
     def wait_for_idle(self, timeout: float = 10.0) -> bool:
         deadline = time.monotonic() + max(0.1, float(timeout))
         while time.monotonic() < deadline:
@@ -306,6 +420,12 @@ class WeatherRuntime:
                 )
                 accepted = sum(1 for item in results if item.decision.accepted)
                 opened = sum(1 for item in results if item.position is not None)
+                review_summary = self._review_positions_for_signals(
+                    scan_type=scan_type,
+                    signals=batch.signals,
+                    trigger=f"scan:{reason or scan_type}",
+                    allow_close_on_missing_signal=int(batch.error_count or 0) == 0,
+                )
                 if send_alerts and self.config.alerts.telegram_enabled and self.config.alerts.send_scan_summary:
                     self.telegram.send_message(
                         format_scan_summary(
@@ -331,6 +451,12 @@ class WeatherRuntime:
                         status_fields["duration_ms"]: duration_ms,
                         status_fields["error"]: None,
                         status_fields["error_count"]: int(batch.error_count),
+                        "last_open_position_review_at": finished_at,
+                        "last_open_position_review_status": "completed",
+                        "last_open_position_review_error": None,
+                        "last_open_position_review_reason": f"scan:{reason or scan_type}",
+                        "last_open_position_review_count": int(review_summary["reviewed"]),
+                        "last_open_position_close_count": int(review_summary["closed"]),
                     },
                 )
                 self._write_scan_export(
@@ -374,6 +500,70 @@ class WeatherRuntime:
                     self.telegram.send_message(f"*{scan_type.title()} Scan Failed*\n`{exc}`")
                 raise
 
+    def _review_positions_for_signals(
+        self,
+        *,
+        scan_type: str,
+        signals: list[WeatherSignal],
+        trigger: str,
+        allow_close_on_missing_signal: bool,
+    ) -> dict[str, int]:
+        positions = [
+            item
+            for item in self.tracker.get_dashboard_paper_positions(limit=500, status="open")
+            if str(item.get("market_type") or "") == scan_type
+        ]
+        if not positions:
+            return {"reviewed": 0, "closed": 0}
+
+        signal_map = {
+            (str(signal.market_slug or ""), str(signal.direction or "").upper()): signal
+            for signal in signals
+        }
+        reviewed = 0
+        closed = 0
+        reviewed_at = datetime.now(timezone.utc).isoformat()
+
+        for position in positions:
+            market_slug = str(position.get("market_slug") or "")
+            direction = str(position.get("direction") or "").upper()
+            signal = signal_map.get((market_slug, direction))
+            opposite_signal = signal_map.get((market_slug, "NO" if direction == "YES" else "YES"))
+            decision = self.strategy_engine.evaluate_position_exit(
+                position,
+                signal=signal,
+                opposite_signal=opposite_signal,
+                allow_close_on_missing_signal=allow_close_on_missing_signal,
+            )
+            mark_price = _as_probability(decision.mark_price or position.get("mark_price") or position.get("entry_price"))
+            mark_probability = _as_probability(decision.mark_probability or position.get("mark_probability") or position.get("outcome_probability"))
+            self.tracker.update_paper_position_review(
+                int(position["id"]),
+                mark_price=mark_price,
+                mark_probability=mark_probability,
+                edge_abs=decision.edge_abs,
+                final_score=decision.final_score,
+                reviewed_at=reviewed_at,
+                reason=f"{trigger}: {decision.reason}",
+            )
+            reviewed += 1
+            if not decision.should_close:
+                continue
+            result = self.tracker.close_paper_position(
+                int(position["id"]),
+                exit_price=mark_price,
+                reason=decision.reason,
+                closed_at=reviewed_at,
+                mark_probability=mark_probability,
+                edge_abs=decision.edge_abs,
+                final_score=decision.final_score,
+                mark_reason=f"{trigger}: {decision.reason}",
+            )
+            if result is not None:
+                closed += 1
+
+        return {"reviewed": reviewed, "closed": closed}
+
     def _temperature_loop(self) -> None:
         self._loop_runner(
             interval_seconds=_scheduled_interval_seconds(
@@ -395,6 +585,23 @@ class WeatherRuntime:
             enabled_key="precipitation_enabled",
             runner=lambda: self.request_scan("precipitation", send_alerts=True, reason="scheduled"),
         )
+
+    def _open_position_review_loop(self) -> None:
+        interval_s = _scheduled_interval_seconds(
+            self.config.app.open_position_review_seconds,
+            0,
+            minimum_seconds=30,
+        )
+        while not self._stop_event.wait(interval_s):
+            try:
+                state = self.get_status_snapshot()
+                if state.get("scan_in_progress") or int(state.get("scan_queue_depth") or 0) > 0:
+                    continue
+                if not self.tracker.get_paper_stats().get("open_positions"):
+                    continue
+                self.review_open_positions(reason="scheduled_open_position_review")
+            except Exception:
+                continue
 
     def _resolution_loop(self) -> None:
         interval_s = _scheduled_interval_seconds(
@@ -509,6 +716,22 @@ def _scheduled_interval_seconds(seconds_value: Any, minutes_value: Any, *, minim
     if minutes > 0:
         return max(int(minimum_seconds), minutes * 60)
     return int(minimum_seconds)
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_probability(value: Any) -> float | None:
+    raw = _as_float(value)
+    if raw is None:
+        return None
+    return round(max(0.0, min(1.0, raw)), 6)
 
 
 def get_market_resolution(market_slug: str) -> str | None:

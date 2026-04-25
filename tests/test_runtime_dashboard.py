@@ -23,7 +23,15 @@ def _write_config(tmp_path: Path) -> Path:
     return config_path
 
 
-def _signal(key: str = "rt-1") -> WeatherSignal:
+def _signal(
+    key: str = "rt-1",
+    *,
+    direction: str = "YES",
+    market_prob: float = 0.25,
+    forecast_prob: float = 0.80,
+    edge: float = 0.55,
+    edge_abs: float = 0.55,
+) -> WeatherSignal:
     return WeatherSignal(
         signal_key=key,
         market_type="temperature",
@@ -33,11 +41,11 @@ def _signal(key: str = "rt-1") -> WeatherSignal:
         city_slug="nyc",
         event_date="2026-04-25",
         label="70-71F",
-        direction="YES",
-        market_prob=0.25,
-        forecast_prob=0.80,
-        edge=0.55,
-        edge_abs=0.55,
+        direction=direction,
+        market_prob=market_prob,
+        forecast_prob=forecast_prob,
+        edge=edge,
+        edge_abs=edge_abs,
         edge_size="large",
         confidence="confirmed",
         source_count=3,
@@ -173,6 +181,8 @@ def test_dashboard_exposes_enriched_open_trade_cards(tmp_path: Path):
     assert trade["target_label"] == "70-71F"
     assert trade["outcome_probability"] == 0.8
     assert trade["expected_value_pnl"] > 0
+    assert trade["mark_to_market_pnl"] is not None
+    assert trade["mark_to_market_mode"] == "reviewed_contract_mark"
     assert trade["holding_seconds"] is not None
 
 
@@ -188,6 +198,7 @@ def test_control_payload_exposes_paper_metrics(tmp_path: Path):
 
     assert payload["paper_balance"] == 750.0
     assert payload["paper_initial_capital"] == 750.0
+    assert payload["paper_max_open_positions"] == 20
     assert payload["paper_open_positions"] == 0
 
 
@@ -200,6 +211,7 @@ def test_load_config_reads_second_level_scan_overrides(tmp_path: Path):
                 "temperature_scan_seconds": 5,
                 "precipitation_scan_seconds": 12,
                 "resolution_check_minutes": 5,
+                "open_position_review_seconds": 30,
             }
         ),
         encoding="utf-8",
@@ -210,6 +222,7 @@ def test_load_config_reads_second_level_scan_overrides(tmp_path: Path):
     assert config.app.auto_temperature_scan_seconds == 5
     assert config.app.auto_precipitation_scan_seconds == 12
     assert config.app.resolution_check_minutes == 5
+    assert config.app.open_position_review_seconds == 30
 
 
 def test_scheduled_interval_seconds_prefers_fast_second_overrides():
@@ -266,6 +279,38 @@ def test_runtime_processes_queued_scan_and_exports_results(tmp_path: Path):
     assert payload["reason"] == "operator"
     assert payload["batch"]["error_count"] == 1
     assert payload["opened_count"] == 1
+
+
+def test_control_updates_open_position_cap(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe({"action": "set_paper_max_open_positions", "value": 40})
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["paper_max_open_positions"] == 40
+    assert runtime.get_status_snapshot()["paper_max_open_positions"] == 40
+    assert strategy.paper_max_open_positions == 40
+
+
+def test_runtime_respects_live_open_position_cap_override(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    runtime.set_paper_max_open_positions(1)
+
+    results = strategy.process_signals([_signal("limit-a"), _signal("limit-b")], auto_trade_enabled=True)
+
+    assert results[0].position is not None
+    assert results[1].position is None
+    assert "Maximum open paper positions reached." in results[1].decision.reason
 
 
 def test_dashboard_exports_snapshot_and_control_queue_state(tmp_path: Path):
@@ -347,3 +392,48 @@ def test_runtime_scan_export_failure_is_non_fatal(tmp_path: Path, monkeypatch):
     assert len(results) == 1
     assert state["last_temperature_scan_status"] == "completed"
     assert state["last_scan_export_error"] == "disk full"
+
+
+def test_runtime_review_closes_position_when_clean_scan_loses_edge(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("review-close-1")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        temperature_scanner=lambda *, limit=300: _batch(None),
+    )
+
+    summary = runtime.review_open_positions(reason="test_review_close")
+    positions = tracker.get_dashboard_paper_positions(limit=12)
+
+    assert summary["reviewed"] == 1
+    assert summary["closed"] == 1
+    assert positions[0]["status"] == "closed"
+    assert "No fresh qualifying signal" in positions[0]["exit_reason"]
+
+
+def test_dashboard_manual_close_action_closes_open_trade(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("manual-close-1")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+    open_positions = tracker.get_dashboard_paper_positions(limit=12, status="open")
+
+    response = dashboard.apply_control_threadsafe(
+        {"action": "close_position", "value": {"position_id": open_positions[0]["id"], "reason": "manual_test_close"}}
+    )
+    latest_trade = tracker.get_dashboard_paper_positions(limit=12)[0]
+
+    assert response["ok"] is True
+    assert response["state"]["summary"]["paper"]["open_positions"] == 0
+    assert latest_trade["status"] == "closed"
+    assert latest_trade["exit_reason"] == "manual_test_close"

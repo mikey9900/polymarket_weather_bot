@@ -7,6 +7,7 @@ app:
   auto_precipitation_scan_minutes: 360
   auto_precipitation_scan_seconds: 0
   resolution_check_minutes: 15
+  open_position_review_seconds: 30
 temperature:
   enabled: true
   scan_limit: 300
@@ -21,7 +22,7 @@ paper:
   enabled: true
   initial_capital: 5000.0
   stake_usd: 10.0
-  max_open_positions: 10
+  max_open_positions: 20
   max_positions_per_market: 1
 strategy:
   temperature:
@@ -33,6 +34,11 @@ strategy:
     max_hours_to_event: 192.0
     max_source_age_hours: 6.0
     max_source_dispersion_pct: 0.18
+    exit_min_score: 0.55
+    exit_near_fair_edge_abs: 0.03
+    exit_max_source_age_hours: 8.0
+    exit_max_source_dispersion_pct: 0.24
+    exit_min_hours_to_event: 0.5
   precipitation:
     min_score: 0.66
     min_edge_abs: 0.14
@@ -42,6 +48,11 @@ strategy:
     max_hours_to_event: 744.0
     max_source_age_hours: 24.0
     max_source_dispersion_pct: 0.22
+    exit_min_score: 0.58
+    exit_near_fair_edge_abs: 0.04
+    exit_max_source_age_hours: 30.0
+    exit_max_source_dispersion_pct: 0.28
+    exit_min_hours_to_event: 12.0
 alerts:
   telegram_enabled: true
   send_scan_summary: true

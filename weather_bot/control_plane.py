@@ -61,9 +61,17 @@ class ControlPlane:
             "scan_worker_healthy": runtime_status.get("scan_worker_healthy", False),
             "last_scan_worker_error": runtime_status.get("last_scan_worker_error"),
             "last_scan_export_error": runtime_status.get("last_scan_export_error"),
+            "open_position_review_in_progress": runtime_status.get("open_position_review_in_progress", False),
+            "last_open_position_review_at": runtime_status.get("last_open_position_review_at"),
+            "last_open_position_review_status": runtime_status.get("last_open_position_review_status"),
+            "last_open_position_review_error": runtime_status.get("last_open_position_review_error"),
+            "last_open_position_review_reason": runtime_status.get("last_open_position_review_reason"),
+            "last_open_position_review_count": runtime_status.get("last_open_position_review_count", 0),
+            "last_open_position_close_count": runtime_status.get("last_open_position_close_count", 0),
             "paper_balance": paper.get("current_balance", 0.0),
             "paper_equity": paper.get("current_equity", 0.0),
             "paper_initial_capital": paper.get("initial_capital", 0.0),
+            "paper_max_open_positions": runtime_status.get("paper_max_open_positions", getattr(self.runtime.strategy_engine, "paper_max_open_positions", 0)),
             "paper_open_positions": paper.get("open_positions", 0),
             "available_actions": {
                 "start": True,
@@ -71,6 +79,8 @@ class ControlPlane:
                 "scan_temperature": True,
                 "scan_precipitation": True,
                 "set_paper_capital": True,
+                "set_paper_max_open_positions": True,
+                "close_position": True,
                 "toggle_temperature": True,
                 "toggle_precipitation": True,
                 "toggle_paper_auto_trade": True,
@@ -130,6 +140,22 @@ class ControlPlane:
                 return self._record(ControlResult(False, 400, "Paper capital must be numeric.", action))
             self.runtime.reset_paper_capital(amount)
             return self._record(ControlResult(True, 200, f"Paper capital reset to ${amount:.2f}.", action))
+        if action == "set_paper_max_open_positions":
+            try:
+                amount = int(request.value)
+            except (TypeError, ValueError):
+                return self._record(ControlResult(False, 400, "Open-position cap must be numeric.", action))
+            limit = self.runtime.set_paper_max_open_positions(amount)
+            return self._record(ControlResult(True, 200, f"Global open-position cap set to {limit}.", action))
+        if action == "close_position":
+            value = request.value if isinstance(request.value, dict) else {"position_id": request.value}
+            try:
+                position_id = int(value.get("position_id"))
+            except (TypeError, ValueError, AttributeError):
+                return self._record(ControlResult(False, 400, "A numeric paper position id is required.", action))
+            reason = str(value.get("reason") or "manual_dashboard_sell")
+            result = self.runtime.close_position(position_id, reason=reason)
+            return self._record(ControlResult(bool(result.get("ok")), int(result.get("status", 200)), str(result.get("message")), action))
         if action == "toggle_temperature":
             enabled = self.runtime.set_temperature_enabled(_coerce_bool(request.value))
             state = "enabled" if enabled else "disabled"

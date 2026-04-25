@@ -27,6 +27,10 @@ def _make_signal(
     market_slug: str | None = None,
     created_at: str | None = None,
     source_dispersion_pct: float = 0.02,
+    market_prob: float = 0.3,
+    forecast_prob: float = 0.75,
+    edge: float = 0.45,
+    edge_abs: float = 0.45,
 ) -> WeatherSignal:
     snapshot = ForecastSnapshot(
         market_type="temperature",
@@ -47,10 +51,10 @@ def _make_signal(
         event_date="2026-04-25",
         label="70-71F",
         direction=direction,
-        market_prob=0.3,
-        forecast_prob=0.75,
-        edge=0.45,
-        edge_abs=0.45,
+        market_prob=market_prob,
+        forecast_prob=forecast_prob,
+        edge=edge,
+        edge_abs=edge_abs,
         edge_size="large",
         confidence="confirmed",
         source_count=3,
@@ -161,3 +165,27 @@ def test_strategy_rejects_stale_signal(tmp_path: Path):
 
     assert result.decision.accepted is False
     assert "Signal is stale" in result.decision.reason
+
+
+def test_strategy_prices_no_contract_using_complement_price(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    result = strategy.process_signals(
+        [
+            _make_signal(
+                key="no-side",
+                direction="NO",
+                market_prob=0.8,
+                forecast_prob=0.2,
+                edge=-0.6,
+                edge_abs=0.6,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert result.position is not None
+    assert result.position.entry_price == 0.2

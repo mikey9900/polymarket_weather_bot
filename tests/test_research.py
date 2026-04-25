@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 import yaml
 
 from weather_bot.config import load_config
@@ -156,6 +157,27 @@ def test_research_artifacts_tuning_and_promotion(tmp_path: Path):
     assert promote_result["ok"] is True
     assert promote_result["receipt"]["changed_paths"]
     assert float(active_config["strategy"]["temperature"]["max_source_dispersion_pct"]) < 0.18
+
+
+def test_research_warehouse_sync_handles_empty_tracker(tmp_path: Path):
+    pytest.importorskip("duckdb")
+
+    from weather_bot.research.warehouse import ResearchWarehouse
+
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.close()
+
+    warehouse = ResearchWarehouse(tmp_path / "warehouse.duckdb")
+    try:
+        result = warehouse.sync_from_tracker(tmp_path / "weatherbot.db")
+    finally:
+        warehouse.close()
+
+    assert result["ok"] is True
+    assert result["signals"] == 0
+    assert result["decisions"] == 0
+    assert result["paper_positions"] == 0
+    assert result["resolved_outcomes"] == 0
 
 
 def test_research_warehouse_optional_dependency(tmp_path: Path):

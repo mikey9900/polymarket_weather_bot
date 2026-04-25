@@ -86,6 +86,14 @@ class WeatherTracker:
                 status TEXT NOT NULL,
                 resolution TEXT,
                 realized_pnl REAL,
+                mark_price REAL,
+                mark_probability REAL,
+                mark_edge_abs REAL,
+                mark_final_score REAL,
+                mark_updated_at TEXT,
+                mark_reason TEXT,
+                exit_price REAL,
+                exit_reason TEXT,
                 notes TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 resolved_at TEXT,
@@ -128,6 +136,7 @@ class WeatherTracker:
             CREATE INDEX IF NOT EXISTS idx_resolution_events_resolved_at ON resolution_events(resolved_at);
             """
         )
+        self._ensure_paper_position_columns()
         self.conn.commit()
 
     def close(self) -> None:
@@ -244,25 +253,29 @@ class WeatherTracker:
         decision_id: int,
         signal: WeatherSignal,
         stake_usd: float,
+        decision_final_score: float | None = None,
         notes: str = "auto",
     ) -> PaperPosition | None:
-        if signal.market_prob <= 0:
+        entry_price = _contract_probability(signal.direction, signal.market_prob)
+        mark_probability = _contract_probability(signal.direction, signal.forecast_prob)
+        if entry_price is None or entry_price <= 0:
             return None
         with self._lock:
             initial, available = self.get_paper_capital()
             cost = round(min(float(stake_usd), available), 6)
             if cost <= 0:
                 return None
-            shares = round(cost / float(signal.market_prob), 6)
+            shares = round(cost / float(entry_price), 6)
             self.set_setting("paper_capital", {"initial": initial, "available": round(available - cost, 6)})
             cursor = self.conn.execute(
                 """
                 INSERT INTO paper_positions (
                     signal_id, decision_id, signal_key, market_type, market_slug, event_slug, city_slug,
                     event_date, label, direction, score, entry_price, shares, cost, status,
-                    resolution, realized_pnl, notes, created_at, resolved_at
+                    resolution, realized_pnl, mark_price, mark_probability, mark_edge_abs, mark_final_score,
+                    mark_updated_at, mark_reason, exit_price, exit_reason, notes, created_at, resolved_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL, NULL, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)
                 """,
                 (
                     signal_id,
@@ -276,9 +289,15 @@ class WeatherTracker:
                     signal.label,
                     signal.direction,
                     signal.score,
-                    signal.market_prob,
+                    entry_price,
                     shares,
                     cost,
+                    entry_price,
+                    mark_probability,
+                    signal.edge_abs,
+                    decision_final_score,
+                    signal.created_at,
+                    "Entry mark captured from signal.",
                     notes,
                     signal.created_at,
                 ),
@@ -295,13 +314,126 @@ class WeatherTracker:
                 label=signal.label,
                 direction=signal.direction,
                 score=signal.score,
-                entry_price=signal.market_prob,
+                entry_price=entry_price,
                 shares=shares,
                 cost=cost,
                 status="open",
                 notes=notes,
                 created_at=signal.created_at,
             )
+
+    def update_paper_position_review(
+        self,
+        position_id: int,
+        *,
+        mark_price: float | None,
+        mark_probability: float | None,
+        edge_abs: float | None,
+        final_score: float | None,
+        reviewed_at: str | None = None,
+        reason: str = "",
+    ) -> bool:
+        reviewed_at = str(reviewed_at or iso_now())
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                UPDATE paper_positions
+                SET mark_price = ?,
+                    mark_probability = ?,
+                    mark_edge_abs = ?,
+                    mark_final_score = ?,
+                    mark_updated_at = ?,
+                    mark_reason = ?
+                WHERE id = ? AND status = 'open'
+                """,
+                (
+                    _bounded_probability(mark_price),
+                    _bounded_probability(mark_probability),
+                    _as_float(edge_abs),
+                    _as_float(final_score),
+                    reviewed_at,
+                    str(reason or ""),
+                    int(position_id),
+                ),
+            )
+            self.conn.commit()
+            return bool(cursor.rowcount)
+
+    def close_paper_position(
+        self,
+        position_id: int,
+        *,
+        exit_price: float | None = None,
+        reason: str = "manual",
+        closed_at: str | None = None,
+        mark_probability: float | None = None,
+        edge_abs: float | None = None,
+        final_score: float | None = None,
+        mark_reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        closed_at = str(closed_at or iso_now())
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM paper_positions WHERE id = ? AND status = 'open'",
+                (int(position_id),),
+            ).fetchone()
+            if row is None:
+                return None
+
+            initial, available = self.get_paper_capital()
+            shares = float(row["shares"] or 0.0)
+            cost = float(row["cost"] or 0.0)
+            mark_price = _bounded_probability(exit_price)
+            if mark_price is None:
+                mark_price = _bounded_probability(row["mark_price"])
+            if mark_price is None:
+                mark_price = _bounded_probability(row["entry_price"]) or 0.0
+            payout = round(shares * mark_price, 6)
+            pnl = round(payout - cost, 6)
+
+            self.conn.execute(
+                """
+                UPDATE paper_positions
+                SET status = 'closed',
+                    realized_pnl = ?,
+                    mark_price = ?,
+                    mark_probability = COALESCE(?, mark_probability),
+                    mark_edge_abs = COALESCE(?, mark_edge_abs),
+                    mark_final_score = COALESCE(?, mark_final_score),
+                    mark_updated_at = ?,
+                    mark_reason = ?,
+                    exit_price = ?,
+                    exit_reason = ?,
+                    resolved_at = ?
+                WHERE id = ?
+                """,
+                (
+                    pnl,
+                    mark_price,
+                    _bounded_probability(mark_probability),
+                    _as_float(edge_abs),
+                    _as_float(final_score),
+                    closed_at,
+                    str(mark_reason or reason or ""),
+                    mark_price,
+                    str(reason or "manual"),
+                    closed_at,
+                    int(position_id),
+                ),
+            )
+            self.set_setting("paper_capital", {"initial": initial, "available": round(available + payout, 6)})
+            self.conn.commit()
+            return {
+                "ok": True,
+                "position_id": int(row["id"]),
+                "market_slug": str(row["market_slug"] or ""),
+                "direction": str(row["direction"] or ""),
+                "status": "closed",
+                "exit_price": mark_price,
+                "exit_reason": str(reason or "manual"),
+                "realized_pnl": pnl,
+                "closed_at": closed_at,
+            }
 
     def settle_market(self, market_slug: str, resolution: str) -> ResolutionOutcome:
         resolution = str(resolution or "").upper()
@@ -462,11 +594,11 @@ class WeatherTracker:
         summary = self.conn.execute(
             """
             SELECT
-                SUM(CASE WHEN status = 'resolved' AND realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
-                SUM(CASE WHEN status = 'resolved' AND realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
+                SUM(CASE WHEN status IN ('resolved', 'closed') AND realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN status IN ('resolved', 'closed') AND realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
                 SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_positions,
-                COALESCE(SUM(CASE WHEN status = 'resolved' THEN realized_pnl ELSE 0 END), 0.0) AS realized_pnl,
-                COALESCE(SUM(CASE WHEN status = 'open' THEN cost ELSE 0 END), 0.0) AS open_cost
+                COALESCE(SUM(CASE WHEN status IN ('resolved', 'closed') THEN realized_pnl ELSE 0 END), 0.0) AS realized_pnl,
+                COALESCE(SUM(CASE WHEN status = 'open' THEN shares * COALESCE(mark_price, entry_price) ELSE 0 END), 0.0) AS open_mark_value
             FROM paper_positions
             """
         ).fetchone()
@@ -474,8 +606,8 @@ class WeatherTracker:
         losses = int(summary["losses"] or 0)
         open_positions = int(summary["open_positions"] or 0)
         realized_pnl = float(summary["realized_pnl"] or 0.0)
-        open_cost = float(summary["open_cost"] or 0.0)
-        current_equity = float(available) + open_cost
+        open_mark_value = float(summary["open_mark_value"] or 0.0)
+        current_equity = float(available) + open_mark_value
         total_pnl = current_equity - float(initial)
         total_closed = wins + losses
         return {
@@ -489,6 +621,26 @@ class WeatherTracker:
             "total_pnl": float(total_pnl),
             "win_rate": (wins / total_closed * 100.0) if total_closed else 0.0,
         }
+
+    def _ensure_paper_position_columns(self) -> None:
+        existing = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(paper_positions)").fetchall()
+        }
+        required_columns = {
+            "mark_price": "REAL",
+            "mark_probability": "REAL",
+            "mark_edge_abs": "REAL",
+            "mark_final_score": "REAL",
+            "mark_updated_at": "TEXT",
+            "mark_reason": "TEXT",
+            "exit_price": "REAL",
+            "exit_reason": "TEXT",
+        }
+        for column, column_type in required_columns.items():
+            if column in existing:
+                continue
+            self.conn.execute(f"ALTER TABLE paper_positions ADD COLUMN {column} {column_type}")
 
     def set_setting(self, key: str, value: dict[str, Any]) -> None:
         payload = json.dumps(value, sort_keys=True)
@@ -658,16 +810,32 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
             else:
                 remaining_to_resolution_s = max(0.0, total_window - holding_seconds)
 
-    outcome_probability = _as_float(payload.get("signal_forecast_prob"))
-    entry_price = _as_float(payload.get("entry_price")) or 0.0
+    direction = str(payload.get("direction") or "").upper()
+    default_market_probability = _contract_probability(direction, payload.get("signal_market_prob"))
+    default_outcome_probability = _contract_probability(direction, payload.get("signal_forecast_prob"))
+    entry_price = _bounded_probability(payload.get("entry_price"))
+    if entry_price is None:
+        entry_price = default_market_probability or 0.0
     shares = _as_float(payload.get("shares")) or 0.0
     cost = _as_float(payload.get("cost")) or 0.0
+    mark_price = _bounded_probability(payload.get("mark_price"))
+    if mark_price is None:
+        mark_price = default_market_probability
+    outcome_probability = _bounded_probability(payload.get("mark_probability"))
+    if outcome_probability is None:
+        outcome_probability = default_outcome_probability
     if outcome_probability is not None:
         expected_payout = round(shares * outcome_probability, 6)
         expected_value_pnl = round(expected_payout - cost, 6)
     else:
         expected_payout = None
         expected_value_pnl = None
+    if mark_price is not None:
+        mark_to_market_payout = round(shares * mark_price, 6)
+        mark_to_market_pnl = round(mark_to_market_payout - cost, 6)
+    else:
+        mark_to_market_payout = None
+        mark_to_market_pnl = None
 
     decision_metadata = {}
     try:
@@ -696,13 +864,25 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
         "decision_policy_action": str(payload.get("decision_policy_action") or ""),
         "decision_metadata": decision_metadata,
         "entry_price": entry_price,
-        "market_probability": _as_float(payload.get("signal_market_prob")),
+        "market_probability": mark_price,
         "outcome_probability": outcome_probability,
         "shares": shares,
         "cost": cost,
         "realized_pnl": _as_float(payload.get("realized_pnl")),
         "expected_payout": expected_payout,
         "expected_value_pnl": expected_value_pnl,
+        "mark_price": mark_price,
+        "mark_probability": outcome_probability,
+        "mark_to_market_payout": mark_to_market_payout,
+        "mark_to_market_pnl": mark_to_market_pnl,
+        "mark_edge_abs": _as_float(payload.get("mark_edge_abs")),
+        "mark_final_score": _as_float(payload.get("mark_final_score")),
+        "mark_updated_at": str(payload.get("mark_updated_at") or ""),
+        "mark_reason": str(payload.get("mark_reason") or ""),
+        "mark_to_market_mode": "reviewed_contract_mark" if payload.get("mark_updated_at") else "entry_contract_mark",
+        "expected_value_mode": "reviewed_model_prob" if payload.get("mark_probability") is not None else "entry_model_prob",
+        "exit_price": _bounded_probability(payload.get("exit_price")),
+        "exit_reason": str(payload.get("exit_reason") or ""),
         "edge": _as_float(payload.get("signal_edge")),
         "edge_abs": _as_float(payload.get("signal_edge_abs")),
         "edge_size": str(payload.get("signal_edge_size") or ""),
@@ -741,3 +921,17 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bounded_probability(value: Any) -> float | None:
+    raw = _as_float(value)
+    if raw is None:
+        return None
+    return round(max(0.0, min(1.0, raw)), 6)
+
+
+def _contract_probability(direction: Any, yes_probability: Any) -> float | None:
+    raw = _bounded_probability(yes_probability)
+    if raw is None:
+        return None
+    return raw if str(direction or "").upper() == "YES" else round(1.0 - raw, 6)

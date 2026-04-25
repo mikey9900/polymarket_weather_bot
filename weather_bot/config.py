@@ -22,6 +22,7 @@ class AppSettings:
     resolution_check_minutes: int
     auto_temperature_scan_seconds: int = 0
     auto_precipitation_scan_seconds: int = 0
+    open_position_review_seconds: int = 30
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,11 @@ class StrategyThresholds:
     max_hours_to_event: float
     max_source_age_hours: float = 6.0
     max_source_dispersion_pct: float = 0.20
+    exit_min_score: float = 0.55
+    exit_near_fair_edge_abs: float = 0.03
+    exit_max_source_age_hours: float = 8.0
+    exit_max_source_dispersion_pct: float = 0.24
+    exit_min_hours_to_event: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -156,6 +162,8 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("app", {})["auto_precipitation_scan_seconds"] = int(payload["precipitation_scan_seconds"])
     if "resolution_check_minutes" in payload:
         mapped.setdefault("app", {})["resolution_check_minutes"] = int(payload["resolution_check_minutes"])
+    if "open_position_review_seconds" in payload:
+        mapped.setdefault("app", {})["open_position_review_seconds"] = int(payload["open_position_review_seconds"])
     if "paper_stake_usd" in payload:
         mapped.setdefault("paper", {})["stake_usd"] = float(payload["paper_stake_usd"])
     if "paper_initial_capital" in payload:
@@ -179,6 +187,8 @@ def _load_env_overrides() -> dict[str, Any]:
         payload.setdefault("app", {})["auto_precipitation_scan_seconds"] = int(os.getenv("WEATHER_PRECIP_SCAN_SECONDS", "0"))
     if os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES"):
         payload.setdefault("app", {})["resolution_check_minutes"] = int(os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES", "15"))
+    if os.getenv("WEATHER_OPEN_POSITION_REVIEW_SECONDS"):
+        payload.setdefault("app", {})["open_position_review_seconds"] = int(os.getenv("WEATHER_OPEN_POSITION_REVIEW_SECONDS", "30"))
     return payload
 
 
