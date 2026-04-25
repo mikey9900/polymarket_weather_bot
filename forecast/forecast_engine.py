@@ -28,6 +28,7 @@ import os
 import requests
 import math
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Optional, Dict, Tuple
 from dotenv import load_dotenv
@@ -569,10 +570,15 @@ def get_both_bucket_probabilities(
     unit_sym = "°F" if unit == "fahrenheit" else "°C"
     station  = coords.get("station", "?")
 
-    wu_temp   = get_wu_forecast_max_temp(city_slug, target_date)
-    om_temp   = get_openmeteo_forecast_max_temp(city_slug, target_date)
-    vc_temp   = get_visual_crossing_forecast_max_temp(city_slug, target_date)
-    noaa_temp = get_noaa_forecast_max_temp(city_slug, target_date)  # US only, None for international
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="weather-provider") as executor:
+        future_wu = executor.submit(get_wu_forecast_max_temp, city_slug, target_date)
+        future_om = executor.submit(get_openmeteo_forecast_max_temp, city_slug, target_date)
+        future_vc = executor.submit(get_visual_crossing_forecast_max_temp, city_slug, target_date)
+        future_noaa = executor.submit(get_noaa_forecast_max_temp, city_slug, target_date)
+        wu_temp = future_wu.result()
+        om_temp = future_om.result()
+        vc_temp = future_vc.result()
+        noaa_temp = future_noaa.result()  # US only, None for international
 
     print(f"    🌡️  WU ({station}): {f'{wu_temp:.1f}{unit_sym}' if wu_temp is not None else 'N/A'}")
     print(f"    🌤️  Open-Meteo:   {f'{om_temp:.1f}{unit_sym}' if om_temp is not None else 'N/A'}")

@@ -43,6 +43,7 @@ def format_scan_summary(
         f"Accepted by strategy: {accepted_count}\n"
         f"Paper trades opened: {opened_count}\n"
         f"Positions settled: {settled_count}\n"
+        f"Errors: {batch.error_count}\n"
         f"Skipped: {batch.skipped_events}"
     )
 

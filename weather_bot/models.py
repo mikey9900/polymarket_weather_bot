@@ -126,6 +126,8 @@ class ScanBatch:
     skipped_events: int
     started_at: str
     finished_at: str
+    error_count: int = 0
+    error_samples: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,4 +139,6 @@ class ScanBatch:
             "skipped_events": self.skipped_events,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "error_count": self.error_count,
+            "error_samples": list(self.error_samples),
         }

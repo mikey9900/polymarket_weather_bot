@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 
 from forecast.forecast_engine import get_both_bucket_probabilities
@@ -19,8 +20,63 @@ def scan_temperature_signals(limit: int = 300) -> ScanBatch:
     flagged_events = 0
     processed_events = 0
     skipped_events = 0
+    error_count = 0
+    error_samples: list[str] = []
 
-    for bundle in bundles:
+    if not bundles:
+        return ScanBatch(
+            scan_type="temperature",
+            signals=[],
+            total_events=0,
+            processed_events=0,
+            flagged_events=0,
+            skipped_events=0,
+            started_at=started_at.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    worker_count = _scan_worker_count(len(bundles))
+    if worker_count == 1:
+        bundle_results = [_process_temperature_bundle(bundle, started_at) for bundle in bundles]
+    else:
+        bundle_results = []
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="weather-temp-bundle") as executor:
+            futures = [executor.submit(_process_temperature_bundle, bundle, started_at) for bundle in bundles]
+            for future in as_completed(futures):
+                try:
+                    bundle_results.append(future.result())
+                except Exception as exc:
+                    error_count += 1
+                    if len(error_samples) < 5:
+                        error_samples.append(str(exc))
+
+    for item in bundle_results:
+        signals.extend(item["signals"])
+        flagged_events += int(item["flagged_events"])
+        processed_events += int(item["processed_events"])
+        skipped_events += int(item["skipped_events"])
+        error_count += int(item["error_count"])
+        for sample in item["error_samples"]:
+            if len(error_samples) < 5:
+                error_samples.append(sample)
+
+    signals.sort(key=lambda signal: signal.score, reverse=True)
+    return ScanBatch(
+        scan_type="temperature",
+        signals=signals,
+        total_events=len(bundles),
+        processed_events=processed_events,
+        flagged_events=flagged_events,
+        skipped_events=skipped_events,
+        started_at=started_at.isoformat(),
+        finished_at=datetime.now(timezone.utc).isoformat(),
+        error_count=error_count,
+        error_samples=error_samples,
+    )
+
+
+def _process_temperature_bundle(bundle: dict, created_at: datetime) -> dict[str, object]:
+    try:
         event = bundle["event"]
         markets = bundle["markets"]
         end_date_str = (event.get("endDate") or "")[:10]
@@ -28,19 +84,16 @@ def scan_temperature_signals(limit: int = 300) -> ScanBatch:
         try:
             event_date = date.fromisoformat(end_date_str)
         except ValueError:
-            skipped_events += 1
-            continue
+            return _bundle_result(skipped_events=1)
         buckets = parse_temperature_buckets_for_event(markets)
         if not buckets:
-            skipped_events += 1
-            continue
+            return _bundle_result(skipped_events=1)
         event_slug = str(event.get("slug") or "")
         for bucket in buckets:
             bucket["event_slug"] = event_slug
         forecast_data = get_both_bucket_probabilities(city_slug, event_date, buckets)
         if not any(forecast_data.get(key) is not None for key in ("wu", "openmeteo", "vc", "noaa")):
-            skipped_events += 1
-            continue
+            return _bundle_result(skipped_events=1)
         discrepancies = find_discrepancies(
             event_title=str(event.get("title") or "Unknown"),
             city_slug=city_slug,
@@ -56,30 +109,48 @@ def scan_temperature_signals(limit: int = 300) -> ScanBatch:
             noaa_probs=forecast_data.get("noaa"),
             noaa_temp=forecast_data.get("noaa_temp"),
         )
-        processed_events += 1
-        if discrepancies:
-            flagged_events += 1
         event_end = _parse_event_end_time(event.get("endDate"))
-        for discrepancy in discrepancies:
-            signals.append(
-                _build_temperature_signal(
-                    event=event,
-                    discrepancy=discrepancy,
-                    event_end=event_end,
-                    created_at=started_at,
-                )
+        signals = [
+            _build_temperature_signal(
+                event=event,
+                discrepancy=discrepancy,
+                event_end=event_end,
+                created_at=created_at,
             )
+            for discrepancy in discrepancies
+        ]
+        return _bundle_result(
+            signals=signals,
+            processed_events=1,
+            flagged_events=1 if discrepancies else 0,
+        )
+    except Exception as exc:
+        return _bundle_result(skipped_events=1, error_count=1, error_samples=[str(exc)])
 
-    return ScanBatch(
-        scan_type="temperature",
-        signals=signals,
-        total_events=len(bundles),
-        processed_events=processed_events,
-        flagged_events=flagged_events,
-        skipped_events=skipped_events,
-        started_at=started_at.isoformat(),
-        finished_at=datetime.now(timezone.utc).isoformat(),
-    )
+
+def _bundle_result(
+    *,
+    signals: list[WeatherSignal] | None = None,
+    processed_events: int = 0,
+    flagged_events: int = 0,
+    skipped_events: int = 0,
+    error_count: int = 0,
+    error_samples: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "signals": signals or [],
+        "processed_events": processed_events,
+        "flagged_events": flagged_events,
+        "skipped_events": skipped_events,
+        "error_count": error_count,
+        "error_samples": list(error_samples or []),
+    }
+
+
+def _scan_worker_count(bundle_count: int) -> int:
+    if bundle_count <= 1:
+        return 1
+    return min(6, max(2, bundle_count))
 
 
 def _build_temperature_signal(*, event: dict, discrepancy: dict, event_end: datetime | None, created_at: datetime) -> WeatherSignal:

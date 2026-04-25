@@ -10,7 +10,7 @@ from .config import WeatherBotConfig, load_config
 from .control_plane import ControlPlane
 from .dashboard_state import DashboardStateService
 from .live_api import LiveApiServer
-from .paths import PID_LOCK_PATH
+from .paths import PID_LOCK_PATH, SCAN_EXPORTS_ROOT, STATE_EXPORT_PATH
 from .process_lock import PidLock, acquire_pid_lock
 from .research.codex_automation import CodexAutomationManager
 from .research.runtime import ResearchSnapshotProvider
@@ -77,6 +77,7 @@ def get_application() -> WeatherApplication:
         tracker=tracker,
         strategy_engine=strategy,
         telegram=telegram,
+        scan_export_root=SCAN_EXPORTS_ROOT,
     )
     control_plane = ControlPlane(runtime, tracker, codex_manager=codex_manager)
     dashboard_state = DashboardStateService(
@@ -85,6 +86,7 @@ def get_application() -> WeatherApplication:
         control_plane=control_plane,
         refresh_seconds=config.dashboard.refresh_seconds,
         codex_manager=codex_manager,
+        state_export_path=STATE_EXPORT_PATH,
     )
     live_api = LiveApiServer(dashboard_state, host=config.dashboard.host, port=config.dashboard.port)
     pid_lock = acquire_pid_lock(PID_LOCK_PATH)

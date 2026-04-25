@@ -41,6 +41,10 @@ CODEX_STATE_PATH = CODEX_ROOT / "state.json"
 CODEX_LATEST_PATH = CODEX_ROOT / "latest.json"
 CODEX_LOCK_PATH = CODEX_ROOT / "runner.lock"
 
+EXPORT_ROOT = SHARED_DATA_ROOT / "exports"
+STATE_EXPORT_PATH = EXPORT_ROOT / "dashboard_state.json"
+SCAN_EXPORTS_ROOT = EXPORT_ROOT / "scan_runs"
+
 
 def ensure_data_dirs() -> None:
     for path in (
@@ -51,6 +55,8 @@ def ensure_data_dirs() -> None:
         CODEX_ROOT,
         CODEX_QUEUE_ROOT,
         CODEX_RUNS_ROOT,
+        EXPORT_ROOT,
+        SCAN_EXPORTS_ROOT,
     ):
         path.mkdir(parents=True, exist_ok=True)
 

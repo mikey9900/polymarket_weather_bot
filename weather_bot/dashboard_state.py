@@ -2,19 +2,29 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
 class DashboardStateService:
-    def __init__(self, *, tracker, runtime, control_plane, refresh_seconds: float = 5.0, codex_manager=None):
+    def __init__(self, *, tracker, runtime, control_plane, refresh_seconds: float = 5.0, codex_manager=None, state_export_path: str | Path | None = None):
         self.tracker = tracker
         self.runtime = runtime
         self.control_plane = control_plane
         self.codex_manager = codex_manager
         self.refresh_seconds = max(1.0, float(refresh_seconds))
+        self.state_export_path = Path(state_export_path) if state_export_path else None
+        self._state_export_error: str | None = None
+        if self.state_export_path is not None:
+            try:
+                self.state_export_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                self._state_export_error = str(exc)
+                self.state_export_path = None
         self._lock = threading.Lock()
         self._history: deque[dict[str, Any]] = deque(maxlen=240)
         self._state: dict[str, Any] = {}
@@ -37,6 +47,7 @@ class DashboardStateService:
 
     def refresh_once(self) -> None:
         snapshot = self._build_snapshot()
+        self._sync_export(snapshot)
         with self._lock:
             self._state = snapshot
             self._history.append(
@@ -79,6 +90,12 @@ class DashboardStateService:
             "recent_resolutions": self.tracker.get_recent_resolutions(limit=12),
             "recent_operator_actions": self.tracker.get_recent_operator_actions(limit=12),
             "signal_summary_24h": self.tracker.get_signal_summary(),
+            "exports": {
+                "dashboard_state_path": str(self.state_export_path) if self.state_export_path is not None else None,
+                "dashboard_state_error": self._state_export_error,
+                "scan_export_root": str(self.runtime.scan_export_root) if getattr(self.runtime, "scan_export_root", None) is not None else None,
+                "scan_export_error": runtime_status.get("last_scan_export_error"),
+            },
         }
         strategy_engine = getattr(self.runtime, "strategy_engine", None)
         research_provider = getattr(strategy_engine, "research_provider", None)
@@ -87,6 +104,19 @@ class DashboardStateService:
         if self.codex_manager is not None:
             payload.update(self.codex_manager.snapshot())
         return payload
+
+    def _sync_export(self, snapshot: dict[str, Any]) -> None:
+        exports = snapshot.setdefault("exports", {})
+        exports["dashboard_state_path"] = str(self.state_export_path) if self.state_export_path is not None else None
+        if self.state_export_path is None:
+            exports["dashboard_state_error"] = self._state_export_error
+            return
+        try:
+            self.state_export_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True), encoding="utf-8")
+            self._state_export_error = None
+        except OSError as exc:
+            self._state_export_error = str(exc)
+        exports["dashboard_state_error"] = self._state_export_error
 
     def get_state_threadsafe(self) -> dict[str, Any]:
         with self._lock:

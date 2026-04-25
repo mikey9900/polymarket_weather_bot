@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from logic.discrepancy_logic import find_discrepancies
@@ -19,20 +20,78 @@ def scan_precipitation_signals() -> ScanBatch:
     processed_events = 0
     flagged_events = 0
     skipped_events = 0
+    error_count = 0
+    error_samples: list[str] = []
 
-    for bundle in bundles:
+    if not bundles:
+        return ScanBatch(
+            scan_type="precipitation",
+            signals=[],
+            total_events=0,
+            processed_events=0,
+            flagged_events=0,
+            skipped_events=0,
+            started_at=started_at.isoformat(),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    worker_count = _scan_worker_count(len(bundles))
+    if worker_count == 1:
+        bundle_results = [_process_precipitation_bundle(bundle, started_at) for bundle in bundles]
+    else:
+        bundle_results = []
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="weather-precip-bundle") as executor:
+            futures = [executor.submit(_process_precipitation_bundle, bundle, started_at) for bundle in bundles]
+            for future in as_completed(futures):
+                try:
+                    bundle_results.append(future.result())
+                except Exception as exc:
+                    error_count += 1
+                    if len(error_samples) < 5:
+                        error_samples.append(str(exc))
+
+    for item in bundle_results:
+        signals.extend(item["signals"])
+        processed_events += int(item["processed_events"])
+        flagged_events += int(item["flagged_events"])
+        skipped_events += int(item["skipped_events"])
+        error_count += int(item["error_count"])
+        for sample in item["error_samples"]:
+            if len(error_samples) < 5:
+                error_samples.append(sample)
+
+    signals.sort(key=lambda signal: signal.score, reverse=True)
+    return ScanBatch(
+        scan_type="precipitation",
+        signals=signals,
+        total_events=len(bundles),
+        processed_events=processed_events,
+        flagged_events=flagged_events,
+        skipped_events=skipped_events,
+        started_at=started_at.isoformat(),
+        finished_at=datetime.now(timezone.utc).isoformat(),
+        error_count=error_count,
+        error_samples=error_samples,
+    )
+
+
+def _process_precipitation_bundle(bundle: dict, created_at: datetime) -> dict[str, object]:
+    try:
         event = bundle["event"]
         buckets = parse_precip_buckets_for_event(bundle["markets"])
         if not buckets:
-            skipped_events += 1
-            continue
+            return _bundle_result(skipped_events=1)
         for bucket in buckets:
             bucket["event_slug"] = str(event.get("slug") or "")
-        om_data = get_om_monthly_precip(bundle["city_slug"], bundle["year"], bundle["month"])
-        vc_data = get_vc_monthly_precip(bundle["city_slug"], bundle["year"], bundle["month"])
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="weather-precip-provider") as executor:
+            future_om = executor.submit(get_om_monthly_precip, bundle["city_slug"], bundle["year"], bundle["month"])
+            future_vc = executor.submit(get_vc_monthly_precip, bundle["city_slug"], bundle["year"], bundle["month"])
+            om_data = future_om.result()
+            vc_data = future_vc.result()
+
         if not om_data and not vc_data:
-            skipped_events += 1
-            continue
+            return _bundle_result(skipped_events=1)
         observed = (om_data or vc_data)["observed"]
         unit = (om_data or vc_data)["unit"]
         om_probs = calc_precip_bucket_probs(observed, om_data["forecast"], buckets, unit) if om_data else None
@@ -52,22 +111,39 @@ def scan_precipitation_signals() -> ScanBatch:
             noaa_probs=None,
             noaa_temp=None,
         )
-        processed_events += 1
-        if discrepancies:
-            flagged_events += 1
-        for discrepancy in discrepancies:
-            signals.append(_build_precip_signal(discrepancy, started_at))
+        signals = [_build_precip_signal(discrepancy, created_at) for discrepancy in discrepancies]
+        return _bundle_result(
+            signals=signals,
+            processed_events=1,
+            flagged_events=1 if discrepancies else 0,
+        )
+    except Exception as exc:
+        return _bundle_result(skipped_events=1, error_count=1, error_samples=[str(exc)])
 
-    return ScanBatch(
-        scan_type="precipitation",
-        signals=signals,
-        total_events=len(bundles),
-        processed_events=processed_events,
-        flagged_events=flagged_events,
-        skipped_events=skipped_events,
-        started_at=started_at.isoformat(),
-        finished_at=datetime.now(timezone.utc).isoformat(),
-    )
+
+def _bundle_result(
+    *,
+    signals: list[WeatherSignal] | None = None,
+    processed_events: int = 0,
+    flagged_events: int = 0,
+    skipped_events: int = 0,
+    error_count: int = 0,
+    error_samples: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "signals": signals or [],
+        "processed_events": processed_events,
+        "flagged_events": flagged_events,
+        "skipped_events": skipped_events,
+        "error_count": error_count,
+        "error_samples": list(error_samples or []),
+    }
+
+
+def _scan_worker_count(bundle_count: int) -> int:
+    if bundle_count <= 1:
+        return 1
+    return min(4, max(2, bundle_count))
 
 
 def _build_precip_signal(discrepancy: dict, created_at: datetime) -> WeatherSignal:

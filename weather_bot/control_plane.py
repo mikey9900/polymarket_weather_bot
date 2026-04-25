@@ -55,6 +55,12 @@ class ControlPlane:
             "precipitation_enabled": runtime_status.get("precipitation_enabled", True),
             "paper_auto_trade": runtime_status.get("paper_auto_trade", True),
             "scan_in_progress": runtime_status.get("scan_in_progress", False),
+            "scan_queue_depth": runtime_status.get("scan_queue_depth", 0),
+            "pending_scan_types": runtime_status.get("pending_scan_types", []),
+            "active_scan_type": runtime_status.get("active_scan_type"),
+            "scan_worker_healthy": runtime_status.get("scan_worker_healthy", False),
+            "last_scan_worker_error": runtime_status.get("last_scan_worker_error"),
+            "last_scan_export_error": runtime_status.get("last_scan_export_error"),
             "paper_balance": paper.get("current_balance", 0.0),
             "paper_equity": paper.get("current_equity", 0.0),
             "paper_initial_capital": paper.get("initial_capital", 0.0),
@@ -87,14 +93,26 @@ class ControlPlane:
             self.runtime.pause()
             return self._record(ControlResult(True, 200, "Automation paused.", action))
         if action == "scan_temperature":
-            batch, results = self.runtime.run_temperature_scan(send_alerts=False)
+            queued = self.runtime.request_scan(
+                "temperature",
+                send_alerts=False,
+                reason="operator",
+                ignore_pause=True,
+                ignore_enabled=True,
+            )
             return self._record(
-                ControlResult(True, 200, f"Temperature scan completed with {len(batch.signals)} signals.", action, {"opened": sum(1 for item in results if item.position)}),
+                ControlResult(bool(queued.get("ok")), 202, str(queued.get("message")), action),
             )
         if action == "scan_precipitation":
-            batch, results = self.runtime.run_precipitation_scan(send_alerts=False)
+            queued = self.runtime.request_scan(
+                "precipitation",
+                send_alerts=False,
+                reason="operator",
+                ignore_pause=True,
+                ignore_enabled=True,
+            )
             return self._record(
-                ControlResult(True, 200, f"Precipitation scan completed with {len(batch.signals)} signals.", action, {"opened": sum(1 for item in results if item.position)}),
+                ControlResult(bool(queued.get("ok")), 202, str(queued.get("message")), action),
             )
         if action == "set_paper_capital":
             try:
