@@ -1,6 +1,6 @@
 name: "Polymarket Weather Bot"
 description: "Weather-market paper trader with HA ingress, research artifacts, and Telegram backup controls"
-version: "3.2.6"
+version: "3.2.7"
 slug: "polymarket_weather_bot"
 startup: application
 boot: auto
@@ -10,14 +10,16 @@ ingress_port: 8099
 ingress_stream: true
 panel_icon: mdi:weather-partly-lightning
 panel_title: Weather Bot
+url: "https://github.com/mikey9900/polymarket_weather_bot"
 arch:
   - aarch64
   - amd64
   - armv7
 map:
-  - config:rw
-  - share:rw
-  - data:rw
+  - type: addon_config
+    read_only: false
+  - type: share
+    read_only: false
 options:
   telegram_bot_token: ""
   telegram_chat_id: ""

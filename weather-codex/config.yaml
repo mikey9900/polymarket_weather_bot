@@ -1,17 +1,18 @@
 name: "Weather Codex Runner"
 description: "Queue-backed research and tuning sidecar for the weather bot"
-version: "0.1.7"
+version: "0.1.8"
 slug: "weather_codex_runner"
 startup: services
 boot: auto
 init: false
+url: "https://github.com/mikey9900/polymarket_weather_bot"
 arch:
   - aarch64
   - amd64
   - armv7
 map:
-  - data:rw
-  - share:rw
+  - type: share
+    read_only: false
 options:
   poll_seconds: 15
 schema:
