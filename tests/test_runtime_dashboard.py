@@ -161,7 +161,9 @@ def test_dashboard_exposes_recent_resolutions(tmp_path: Path):
     state = dashboard.get_state_threadsafe()
 
     assert len(state["recent_resolutions"]) == 1
+    assert state["recent_resolutions"][0]["status"] == "resolved"
     assert state["recent_resolutions"][0]["resolution"] == "YES"
+    assert state["recent_resolutions"][0]["outcome_label"] == "Resolved YES"
 
 
 def test_dashboard_exposes_enriched_open_trade_cards(tmp_path: Path):
@@ -444,6 +446,8 @@ def test_dashboard_manual_close_action_closes_open_trade(tmp_path: Path):
     assert latest_trade["exit_reason"] == "manual_test_close"
     assert latest_trade["exit_fee_paid"] > 0
     assert latest_trade["net_exit_payout"] < latest_trade["gross_exit_payout"]
+    assert response["state"]["recent_resolutions"][0]["status"] == "closed"
+    assert response["state"]["recent_resolutions"][0]["outcome_label"] == "Sold"
 
 
 def test_manual_close_refreshes_stale_mark_before_closing(tmp_path: Path):

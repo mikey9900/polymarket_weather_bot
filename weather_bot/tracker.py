@@ -653,11 +653,57 @@ class WeatherTracker:
         return items
 
     def get_recent_resolutions(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
+        limit = max(0, int(limit))
+        resolved_rows = self.conn.execute(
             "SELECT * FROM resolution_events ORDER BY resolved_at DESC LIMIT ?",
-            (int(limit),),
+            (limit,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        closed_rows = self.conn.execute(
+            """
+            SELECT
+                market_slug,
+                realized_pnl,
+                net_exit_payout,
+                exit_reason,
+                resolved_at
+            FROM paper_positions
+            WHERE status = 'closed' AND resolved_at IS NOT NULL
+            ORDER BY resolved_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in resolved_rows:
+            items.append(
+                {
+                    "market_slug": str(row["market_slug"] or ""),
+                    "resolution": str(row["resolution"] or ""),
+                    "resolved_positions": int(row["resolved_positions"] or 0),
+                    "total_realized_pnl": float(row["total_realized_pnl"] or 0.0),
+                    "total_payout": float(row["total_payout"] or 0.0),
+                    "resolved_at": str(row["resolved_at"] or ""),
+                    "status": "resolved",
+                    "event_kind": "settlement",
+                    "outcome_label": f"Resolved {str(row['resolution'] or '').upper()}".strip(),
+                }
+            )
+        for row in closed_rows:
+            items.append(
+                {
+                    "market_slug": str(row["market_slug"] or ""),
+                    "resolution": "",
+                    "resolved_positions": 1,
+                    "total_realized_pnl": float(row["realized_pnl"] or 0.0),
+                    "total_payout": float(row["net_exit_payout"] or 0.0),
+                    "resolved_at": str(row["resolved_at"] or ""),
+                    "status": "closed",
+                    "event_kind": "exit",
+                    "outcome_label": _close_outcome_label(row["exit_reason"]),
+                }
+            )
+        items.sort(key=lambda item: str(item.get("resolved_at") or ""), reverse=True)
+        return items[:limit]
 
     def get_recent_operator_actions(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -1150,3 +1196,14 @@ def _estimate_net_exit_value(
     exit_fee_paid = _fee_amount(gross_payout, fee_bps)
     net_payout = round(gross_payout - exit_fee_paid, 6)
     return fill_exit_price, gross_payout, exit_fee_paid, net_payout
+
+
+def _close_outcome_label(reason: Any) -> str:
+    normalized = str(reason or "").strip().lower()
+    if not normalized:
+        return "Closed"
+    if normalized.startswith("manual"):
+        return "Sold"
+    if "review" in normalized:
+        return "Auto Exit"
+    return "Closed"

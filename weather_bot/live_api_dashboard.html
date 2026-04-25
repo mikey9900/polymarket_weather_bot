@@ -71,6 +71,10 @@
     .ctl:hover:not(:disabled){transform:translateY(-1px);box-shadow:inset 0 1px 0 #2c3865,0 3px 0 #000,0 0 11px rgba(0,240,255,.28)} .ctl:disabled{opacity:.4;cursor:not-allowed} .ctl.active{color:var(--cyan);border-color:rgba(0,240,255,.72);box-shadow:inset 0 1px 0 #2c3865,0 2px 0 #000,0 0 13px rgba(0,240,255,.42)} .ctl.warn.active,.ctl.warn:hover:not(:disabled){color:var(--red);border-color:rgba(255,92,108,.78);box-shadow:inset 0 1px 0 #5b2430,0 2px 0 #000,0 0 13px rgba(255,92,108,.38)}
     input[type=number],select{width:120px;padding:6px 8px;border-radius:4px;border:1px solid #314580;background:rgba(8,13,31,.72);color:var(--text);font:18px "VT323","Courier New",monospace}
     .note{margin-top:8px;padding:6px 7px;border:1px solid #314580;border-radius:4px;background:rgba(8,13,31,.74);color:var(--dim);min-height:34px}
+    .promptline{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px;padding:8px 11px;border:1px solid #314580;border-radius:999px;background:linear-gradient(180deg,rgba(17,25,58,.96),rgba(8,13,31,.92));box-shadow:inset 0 1px 0 rgba(111,136,199,.14),0 0 10px rgba(0,240,255,.08)}
+    .prompt-label{color:var(--cyan);font:8px "Press Start 2P","VT323",monospace;letter-spacing:1px;text-transform:uppercase}
+    .prompt-copy{flex:1;min-width:220px;color:var(--text);font-size:16px;line-height:1.08}
+    .prompt-actions{display:flex;flex-wrap:wrap;gap:6px}
     .status{margin-top:12px;padding:7px 9px;border:1px dashed #2b3b78;border-radius:4px;background:rgba(8,13,31,.75);color:var(--dim);min-height:22px}
     .cards,.signals{display:grid;gap:10px}.cards{grid-template-columns:repeat(auto-fill,minmax(318px,1fr));gap:12px}.signals{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
     .card,.item{position:relative;border-color:var(--line);border-radius:6px;background:linear-gradient(180deg,rgba(17,25,57,.96),rgba(8,13,31,.95))}.card:before,.item:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(0,240,255,.05),transparent 48%)} .card.pos:before{background:linear-gradient(180deg,rgba(77,255,116,.08),transparent 46%)} .card.neg:before{background:linear-gradient(180deg,rgba(255,92,108,.08),transparent 46%)}
@@ -133,6 +137,7 @@
           </div>
         </div>
         <div class="controls" id="controls"></div>
+        <div class="promptline" id="control-prompt"><span class="prompt-label">OPS PROMPT</span><span class="prompt-copy">Operator link ready.</span></div>
         <div class="status" id="status">CONTROL LINK STANDBY</div>
       </div>
     </section>
@@ -164,12 +169,12 @@
         <div class="signals" id="signals"></div>
       </div>
     </section>
-    <section class="dashboard-cell span-5" data-cell-id="resolutions" data-cell-label="Recent Settlements">
+    <section class="dashboard-cell span-5" data-cell-id="resolutions" data-cell-label="Recent Outcomes">
       <div class="panel">
         <div class="head">
-          <div><span class="kicker">Resolution Tape</span><h2>RECENT SETTLEMENTS</h2></div>
+          <div><span class="kicker">Exit Tape</span><h2>RECENT OUTCOMES</h2></div>
           <div class="head-actions">
-            <div class="meta-note" id="res-meta">Resolved market tape.</div>
+            <div class="meta-note" id="res-meta">Closed trades and settled markets.</div>
             <button class="cellbtn" type="button" onclick="shiftCell('resolutions', -1)">UP</button>
             <button class="cellbtn" type="button" onclick="shiftCell('resolutions', 1)">DOWN</button>
             <button class="handle" type="button" data-handle>DRAG</button>
@@ -178,7 +183,7 @@
         <div class="signals" id="resolutions"></div>
       </div>
     </section>
-    <section class="dashboard-cell span-4" data-cell-id="bars" data-cell-label="PnL Barometer">
+    <section class="dashboard-cell span-12" data-cell-id="bars" data-cell-label="PnL Barometer">
       <div class="panel">
         <div class="head">
           <div><span class="kicker">Paper Pulse</span><h2>PNL BAROMETER</h2></div>
@@ -192,38 +197,10 @@
         <div class="bars" id="bars"></div>
       </div>
     </section>
-    <section class="dashboard-cell span-4" data-cell-id="system" data-cell-label="Research Bus">
-      <div class="panel">
-        <div class="head">
-          <div><span class="kicker">Codex + System</span><h2>RESEARCH BUS</h2></div>
-          <div class="head-actions">
-            <div class="meta-note" id="sys-meta">Automation and export mirrors.</div>
-            <button class="cellbtn" type="button" onclick="shiftCell('system', -1)">UP</button>
-            <button class="cellbtn" type="button" onclick="shiftCell('system', 1)">DOWN</button>
-            <button class="handle" type="button" data-handle>DRAG</button>
-          </div>
-        </div>
-        <div class="signals" id="system"></div>
-      </div>
-    </section>
-    <section class="dashboard-cell span-4" data-cell-id="ops" data-cell-label="Operator Actions">
-      <div class="panel">
-        <div class="head">
-          <div><span class="kicker">Ops Log</span><h2>OPERATOR ACTIONS</h2></div>
-          <div class="head-actions">
-            <div class="meta-note">Control plane history.</div>
-            <button class="cellbtn" type="button" onclick="shiftCell('ops', -1)">UP</button>
-            <button class="cellbtn" type="button" onclick="shiftCell('ops', 1)">DOWN</button>
-            <button class="handle" type="button" data-handle>DRAG</button>
-          </div>
-        </div>
-        <div class="signals" id="ops"></div>
-      </div>
-    </section>
   </main>
   <div class="footer" id="footer">INITIALIZING WEATHER OPS TERMINAL</div>
   <script>
-    const POLL_MS=5000,STALE_AFTER=9000,DEAD_AFTER=18000,LAYOUT_KEY="weather-ops-layout-v1",DEFAULT_LAYOUT=["control-deck","open-trades","signals","resolutions","bars","system","ops"]; let state=null,history=[],lastFrame=0,busy=false,dragState=null,statusMsg={text:"CONTROL LINK STANDBY",tone:""};
+    const POLL_MS=5000,STALE_AFTER=9000,DEAD_AFTER=18000,LAYOUT_KEY="weather-ops-layout-v2",DEFAULT_LAYOUT=["control-deck","open-trades","signals","resolutions","bars"]; let state=null,history=[],lastFrame=0,busy=false,dragState=null,statusMsg={text:"CONTROL LINK STANDBY",tone:""};
     const $=id=>document.getElementById(id), api=p=>new URL(p,window.location.href).toString(), esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
     const usd=v=>"$"+Number(v||0).toFixed(2), sUsd=v=>`${Number(v||0)>0?"+":""}$${Number(v||0).toFixed(2)}`, pct=(v,d=1)=>v==null?"--":(Number(v)*100).toFixed(d)+"%", compact=v=>Math.abs(Number(v||0))>=1000?(Number(v||0)/1000).toFixed(1)+"K":Number(v||0).toFixed(0);
     const dt=v=>{if(!v)return"never";const x=new Date(v);return Number.isNaN(x.getTime())?String(v):x.toLocaleString()}, short=v=>{if(!v)return"--";const x=new Date(v);return Number.isNaN(x.getTime())?String(v):x.toISOString().slice(11,19)};
@@ -276,6 +253,9 @@
     function initLayout(){for(const handle of document.querySelectorAll("[data-handle]")){handle.addEventListener("pointerdown", startDrag)} loadLayout()}
     function controlMessage(c){return c.last_action?String(c.last_message||"Operator action recorded."):"Operator link ready."}
     function controlTone(c){return c.last_action?(c.last_ok?"good":"bad"):""}
+    function operatorPromptText(actions,c){const last=actions[0]||null; if(!last)return controlMessage(c)||"Operator link ready."; const payload=last.payload||{}, message=String(payload.message||controlMessage(c)||"Operator action recorded."); return `${message} | ${dt(last.created_at)}`}
+    function operatorPromptBadges(actions){return actions.slice(0,4).map(x=>badge(loud(x.action||"ops"),(x.payload||{}).ok===false?"bad":"")).join("")}
+    function researchDeckExtra(cx,t,rr,ex,runnerStatus){const lastRun=cx.last_run||{}, lastResult=lastRun.result||{}, approved=t.approved_receipt||{}; return `${runnerStrip(runnerStatus)}<div class="row" style="margin-bottom:8px">${badge(lastRun.job_type?loud(lastRun.job_type):"NO LAST JOB",lastResult&&lastResult.ok===false?"bad":lastRun.job_type?"good":"")}${badge(rr.artifact_exists?"POLICY READY":"POLICY MISS",rr.artifact_exists?"good":"warn")}${badge(ex.dashboard_state_error||ex.scan_export_error?"EXPORT ATTN":"EXPORT MIRROR",ex.dashboard_state_error||ex.scan_export_error?"bad":"good")}${badge(approved.candidate_id?"APPROVED":"NO APPROVAL",approved.candidate_id?"good":"")}</div>`}
     function renderSummary(){const c=state.controls||{},r=state.runtime||{},p=(state.summary||{}).paper||{},sig=Object.values(state.signal_summary_24h||{}).reduce((a,v)=>a+Number(v||0),0); $("summary").innerHTML=[
       pill("Runtime",c.state||"unknown",controlMessage(c), String(c.state||"").toLowerCase()==="running"?"good":"warn"),
       pill("Balance",usd(p.balance),`Equity ${usd(p.equity)}`),
@@ -286,15 +266,16 @@
       pill("Precip Scan",r.last_precipitation_scan_status||"idle",sSub(r,"precipitation"),scanTone(r.last_precipitation_scan_status,r.last_precipitation_error_count)),
       pill("Signals / 24h",String(sig),`Research ${(state.codex||{}).healthy?"online":"waiting"}`,(state.codex||{}).healthy?"good":"warn")
     ].join(""); $("chip-state").textContent=String(c.state||"unknown").toUpperCase(); $("chip-time").textContent=short(state.timestamp_utc)}
-    function renderControls(){const c=state.controls||{},r=state.runtime||{},cx=state.codex||{},t=state.tuner||{},rr=state.research_runtime||{},ex=state.exports||{}, acts=c.available_actions||{}, runnerStatus=codexRunnerStatus(cx,rr);
-      $("deck-meta").textContent=`Queue ${c.scan_queue_depth||0} | Worker ${c.scan_worker_healthy?"healthy":"attention"} | Review ${String(c.last_open_position_review_status||"idle").toUpperCase()} | Last action ${c.last_action||"none"}`;
+    function renderControls(){const c=state.controls||{},r=state.runtime||{},cx=state.codex||{},t=state.tuner||{},rr=state.research_runtime||{},ex=state.exports||{}, acts=c.available_actions||{}, runnerStatus=codexRunnerStatus(cx,rr), recentOps=state.recent_operator_actions||[], lastJob=cx.last_run&&cx.last_run.job_type?loud(cx.last_run.job_type):"NONE", candidateId=t.latest_candidate&&t.latest_candidate.candidate_id?t.latest_candidate.candidate_id:"No candidate yet", exportState=ex.dashboard_state_error||ex.scan_export_error?"ATTN":"READY", researchNote=ex.dashboard_state_error||ex.scan_export_error||rr.last_error||`${candidateId} | ${rr.artifact_path||"policy artifact path pending"}`;
+      $("deck-meta").textContent=`Queue ${c.scan_queue_depth||0} | Worker ${c.scan_worker_healthy?"healthy":"attention"} | Runner ${runnerStatus.label} | Review ${String(c.last_open_position_review_status||"idle").toUpperCase()}`;
       $("controls").innerHTML=[
         block("RUNTIME",read("State",String(c.state||"unknown").toUpperCase())+read("Queue",String(c.scan_queue_depth||0))+read("Active",c.active_scan_type?String(c.active_scan_type).toUpperCase():"IDLE")+read("Worker",c.scan_worker_healthy?"READY":"ALERT"),btn("RESUME","start",null,{act:c.state==="running",dis:busy})+btn("PAUSE","stop",null,{act:c.state==="paused",warn:true,dis:busy}),c.last_open_position_review_error||c.last_scan_worker_error||`Review ${String(c.last_open_position_review_status||"idle").toUpperCase()} | ${c.last_open_position_close_count||0} closed in the latest pass.`),
         block("SCANNERS",read("Temp",String(r.last_temperature_scan_status||"idle").toUpperCase(),scanTone(r.last_temperature_scan_status,r.last_temperature_error_count))+read("Precip",String(r.last_precipitation_scan_status||"idle").toUpperCase(),scanTone(r.last_precipitation_scan_status,r.last_precipitation_error_count))+read("Temp Sig",String(r.last_temperature_signal_count||0))+read("Rain Sig",String(r.last_precipitation_signal_count||0)),btn("TEMP SWEEP","scan_temperature",null,{dis:busy})+btn("RAIN SWEEP","scan_precipitation",null,{dis:busy}),(c.pending_scan_types||[]).length?`Pending queue: ${c.pending_scan_types.join(", ")}`:(r.last_temperature_scan_error||r.last_precipitation_scan_error||"Manual sweeps run through the shared queue so the panel stays responsive.")),
         block("STRATEGIES",read("Temp Auto",yesno(c.temperature_enabled))+read("Rain Auto",yesno(c.precipitation_enabled))+read("Paper Auto",yesno(c.paper_auto_trade))+read("Open",String(c.paper_open_positions||0)),btn(c.temperature_enabled?"TEMP OFF":"TEMP ON","toggle_temperature",!c.temperature_enabled,{act:c.temperature_enabled,warn:c.temperature_enabled,dis:busy})+btn(c.precipitation_enabled?"RAIN OFF":"RAIN ON","toggle_precipitation",!c.precipitation_enabled,{act:c.precipitation_enabled,warn:c.precipitation_enabled,dis:busy})+btn(c.paper_auto_trade?"PAPER OFF":"PAPER ON","toggle_paper_auto_trade",!c.paper_auto_trade,{act:c.paper_auto_trade,warn:c.paper_auto_trade,dis:busy}),[!c.temperature_enabled?"Temp off":"",!c.precipitation_enabled?"Rain off":"",!c.paper_auto_trade?"Paper entries paused":""].filter(Boolean).join(" | ")||"All weather strategies are armed for paper learning."),
         `<div class="block"><span class="title">CAPITAL</span><div class="reads">${read("Balance",usd(c.paper_balance))+read("Equity",usd(c.paper_equity))+read("Initial",usd(c.paper_initial_capital))+read("PnL",sUsd((state.summary||{}).paper?.pnl||0),tone((state.summary||{}).paper?.pnl||0))+read("Open Cap",String(c.paper_max_open_positions||0),`${c.paper_open_positions||0} live now`)}</div><div class="row"><input id="cap-input" type="number" min="1" step="1" placeholder="${esc(String(c.paper_initial_capital||5000))}" />${btn("APPLY","set_paper_capital","__from_input__",{dis:busy})}</div><div class="row" style="margin-top:6px">${[1000,2500,5000,10000].map(v=>`<button type="button" class="ctl"${busy?" disabled":""} onclick="preset(${v})">${v}</button>`).join("")}</div><div class="row" style="margin-top:8px"><select id="open-limit-input"${busy?" disabled":""}>${limitOptions(c.paper_max_open_positions||20)}</select><button type="button" class="ctl"${busy||!acts.set_paper_max_open_positions?" disabled":""} onclick="setOpenLimit()">OPEN CAP</button></div><div class="note">Reset the paper bankroll or raise the global live-position cap without editing config files.</div></div>`,
-        block("CODEX + BUS",read("Runner",cx.healthy?"ONLINE":"WAIT")+read("Queue",String(cx.queue_depth||0))+read("Policy",rr.artifact_exists?"LOADED":"MISS")+read("Candidate",String(t.candidate_status||"none").toUpperCase()),btn("RESEARCH","research_run_now",null,{dis:busy||!acts.research_run_now})+btn("CANDIDATE","tuner_run_now",null,{dis:busy||!acts.tuner_run_now})+btn("PROMOTE","tuner_promote_latest",null,{dis:busy||!acts.tuner_promote_latest})+btn("REJECT","tuner_reject_latest",null,{dis:busy||!acts.tuner_reject_latest,warn:true}),ex.dashboard_state_error||ex.scan_export_error||`${t.latest_candidate&&t.latest_candidate.candidate_id?t.latest_candidate.candidate_id:"No candidate yet"} | exports mirrored`,runnerStrip(runnerStatus))
+        block("RESEARCH DESK",read("Runner",cx.healthy?"ONLINE":"WAIT")+read("Queue",String(cx.queue_depth||0))+read("Policy",rr.artifact_exists?"LOADED":"MISS")+read("Candidate",String(t.candidate_status||"none").toUpperCase())+read("Last Job",lastJob)+read("Exports",exportState,exportState==="ATTN"?"bad":"good"),btn("RESEARCH","research_run_now",null,{dis:busy||!acts.research_run_now})+btn("TUNE","tuner_run_now",null,{dis:busy||!acts.tuner_run_now})+btn("PROMOTE","tuner_promote_latest",null,{dis:busy||!acts.tuner_promote_latest})+btn("REJECT","tuner_reject_latest",null,{dis:busy||!acts.tuner_reject_latest,warn:true}),researchNote,researchDeckExtra(cx,t,rr,ex,runnerStatus))
       ].join("");
+      $("control-prompt").innerHTML=`<span class="prompt-label">OPS PROMPT</span><span class="prompt-copy ${controlTone(c)||""}">${esc(operatorPromptText(recentOps,c))}</span><span class="prompt-actions">${operatorPromptBadges(recentOps)}</span>`;
       $("status").className=`status ${statusMsg.tone||""}`; $("status").textContent=statusMsg.text||controlMessage(c)||"CONTROL LINK STANDBY";
     }
     function limitOptions(selected){return [10,20,30,40,50,60,70,80,90,100].map(v=>`<option value="${v}"${Number(selected)===v?" selected":""}>${v}</option>`).join("")}
@@ -306,16 +287,9 @@
     function simpleCard(title,sub,b1,b2){return `<article class="item"><div class="itemhead"><div><div class="title">${esc(title)}</div><div class="tiny">${esc(sub)}</div></div><div class="badges">${b1||""}${b2||""}</div></div></article>`}
     function renderTrades(){const xs=state.open_positions||[], exp=xs.reduce((a,x)=>a+Number(x.cost||0),0), ev=xs.reduce((a,x)=>a+Number(x.expected_value_pnl||0),0); $("trades-meta").textContent=xs.length?`${xs.length} live cards | ${usd(exp)} staked | model ${sUsd(ev)}`:"No paper positions are open right now."; $("open-trades").innerHTML=xs.length?xs.map(tradeCard).join(""):empty("NO LIVE PAPER TRADES YET")}
     function renderSignals(){const xs=state.recent_signals||[], total=Object.values(state.signal_summary_24h||{}).reduce((a,v)=>a+Number(v||0),0); $("signals-meta").textContent=xs.length?`${xs.length} recent signals | ${total} in the last 24h`:"Waiting for scans to write fresh signal cards."; $("signals").innerHTML=xs.length?xs.map(signalCard).join(""):empty("SIGNAL RADAR IS QUIET")}
-    function renderRes(){const xs=state.recent_resolutions||[]; $("res-meta").textContent=xs.length?`${xs.length} recent settlements`:"No settlements recorded yet."; $("resolutions").innerHTML=xs.length?xs.map(x=>simpleCard(x.market_slug||"market",`${String(x.resolution||"--").toUpperCase()} | ${dt(x.resolved_at)}`,badge(`${x.resolved_positions||0} pos`),badge(sUsd(x.total_realized_pnl||0),tone(x.total_realized_pnl)))).join(""):empty("NO RESOLUTIONS ON TAPE")}
+    function renderRes(){const xs=state.recent_resolutions||[]; $("res-meta").textContent=xs.length?`${xs.length} recent exits and settlements`:"No exits recorded yet."; $("resolutions").innerHTML=xs.length?xs.map(x=>simpleCard(x.market_slug||"market",`${String(x.outcome_label||x.resolution||x.status||"--").toUpperCase()} | ${dt(x.resolved_at)}`,badge(`${x.resolved_positions||0} pos`,Number(x.resolved_positions||0)>1?"warn":""),badge(sUsd(x.total_realized_pnl||0),tone(x.total_realized_pnl)))).join(""):empty("NO EXITS ON TAPE")}
     function renderBars(){const xs=(history||[]).slice(-18); if(!xs.length){$("bars").innerHTML=empty("BAROMETER WILL FILL AFTER A FEW REFRESH CYCLES"); return} const max=Math.max(1,...xs.map(x=>Math.abs(Number(x.paper_pnl||0)))); $("bars").innerHTML=xs.map((x,i)=>`<div class="bar ${Number(x.paper_pnl||0)<0?"neg":""}" style="height:${Math.max(10,Math.round(Math.abs(Number(x.paper_pnl||0))/max*126))}px;opacity:${(0.44+i/Math.max(xs.length,1)*0.5).toFixed(2)}"><span>${Number(x.paper_pnl||0).toFixed(0)}</span></div>`).join("")}
-    function renderSystem(){const cx=state.codex||{},t=state.tuner||{},rr=state.research_runtime||{},ex=state.exports||{}; $("sys-meta").textContent=`${cx.healthy?"runner online":"runner waiting"} | queue ${cx.queue_depth||0}`; $("system").innerHTML=[
-      runnerSystemCard(cx,rr),
-      simpleCard("Latest Candidate",t.latest_candidate&&t.latest_candidate.candidate_id?t.latest_candidate.candidate_id:"No candidate proposal yet",badge(String(t.candidate_status||"none").toUpperCase(),t.candidate_status==="approved"?"good":"")),
-      simpleCard("Runtime Policy",rr.artifact_path||"No policy artifact path",badge(rr.artifact_exists?"LOADED":"MISSING",rr.artifact_exists?"good":"warn")),
-      simpleCard("Export Mirrors",ex.dashboard_state_error||ex.scan_export_error||ex.dashboard_state_path||ex.scan_export_root||"Shared storage ready",badge(ex.dashboard_state_error||ex.scan_export_error?"ATTN":"MIRRORED",ex.dashboard_state_error||ex.scan_export_error?"bad":"good"))
-    ].join("")}
-    function renderOps(){const xs=state.recent_operator_actions||[]; $("ops").innerHTML=xs.length?xs.map(x=>simpleCard(String(x.action||"").toUpperCase(),`${dt(x.created_at)} | ${((x.payload||{}).message)||"Operator event recorded."}`,badge((x.payload||{}).ok===false?"ERR":"OK",(x.payload||{}).ok===false?"bad":"good"))).join(""):empty("NO OPERATOR ACTIONS RECORDED")}
-    function render(){if(!state)return; renderSummary(); renderControls(); renderTrades(); renderSignals(); renderRes(); renderBars(); renderSystem(); renderOps(); $("footer").textContent=`Updated ${dt(state.timestamp_utc)} | Resolution check ${dt((state.runtime||{}).last_resolution_check_at)} | Export mirror ${state.exports&&!state.exports.dashboard_state_error?"ready":"attention"} | HA ingress weather deck online`}
+    function render(){if(!state)return; renderSummary(); renderControls(); renderTrades(); renderSignals(); renderRes(); renderBars(); $("footer").textContent=`Updated ${dt(state.timestamp_utc)} | Resolution check ${dt((state.runtime||{}).last_resolution_check_at)} | Export mirror ${state.exports&&!state.exports.dashboard_state_error?"ready":"attention"} | HA ingress weather deck online`}
     async function load(){try{const [s,h]=await Promise.all([fetch(api("./api/state"),{cache:"no-store"}),fetch(api("./api/history"),{cache:"no-store"})]); if(!s.ok||!h.ok)throw new Error("dashboard endpoints returned an error"); state=await s.json(); history=await h.json(); lastFrame=performance.now(); if(!busy){const c=state.controls||{}; statusMsg={text:controlMessage(c)||"CONTROL LINK STANDBY",tone:controlTone(c)}} render()}catch(e){statusMsg={text:`LINK ERROR: ${e.message||e}`,tone:"bad"}; if(state)render()}}
     async function act(action,value=null){action=String(action||"").trim(); if(!action){setStatus("Dashboard command was empty. Reload the page and try again.","bad"); return} if(value==="__from_input__"){const input=$("cap-input"), parsed=Number(input&&input.value?input.value:0); if(!parsed){if(input)input.focus(); return} value=parsed} busy=true; statusMsg={text:`SENDING ${String(action||"").toUpperCase()}...`,tone:"warn"}; if(state)render(); try{const r=await fetch(api(`./api/control/${encodeURIComponent(action)}`),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({value})}); const payload=await r.json(); if(payload.state)state=payload.state; const h=await fetch(api("./api/history"),{cache:"no-store"}); if(h.ok)history=await h.json(); statusMsg={text:payload.message||"Control applied.",tone:payload.ok?"good":"bad"}; if(payload.state)lastFrame=performance.now(); if(state)render()}catch(e){statusMsg={text:`CONTROL ERROR: ${e.message||e}`,tone:"bad"}; if(state)render()}finally{busy=false; if(state)render()}}
     function preset(v){const i=$("cap-input"); if(i)i.value=String(v)}
