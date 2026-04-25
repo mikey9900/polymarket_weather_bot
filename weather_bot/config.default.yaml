@@ -3,7 +3,9 @@ app:
   timezone: "America/Edmonton"
   log_level: "INFO"
   auto_temperature_scan_minutes: 120
+  auto_temperature_scan_seconds: 0
   auto_precipitation_scan_minutes: 360
+  auto_precipitation_scan_seconds: 0
   resolution_check_minutes: 15
 temperature:
   enabled: true

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Weather Ops Terminal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=VT323&family=Press+Start+2P&display=swap" rel="stylesheet" />
+  <style>
+    :root{--bg0:#050912;--bg1:#091227;--bg2:#101c37;--chrome:#68708e;--line:#243364;--cyan:#00f0ff;--lime:#4dff74;--amber:#ffbb39;--red:#ff5c6c;--text:#d7edff;--dim:#7f94b9;--panel:rgba(8,13,31,.9)}
+    *{box-sizing:border-box} html,body{margin:0;min-height:100%;background:radial-gradient(circle at 15% 12%,rgba(0,240,255,.14),transparent 20%),radial-gradient(circle at 82% 16%,rgba(255,70,209,.10),transparent 18%),linear-gradient(180deg,var(--bg2),var(--bg1) 42%,var(--bg0));color:var(--text);font:18px/1.12 "VT323","Courier New",monospace;overflow-x:hidden}
+    body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:999;background:repeating-linear-gradient(to bottom,rgba(0,240,255,.04) 0,rgba(0,240,255,.04) 1px,transparent 1px,transparent 3px)}
+    body:after{content:"";position:fixed;inset:0;pointer-events:none;z-index:998;background:radial-gradient(ellipse at center,transparent 52%,rgba(0,0,0,.58) 100%)}
+    .wrap,.summary,.deck,main,.footer{max-width:1440px;margin:0 auto;padding:0 12px}
+    .topbar{position:sticky;top:0;z-index:40;display:flex;justify-content:space-between;gap:14px;align-items:center;padding:12px 18px;background:linear-gradient(180deg,#1a2344,#0b1022);border-bottom:2px solid var(--chrome);box-shadow:inset 0 1px 0 #2e3965,inset 0 -2px 0 #000,0 0 20px rgba(0,240,255,.12)}
+    .brand{display:flex;align-items:center;gap:10px;font:13px "Press Start 2P","VT323",monospace;color:var(--cyan);letter-spacing:1.4px;text-shadow:0 0 6px rgba(0,240,255,.92),0 0 14px rgba(0,240,255,.45)}
+    .pulse{width:10px;height:10px;border-radius:50%;background:var(--lime);box-shadow:0 0 10px var(--lime);animation:blink 1.4s infinite}
+    .meta{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:10px}
+    .chip,.uplink,.pill,.block,.panel,.card,.item{border:1px solid var(--chrome);background:linear-gradient(180deg,rgba(24,34,72,.96),rgba(11,17,35,.96));box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 0 10px rgba(0,240,255,.08)}
+    .chip,.uplink{display:inline-flex;align-items:center;gap:7px;padding:5px 9px;border-radius:4px;font-size:15px;letter-spacing:1px}
+    .chip .lbl,.uplink .age,.stat .lbl,.read .lbl{color:var(--dim);font-size:12px}
+    .uplink .dot{width:8px;height:8px;border-radius:50%;background:var(--lime);box-shadow:0 0 8px var(--lime)}
+    .uplink.ok{color:var(--lime)} .uplink.stale{color:var(--amber);background:#281c09;animation:blink .9s infinite} .uplink.stale .dot{background:var(--amber);box-shadow:0 0 8px var(--amber)} .uplink.dead{color:var(--red);background:#2b0913;animation:blink .55s infinite} .uplink.dead .dot{background:var(--red);box-shadow:0 0 10px var(--red)}
+    .summary{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:8px;margin-top:12px}
+    .pill{padding:6px 8px;border-radius:5px;min-width:0}.pill .lbl{display:block;color:#d7e7ff;font:10px "Press Start 2P","VT323",monospace;letter-spacing:1px;margin-bottom:4px}.pill .val{display:block;font-size:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pill .sub{display:block;margin-top:3px;color:var(--dim);font-size:14px}
+    .good{color:var(--lime)!important;text-shadow:0 0 5px rgba(77,255,116,.35)} .bad{color:#ff9898!important;text-shadow:0 0 5px rgba(255,92,108,.28)} .warn{color:#ffd37a!important;text-shadow:0 0 5px rgba(255,187,57,.28)}
+    .shell,.panel{background:linear-gradient(180deg,#0f1737,#070d20);border:2px solid var(--chrome);border-radius:8px;box-shadow:inset 0 1px 0 #2c3865,inset 0 -2px 0 #000,0 0 18px rgba(0,240,255,.10),0 4px 0 #000}
+    .deck{margin-top:12px}.shell,.panel{padding:12px}
+    .head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}
+    .kicker{display:block;color:var(--cyan);font:9px "Press Start 2P","VT323",monospace;letter-spacing:1px;text-transform:uppercase;margin-bottom:5px}
+    h2{margin:0;color:#ffe3a6;font:11px "Press Start 2P","VT323",monospace;letter-spacing:1.3px;text-shadow:0 0 4px rgba(255,187,57,.45)}
+    .subtxt,.meta-note,.foot{color:var(--dim)} .meta-note{font-size:15px}
+    .controls{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}.block{padding:9px 10px;border-radius:5px;background:rgba(8,13,31,.72)} .block .title{display:block;margin-bottom:8px;color:#d7e7ff;font:9px "Press Start 2P","VT323",monospace;letter-spacing:1px}
+    .reads,.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:8px}.read,.stat{padding:5px 6px;border:1px solid #314580;border-radius:4px;background:rgba(8,13,31,.72)} .read .val,.stat .val{display:block;font-size:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.ctl{appearance:none;border:1px solid var(--chrome);border-radius:4px;padding:6px 8px;background:linear-gradient(180deg,#1b244a,#0d1530);color:var(--text);font:9px "Press Start 2P","VT323",monospace;letter-spacing:1px;cursor:pointer;box-shadow:inset 0 1px 0 #2c3865,0 2px 0 #000,0 0 8px rgba(0,240,255,.14)}
+    .ctl:hover:not(:disabled){transform:translateY(-1px);box-shadow:inset 0 1px 0 #2c3865,0 3px 0 #000,0 0 11px rgba(0,240,255,.28)} .ctl:disabled{opacity:.4;cursor:not-allowed} .ctl.active{color:var(--cyan);border-color:rgba(0,240,255,.72);box-shadow:inset 0 1px 0 #2c3865,0 2px 0 #000,0 0 13px rgba(0,240,255,.42)} .ctl.warn.active,.ctl.warn:hover:not(:disabled){color:var(--red);border-color:rgba(255,92,108,.78);box-shadow:inset 0 1px 0 #5b2430,0 2px 0 #000,0 0 13px rgba(255,92,108,.38)}
+    input[type=number]{width:120px;padding:6px 8px;border-radius:4px;border:1px solid #314580;background:rgba(8,13,31,.72);color:var(--text);font:18px "VT323","Courier New",monospace}
+    .note{margin-top:8px;padding:6px 7px;border:1px solid #314580;border-radius:4px;background:rgba(8,13,31,.74);color:var(--dim);min-height:34px}
+    .status{margin-top:12px;padding:7px 9px;border:1px dashed #2b3b78;border-radius:4px;background:rgba(8,13,31,.75);color:var(--dim);min-height:22px}
+    main{display:flex;flex-direction:column;gap:12px;margin-top:12px;padding-bottom:18px}.two,.three,.cards,.signals{display:grid;gap:10px}.cards{grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}.signals{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}.two{grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr)}.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .card,.item{position:relative;border-color:var(--line);border-radius:6px;background:linear-gradient(180deg,rgba(17,25,57,.96),rgba(8,13,31,.95));overflow:hidden}.card:before,.item:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(0,240,255,.05),transparent 48%)} .card.pos:before{background:linear-gradient(180deg,rgba(77,255,116,.08),transparent 46%)} .card.neg:before{background:linear-gradient(180deg,rgba(255,92,108,.08),transparent 46%)}
+    .cardhead,.itemhead{display:flex;justify-content:space-between;gap:8px;align-items:flex-start;padding:9px 10px 7px;border-bottom:1px solid rgba(39,56,109,.72)} .title{margin:0;color:var(--text);font-size:22px;line-height:1.02}.tiny{margin-top:4px;color:var(--dim);font-size:15px}.badges{display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-end}
+    .badge{display:inline-flex;align-items:center;padding:3px 6px;border:1px solid #314580;border-radius:999px;background:rgba(8,13,31,.8);font-size:14px;white-space:nowrap}
+    .body{padding:9px 10px 10px}.footline{margin-top:8px;color:var(--dim);font-size:14px;word-break:break-word}.placeholder{display:grid;place-items:center;min-height:120px;padding:18px;color:var(--dim);text-align:center;font-size:20px}
+    .bars{display:grid;grid-template-columns:repeat(auto-fit,minmax(18px,1fr));gap:6px;align-items:end;min-height:170px;padding-top:6px}.bar{position:relative;min-height:10px;border:1px solid rgba(49,69,128,.62);border-radius:4px 4px 2px 2px;background:linear-gradient(180deg,rgba(0,240,255,.95),rgba(0,240,255,.20));box-shadow:0 0 8px rgba(0,240,255,.18)} .bar.neg{background:linear-gradient(180deg,rgba(255,92,108,.95),rgba(255,92,108,.20));box-shadow:0 0 8px rgba(255,92,108,.18)} .bar span{position:absolute;left:50%;bottom:-20px;transform:translateX(-50%);color:var(--dim);font-size:11px;white-space:nowrap}
+    .footer{margin-top:8px;padding:6px 12px 16px;color:var(--dim);font-size:15px;text-align:right}
+    @keyframes blink{0%,60%{opacity:1}70%,100%{opacity:.28}}
+    @media (max-width:1240px){.summary{grid-template-columns:repeat(4,minmax(0,1fr))}.controls{grid-template-columns:repeat(3,minmax(0,1fr))}.three{grid-template-columns:1fr}}
+    @media (max-width:900px){.two{grid-template-columns:1fr}.controls{grid-template-columns:1fr 1fr}.topbar{flex-direction:column;align-items:flex-start}.meta{justify-content:flex-start}}
+    @media (max-width:640px){.wrap,.summary,.deck,main,.footer{padding-left:8px;padding-right:8px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.controls,.cards,.signals,.three{grid-template-columns:1fr}.brand{font-size:11px}}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="pulse"></span>WEATHER OPS TERMINAL</div>
+    <div class="meta">
+      <div class="chip"><span class="lbl">STATE</span><span id="chip-state">BOOT</span></div>
+      <div class="chip"><span class="lbl">UTC</span><span id="chip-time">--</span></div>
+      <div id="uplink" class="uplink dead"><span class="dot"></span><span id="uplabel">OFFLINE</span><span class="age" id="upage">--</span></div>
+    </div>
+  </header>
+  <section class="summary" id="summary"></section>
+  <section class="deck">
+    <div class="shell">
+      <div class="head"><div><span class="kicker">Home Assistant Primary Deck</span><h2>CONTROL DECK</h2></div><div class="meta-note" id="deck-meta">Weather runtime controls and paper-learning switches.</div></div>
+      <div class="controls" id="controls"></div>
+      <div class="status" id="status">CONTROL LINK STANDBY</div>
+    </div>
+  </section>
+  <main>
+    <section class="panel">
+      <div class="head"><div><span class="kicker">Paper Desk</span><h2>OPEN TRADES</h2><div class="subtxt">Compact cards for every live paper position.</div></div><div class="meta-note" id="trades-meta">Awaiting positions.</div></div>
+      <div class="cards" id="open-trades"></div>
+    </section>
+    <div class="two">
+      <section class="panel">
+        <div class="head"><div><span class="kicker">Signal Radar</span><h2>RECENT SIGNALS</h2></div><div class="meta-note" id="signals-meta">Latest adapter output.</div></div>
+        <div class="signals" id="signals"></div>
+      </section>
+      <section class="panel">
+        <div class="head"><div><span class="kicker">Resolution Tape</span><h2>RECENT SETTLEMENTS</h2></div><div class="meta-note" id="res-meta">Resolved market tape.</div></div>
+        <div class="signals" id="resolutions"></div>
+      </section>
+    </div>
+    <div class="three">
+      <section class="panel">
+        <div class="head"><div><span class="kicker">Paper Pulse</span><h2>PNL BAROMETER</h2></div><div class="meta-note">Recent dashboard samples.</div></div>
+        <div class="bars" id="bars"></div>
+      </section>
+      <section class="panel">
+        <div class="head"><div><span class="kicker">Codex + System</span><h2>RESEARCH BUS</h2></div><div class="meta-note" id="sys-meta">Automation and export mirrors.</div></div>
+        <div class="signals" id="system"></div>
+      </section>
+      <section class="panel">
+        <div class="head"><div><span class="kicker">Ops Log</span><h2>OPERATOR ACTIONS</h2></div><div class="meta-note">Control plane history.</div></div>
+        <div class="signals" id="ops"></div>
+      </section>
+    </div>
+  </main>
+  <div class="footer" id="footer">INITIALIZING WEATHER OPS TERMINAL</div>
+  <script>
+    const POLL_MS=5000,STALE_AFTER=9000,DEAD_AFTER=18000; let state=null,history=[],lastFrame=0,busy=false,statusMsg={text:"CONTROL LINK STANDBY",tone:""};
+    const $=id=>document.getElementById(id), api=p=>new URL(p,window.location.href).toString(), esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
+    const usd=v=>"$"+Number(v||0).toFixed(2), sUsd=v=>`${Number(v||0)>0?"+":""}$${Number(v||0).toFixed(2)}`, pct=(v,d=1)=>v==null?"--":(Number(v)*100).toFixed(d)+"%", compact=v=>Math.abs(Number(v||0))>=1000?(Number(v||0)/1000).toFixed(1)+"K":Number(v||0).toFixed(0);
+    const dt=v=>{if(!v)return"never";const x=new Date(v);return Number.isNaN(x.getTime())?String(v):x.toLocaleString()}, short=v=>{if(!v)return"--";const x=new Date(v);return Number.isNaN(x.getTime())?String(v):x.toISOString().slice(11,19)};
+    const dur=s=>{if(s==null||s==="")return"--";const t=Math.max(0,Math.round(Number(s))),d=Math.floor(t/86400),h=Math.floor((t%86400)/3600),m=Math.floor((t%3600)/60); if(d>0)return`${d}d ${h}h`; if(h>0)return`${h}h ${m}m`; if(m>0)return`${m}m`; return`${t}s`};
+    const tone=v=>Number(v||0)>0?"good":Number(v||0)<0?"bad":"", yesno=v=>v?"ON":"OFF", badge=(txt,cls="")=>`<span class="badge ${cls}">${esc(txt)}</span>`;
+    const read=(l,v,c="")=>`<div class="read"><span class="lbl">${esc(l)}</span><span class="val ${c}">${esc(v)}</span></div>`;
+    const stat=(l,v,s,c="")=>`<div class="stat"><span class="lbl">${esc(l)}</span><span class="val ${c}">${esc(v)}</span><span class="lbl">${esc(s)}</span></div>`;
+    function btn(label,action,value,opt={}){const dis=opt.dis?" disabled":"", act=opt.act?" active":"", warn=opt.warn?" warn":"", args=value===undefined?"":`, ${JSON.stringify(value)}`; return `<button class="ctl${act}${warn}"${dis} onclick="act('${esc(action)}'${args})">${esc(label)}</button>`}
+    function block(title,reads,buttons,note){return `<div class="block"><span class="title">${esc(title)}</span><div class="reads">${reads}</div><div class="row">${buttons}</div><div class="note">${esc(note)}</div></div>`}
+    function empty(text){return `<div class="placeholder">${esc(text)}</div>`}
+    function pill(label,val,sub,cls=""){return `<div class="pill ${cls}"><span class="lbl">${esc(label)}</span><span class="val">${esc(val)}</span><span class="sub">${esc(sub)}</span></div>`}
+    function scanTone(status,errs){status=String(status||"").toLowerCase(); if(status==="failed")return"bad"; if(Number(errs||0)>0||status==="running")return"warn"; if(status==="completed")return"good"; return""}
+    function qDetail(c){if((c.pending_scan_types||[]).length)return c.pending_scan_types.join(" / ").toUpperCase(); if(c.active_scan_type)return String(c.active_scan_type).toUpperCase()+" RUNNING"; return c.scan_worker_healthy?"worker healthy":"worker attention"}
+    function sSub(r,p){const b=p==="temperature"?"last_temperature":"last_precipitation", fr=[`${Number(r[b+"_signal_count"]||0)} sig`]; if(r[b+"_scan_duration_ms"]!=null)fr.push(`${r[b+"_scan_duration_ms"]}ms`); if(Number(r[b+"_error_count"]||0)>0)fr.push(`${r[b+"_error_count"]} err`); return fr.join(" | ")}
+    function renderSummary(){const c=state.controls||{},r=state.runtime||{},p=(state.summary||{}).paper||{},sig=Object.values(state.signal_summary_24h||{}).reduce((a,v)=>a+Number(v||0),0); $("summary").innerHTML=[
+      pill("Runtime",c.state||"unknown",c.last_message||"Operator link ready.", String(c.state||"").toLowerCase()==="running"?"good":"warn"),
+      pill("Balance",usd(p.balance),`Equity ${usd(p.equity)}`),
+      pill("PnL",sUsd(p.pnl),`Wins ${p.wins||0} / Losses ${p.losses||0}`,tone(p.pnl)),
+      pill("Open",String(p.open_positions||0),`Auto trade ${yesno(c.paper_auto_trade)}`),
+      pill("Queue",String(c.scan_queue_depth||0),qDetail(c), Number(c.scan_queue_depth||0)>0?"warn":(c.scan_worker_healthy?"good":"bad")),
+      pill("Temp Scan",r.last_temperature_scan_status||"idle",sSub(r,"temperature"),scanTone(r.last_temperature_scan_status,r.last_temperature_error_count)),
+      pill("Precip Scan",r.last_precipitation_scan_status||"idle",sSub(r,"precipitation"),scanTone(r.last_precipitation_scan_status,r.last_precipitation_error_count)),
+      pill("Signals / 24h",String(sig),`Research ${(state.codex||{}).healthy?"online":"waiting"}`,(state.codex||{}).healthy?"good":"warn")
+    ].join(""); $("chip-state").textContent=String(c.state||"unknown").toUpperCase(); $("chip-time").textContent=short(state.timestamp_utc)}
+    function renderControls(){const c=state.controls||{},r=state.runtime||{},cx=state.codex||{},t=state.tuner||{},rr=state.research_runtime||{},ex=state.exports||{}, acts=c.available_actions||{};
+      $("deck-meta").textContent=`Queue ${c.scan_queue_depth||0} | Worker ${c.scan_worker_healthy?"healthy":"attention"} | Last action ${c.last_action||"none"}`;
+      $("controls").innerHTML=[
+        block("RUNTIME",read("State",String(c.state||"unknown").toUpperCase())+read("Queue",String(c.scan_queue_depth||0))+read("Active",c.active_scan_type?String(c.active_scan_type).toUpperCase():"IDLE")+read("Worker",c.scan_worker_healthy?"READY":"ALERT"),btn("RESUME","start",null,{act:c.state==="running",dis:busy})+btn("PAUSE","stop",null,{act:c.state==="paused",warn:true,dis:busy}),c.last_scan_worker_error||"Shared runtime and HA control plane are linked."),
+        block("SCANNERS",read("Temp",String(r.last_temperature_scan_status||"idle").toUpperCase(),scanTone(r.last_temperature_scan_status,r.last_temperature_error_count))+read("Precip",String(r.last_precipitation_scan_status||"idle").toUpperCase(),scanTone(r.last_precipitation_scan_status,r.last_precipitation_error_count))+read("Temp Sig",String(r.last_temperature_signal_count||0))+read("Rain Sig",String(r.last_precipitation_signal_count||0)),btn("TEMP SWEEP","scan_temperature",null,{dis:busy})+btn("RAIN SWEEP","scan_precipitation",null,{dis:busy}),(c.pending_scan_types||[]).length?`Pending queue: ${c.pending_scan_types.join(", ")}`:(r.last_temperature_scan_error||r.last_precipitation_scan_error||"Manual sweeps run through the shared queue so the panel stays responsive.")),
+        block("STRATEGIES",read("Temp Auto",yesno(c.temperature_enabled))+read("Rain Auto",yesno(c.precipitation_enabled))+read("Paper Auto",yesno(c.paper_auto_trade))+read("Open",String(c.paper_open_positions||0)),btn(c.temperature_enabled?"TEMP OFF":"TEMP ON","toggle_temperature",!c.temperature_enabled,{act:c.temperature_enabled,warn:c.temperature_enabled,dis:busy})+btn(c.precipitation_enabled?"RAIN OFF":"RAIN ON","toggle_precipitation",!c.precipitation_enabled,{act:c.precipitation_enabled,warn:c.precipitation_enabled,dis:busy})+btn(c.paper_auto_trade?"PAPER OFF":"PAPER ON","toggle_paper_auto_trade",!c.paper_auto_trade,{act:c.paper_auto_trade,warn:c.paper_auto_trade,dis:busy}),[!c.temperature_enabled?"Temp off":"",!c.precipitation_enabled?"Rain off":"",!c.paper_auto_trade?"Paper entries paused":""].filter(Boolean).join(" | ")||"All weather strategies are armed for paper learning."),
+        `<div class="block"><span class="title">CAPITAL</span><div class="reads">${read("Balance",usd(c.paper_balance))+read("Equity",usd(c.paper_equity))+read("Initial",usd(c.paper_initial_capital))+read("PnL",sUsd((state.summary||{}).paper?.pnl||0),tone((state.summary||{}).paper?.pnl||0))}</div><div class="row"><input id="cap-input" type="number" min="1" step="1" placeholder="${esc(String(c.paper_initial_capital||5000))}" />${btn("APPLY","set_paper_capital","__from_input__",{dis:busy})}</div><div class="row" style="margin-top:6px">${[1000,2500,5000,10000].map(v=>`<button class="ctl"${busy?" disabled":""} onclick="preset(${v})">${v}</button>`).join("")}</div><div class="note">Reset the paper bankroll to tune how aggressive the learning loop feels in HA.</div></div>`,
+        block("CODEX + BUS",read("Runner",cx.healthy?"ONLINE":"WAIT")+read("Queue",String(cx.queue_depth||0))+read("Policy",rr.artifact_exists?"LOADED":"MISS")+read("Candidate",String(t.candidate_status||"none").toUpperCase()),btn("RESEARCH","research_run_now",null,{dis:busy||!acts.research_run_now})+btn("CANDIDATE","tuner_run_now",null,{dis:busy||!acts.tuner_run_now})+btn("PROMOTE","tuner_promote_latest",null,{dis:busy||!acts.tuner_promote_latest})+btn("REJECT","tuner_reject_latest",null,{dis:busy||!acts.tuner_reject_latest,warn:true}),ex.dashboard_state_error||ex.scan_export_error||`${t.latest_candidate&&t.latest_candidate.candidate_id?t.latest_candidate.candidate_id:"No candidate yet"} | exports mirrored`)
+      ].join("");
+      $("status").className=`status ${statusMsg.tone||""}`; $("status").textContent=statusMsg.text||c.last_message||"CONTROL LINK STANDBY";
+    }
+    function tradeCard(x){const pnl=x.status==="resolved"?Number(x.realized_pnl||0):Number(x.expected_value_pnl||0), mode=x.status==="resolved"?"Realized P/L":"Model P/L", cls=pnl>0?"pos":pnl<0?"neg":""; return `<article class="card ${cls}"><div class="cardhead"><div><div class="title">${esc(x.event_title||x.market_slug)}</div><div class="tiny">${esc(String(x.city_slug||"").toUpperCase())} | ${esc(String(x.market_type||"").toUpperCase())} | ${esc(x.event_date||"--")}</div></div><div class="badges">${badge(String(x.direction||"--"),String(x.direction||"").toUpperCase()==="YES"?"good":"bad")}${badge(x.target_label||"TARGET","")}${badge(String(x.confidence||"signal").toUpperCase(),x.confidence==="confirmed"?"good":"warn")}</div></div><div class="body"><div class="stats">${stat("Size",usd(x.cost),`${Number(x.shares||0).toFixed(2)} sh @ ${pct(x.entry_price,1)}`)}${stat(mode,sUsd(pnl),x.status==="resolved"?"settled":"edge-aware EV",tone(pnl))}${stat("Held",dur(x.holding_seconds),x.created_at?`since ${dt(x.created_at)}`:"--")}${stat("Model Odds",pct(x.outcome_probability,1),`entry ${pct(x.entry_price,1)}`)}${stat("Final Score",x.decision_final_score==null?"--":Number(x.decision_final_score).toFixed(2),`adapter ${x.adapter_score==null?"--":Number(x.adapter_score).toFixed(2)}`)}${stat("Edge",pct(x.edge_abs,1),`${x.source_count||0} src | liq ${compact(x.liquidity||0)}`)}${stat("Target",x.target_label||"--","bucket / contract")}${stat("To Resolution",dur(x.remaining_to_resolution_s),x.remaining_to_resolution_s==null?"date-based market":"remaining window")}</div><div class="footline">${esc(x.market_slug||"")} | ${esc(x.decision_reason||"Paper trade candidate")}</div></div></article>`}
+    function signalCard(x){return `<article class="item"><div class="itemhead"><div><div class="title">${esc(x.event_title||x.market_slug)}</div><div class="tiny">${esc(String(x.city_slug||"").toUpperCase())} | ${esc(x.event_date||"--")}</div></div><div class="badges">${badge(String(x.market_type||"signal").toUpperCase(),String(x.market_type||"").toLowerCase()==="temperature"?"":"warn")}${badge(String(x.direction||"--"),String(x.direction||"").toUpperCase()==="YES"?"good":"bad")}</div></div><div class="body"><div class="stats">${stat("Score",Number(x.score||0).toFixed(2),String(x.confidence||"unknown").toUpperCase())}${stat("Edge",pct(Math.abs(Number(x.edge||0)),1),`market ${pct(x.market_prob,1)}`,tone(x.edge))}${stat("Forecast",pct(x.forecast_prob,1),x.label||"--")}${stat("Sources",String(x.source_count||0),`liq ${compact(x.liquidity||0)}`)}</div><div class="footline">${esc(x.market_slug||"")}</div></div></article>`}
+    function simpleCard(title,sub,b1,b2){return `<article class="item"><div class="itemhead"><div><div class="title">${esc(title)}</div><div class="tiny">${esc(sub)}</div></div><div class="badges">${b1||""}${b2||""}</div></div></article>`}
+    function renderTrades(){const xs=state.open_positions||[], exp=xs.reduce((a,x)=>a+Number(x.cost||0),0), ev=xs.reduce((a,x)=>a+Number(x.expected_value_pnl||0),0); $("trades-meta").textContent=xs.length?`${xs.length} live cards | ${usd(exp)} staked | model ${sUsd(ev)}`:"No paper positions are open right now."; $("open-trades").innerHTML=xs.length?xs.map(tradeCard).join(""):empty("NO LIVE PAPER TRADES YET")}
+    function renderSignals(){const xs=state.recent_signals||[], total=Object.values(state.signal_summary_24h||{}).reduce((a,v)=>a+Number(v||0),0); $("signals-meta").textContent=xs.length?`${xs.length} recent signals | ${total} in the last 24h`:"Waiting for scans to write fresh signal cards."; $("signals").innerHTML=xs.length?xs.map(signalCard).join(""):empty("SIGNAL RADAR IS QUIET")}
+    function renderRes(){const xs=state.recent_resolutions||[]; $("res-meta").textContent=xs.length?`${xs.length} recent settlements`:"No settlements recorded yet."; $("resolutions").innerHTML=xs.length?xs.map(x=>simpleCard(x.market_slug||"market",`${String(x.resolution||"--").toUpperCase()} | ${dt(x.resolved_at)}`,badge(`${x.resolved_positions||0} pos`),badge(sUsd(x.total_realized_pnl||0),tone(x.total_realized_pnl)))).join(""):empty("NO RESOLUTIONS ON TAPE")}
+    function renderBars(){const xs=(history||[]).slice(-18); if(!xs.length){$("bars").innerHTML=empty("BAROMETER WILL FILL AFTER A FEW REFRESH CYCLES"); return} const max=Math.max(1,...xs.map(x=>Math.abs(Number(x.paper_pnl||0)))); $("bars").innerHTML=xs.map((x,i)=>`<div class="bar ${Number(x.paper_pnl||0)<0?"neg":""}" style="height:${Math.max(10,Math.round(Math.abs(Number(x.paper_pnl||0))/max*126))}px;opacity:${(0.44+i/Math.max(xs.length,1)*0.5).toFixed(2)}"><span>${Number(x.paper_pnl||0).toFixed(0)}</span></div>`).join("")}
+    function renderSystem(){const cx=state.codex||{},t=state.tuner||{},rr=state.research_runtime||{},ex=state.exports||{}; $("sys-meta").textContent=`${cx.healthy?"runner online":"runner waiting"} | queue ${cx.queue_depth||0}`; $("system").innerHTML=[
+      simpleCard("Codex Runner",cx.last_heartbeat_at?`Heartbeat ${dt(cx.last_heartbeat_at)}`:"No heartbeat yet",badge(cx.healthy?"HEALTHY":"WAIT",cx.healthy?"good":"warn")),
+      simpleCard("Latest Candidate",t.latest_candidate&&t.latest_candidate.candidate_id?t.latest_candidate.candidate_id:"No candidate proposal yet",badge(String(t.candidate_status||"none").toUpperCase(),t.candidate_status==="approved"?"good":"")),
+      simpleCard("Runtime Policy",rr.artifact_path||"No policy artifact path",badge(rr.artifact_exists?"LOADED":"MISSING",rr.artifact_exists?"good":"warn")),
+      simpleCard("Export Mirrors",ex.dashboard_state_error||ex.scan_export_error||ex.dashboard_state_path||ex.scan_export_root||"Shared storage ready",badge(ex.dashboard_state_error||ex.scan_export_error?"ATTN":"MIRRORED",ex.dashboard_state_error||ex.scan_export_error?"bad":"good"))
+    ].join("")}
+    function renderOps(){const xs=state.recent_operator_actions||[]; $("ops").innerHTML=xs.length?xs.map(x=>simpleCard(String(x.action||"").toUpperCase(),`${dt(x.created_at)} | ${((x.payload||{}).message)||"Operator event recorded."}`,badge((x.payload||{}).ok===false?"ERR":"OK",(x.payload||{}).ok===false?"bad":"good"))).join(""):empty("NO OPERATOR ACTIONS RECORDED")}
+    function render(){if(!state)return; renderSummary(); renderControls(); renderTrades(); renderSignals(); renderRes(); renderBars(); renderSystem(); renderOps(); $("footer").textContent=`Updated ${dt(state.timestamp_utc)} | Resolution check ${dt((state.runtime||{}).last_resolution_check_at)} | Export mirror ${state.exports&&!state.exports.dashboard_state_error?"ready":"attention"} | HA ingress weather deck online`}
+    async function load(){try{const [s,h]=await Promise.all([fetch(api("./api/state"),{cache:"no-store"}),fetch(api("./api/history"),{cache:"no-store"})]); if(!s.ok||!h.ok)throw new Error("dashboard endpoints returned an error"); state=await s.json(); history=await h.json(); lastFrame=performance.now(); if(!busy){const c=state.controls||{}; statusMsg={text:c.last_message||"CONTROL LINK STANDBY",tone:c.last_ok==null?"":(c.last_ok?"good":"bad")}} render()}catch(e){statusMsg={text:`LINK ERROR: ${e.message||e}`,tone:"bad"}; if(state)render()}}
+    async function act(action,value=null){if(value==="__from_input__"){const input=$("cap-input"), parsed=Number(input&&input.value?input.value:0); if(!parsed){if(input)input.focus(); return} value=parsed} busy=true; statusMsg={text:`SENDING ${String(action||"").toUpperCase()}...`,tone:"warn"}; if(state)render(); try{const r=await fetch(api("./api/control"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,value})}); const payload=await r.json(); if(payload.state)state=payload.state; const h=await fetch(api("./api/history"),{cache:"no-store"}); if(h.ok)history=await h.json(); statusMsg={text:payload.message||"Control applied.",tone:payload.ok?"good":"bad"}; if(payload.state)lastFrame=performance.now(); if(state)render()}catch(e){statusMsg={text:`CONTROL ERROR: ${e.message||e}`,tone:"bad"}; if(state)render()}finally{busy=false; if(state)render()}}
+    function preset(v){const i=$("cap-input"); if(i)i.value=String(v)}
+    function uplink(){const dtm=lastFrame?(performance.now()-lastFrame):Infinity, el=$("uplink"); let cls="uplink dead", label="OFFLINE"; if(dtm<STALE_AFTER){cls="uplink ok"; label="LINK"} else if(dtm<DEAD_AFTER){cls="uplink stale"; label="STALE"} el.className=cls; $("uplabel").textContent=label; $("upage").textContent=Number.isFinite(dtm)?Math.round(dtm)+"ms":"--"}
+    load(); setInterval(load,POLL_MS); setInterval(uplink,200);
+  </script>
+</body>
+</html>

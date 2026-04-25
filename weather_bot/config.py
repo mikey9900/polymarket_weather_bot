@@ -20,6 +20,8 @@ class AppSettings:
     auto_temperature_scan_minutes: int
     auto_precipitation_scan_minutes: int
     resolution_check_minutes: int
+    auto_temperature_scan_seconds: int = 0
+    auto_precipitation_scan_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -146,8 +148,12 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("app", {})["timezone"] = payload["timezone"]
     if "temperature_scan_minutes" in payload:
         mapped.setdefault("app", {})["auto_temperature_scan_minutes"] = int(payload["temperature_scan_minutes"])
+    if "temperature_scan_seconds" in payload:
+        mapped.setdefault("app", {})["auto_temperature_scan_seconds"] = int(payload["temperature_scan_seconds"])
     if "precipitation_scan_minutes" in payload:
         mapped.setdefault("app", {})["auto_precipitation_scan_minutes"] = int(payload["precipitation_scan_minutes"])
+    if "precipitation_scan_seconds" in payload:
+        mapped.setdefault("app", {})["auto_precipitation_scan_seconds"] = int(payload["precipitation_scan_seconds"])
     if "resolution_check_minutes" in payload:
         mapped.setdefault("app", {})["resolution_check_minutes"] = int(payload["resolution_check_minutes"])
     if "paper_stake_usd" in payload:
@@ -165,8 +171,12 @@ def _load_env_overrides() -> dict[str, Any]:
         payload.setdefault("app", {})["log_level"] = os.getenv("WEATHER_LOG_LEVEL")
     if os.getenv("WEATHER_TEMPERATURE_SCAN_MINUTES"):
         payload.setdefault("app", {})["auto_temperature_scan_minutes"] = int(os.getenv("WEATHER_TEMPERATURE_SCAN_MINUTES", "120"))
+    if os.getenv("WEATHER_TEMPERATURE_SCAN_SECONDS"):
+        payload.setdefault("app", {})["auto_temperature_scan_seconds"] = int(os.getenv("WEATHER_TEMPERATURE_SCAN_SECONDS", "0"))
     if os.getenv("WEATHER_PRECIP_SCAN_MINUTES"):
         payload.setdefault("app", {})["auto_precipitation_scan_minutes"] = int(os.getenv("WEATHER_PRECIP_SCAN_MINUTES", "360"))
+    if os.getenv("WEATHER_PRECIP_SCAN_SECONDS"):
+        payload.setdefault("app", {})["auto_precipitation_scan_seconds"] = int(os.getenv("WEATHER_PRECIP_SCAN_SECONDS", "0"))
     if os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES"):
         payload.setdefault("app", {})["resolution_check_minutes"] = int(os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES", "15"))
     return payload

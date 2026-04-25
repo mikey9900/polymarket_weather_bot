@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -368,6 +369,44 @@ class WeatherTracker:
         rows = self.conn.execute("SELECT * FROM paper_positions ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
         return [dict(row) for row in rows]
 
+    def get_dashboard_paper_positions(self, limit: int = 20, *, status: str | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if status:
+            where = "WHERE p.status = ?"
+            params.append(str(status))
+        params.append(int(limit))
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                p.*,
+                s.event_title AS signal_event_title,
+                s.market_prob AS signal_market_prob,
+                s.forecast_prob AS signal_forecast_prob,
+                s.edge AS signal_edge,
+                s.edge_abs AS signal_edge_abs,
+                s.edge_size AS signal_edge_size,
+                s.confidence AS signal_confidence,
+                s.source_count AS signal_source_count,
+                s.liquidity AS signal_liquidity,
+                s.time_to_resolution_s AS signal_time_to_resolution_s,
+                s.source_dispersion_pct AS signal_source_dispersion_pct,
+                s.score AS signal_adapter_score,
+                d.final_score AS decision_final_score,
+                d.reason AS decision_reason,
+                d.policy_action AS decision_policy_action,
+                d.metadata_json AS decision_metadata_json
+            FROM paper_positions p
+            LEFT JOIN signals s ON s.id = p.signal_id
+            LEFT JOIN decisions d ON d.id = p.decision_id
+            {where}
+            ORDER BY COALESCE(p.resolved_at, p.created_at) DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_serialize_dashboard_position(row) for row in rows]
+
     def get_recent_resolutions(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT * FROM resolution_events ORDER BY resolved_at DESC LIMIT ?",
@@ -594,3 +633,111 @@ class WeatherTracker:
         )
         self.conn.commit()
         return 1
+
+
+def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    created_at = _parse_iso_datetime(payload.get("created_at"))
+    resolved_at = _parse_iso_datetime(payload.get("resolved_at"))
+    now = datetime.now(timezone.utc)
+    anchor = resolved_at or now
+    holding_seconds = None
+    if created_at is not None:
+        holding_seconds = max(0.0, (anchor - created_at).total_seconds())
+
+    time_to_resolution_s = payload.get("signal_time_to_resolution_s")
+    remaining_to_resolution_s = None
+    if time_to_resolution_s is not None:
+        try:
+            total_window = float(time_to_resolution_s)
+        except (TypeError, ValueError):
+            total_window = None
+        if total_window is not None:
+            if holding_seconds is None:
+                remaining_to_resolution_s = max(0.0, total_window)
+            else:
+                remaining_to_resolution_s = max(0.0, total_window - holding_seconds)
+
+    outcome_probability = _as_float(payload.get("signal_forecast_prob"))
+    entry_price = _as_float(payload.get("entry_price")) or 0.0
+    shares = _as_float(payload.get("shares")) or 0.0
+    cost = _as_float(payload.get("cost")) or 0.0
+    if outcome_probability is not None:
+        expected_payout = round(shares * outcome_probability, 6)
+        expected_value_pnl = round(expected_payout - cost, 6)
+    else:
+        expected_payout = None
+        expected_value_pnl = None
+
+    decision_metadata = {}
+    try:
+        if payload.get("decision_metadata_json"):
+            decision_metadata = json.loads(str(payload["decision_metadata_json"]))
+    except json.JSONDecodeError:
+        decision_metadata = {}
+
+    return {
+        "id": int(payload["id"]),
+        "signal_key": str(payload.get("signal_key") or ""),
+        "market_type": str(payload.get("market_type") or ""),
+        "market_slug": str(payload.get("market_slug") or ""),
+        "event_slug": str(payload.get("event_slug") or ""),
+        "city_slug": str(payload.get("city_slug") or ""),
+        "event_date": str(payload.get("event_date") or ""),
+        "event_title": str(payload.get("signal_event_title") or payload.get("market_slug") or "Unknown market"),
+        "target_label": str(payload.get("label") or ""),
+        "direction": str(payload.get("direction") or ""),
+        "status": str(payload.get("status") or ""),
+        "notes": str(payload.get("notes") or ""),
+        "score": _as_float(payload.get("score")),
+        "adapter_score": _as_float(payload.get("signal_adapter_score")),
+        "decision_final_score": _as_float(payload.get("decision_final_score")),
+        "decision_reason": str(payload.get("decision_reason") or ""),
+        "decision_policy_action": str(payload.get("decision_policy_action") or ""),
+        "decision_metadata": decision_metadata,
+        "entry_price": entry_price,
+        "market_probability": _as_float(payload.get("signal_market_prob")),
+        "outcome_probability": outcome_probability,
+        "shares": shares,
+        "cost": cost,
+        "realized_pnl": _as_float(payload.get("realized_pnl")),
+        "expected_payout": expected_payout,
+        "expected_value_pnl": expected_value_pnl,
+        "edge": _as_float(payload.get("signal_edge")),
+        "edge_abs": _as_float(payload.get("signal_edge_abs")),
+        "edge_size": str(payload.get("signal_edge_size") or ""),
+        "confidence": str(payload.get("signal_confidence") or ""),
+        "source_count": int(payload.get("signal_source_count") or 0),
+        "liquidity": _as_float(payload.get("signal_liquidity")),
+        "source_dispersion_pct": _as_float(payload.get("signal_source_dispersion_pct")),
+        "time_to_resolution_s": _as_float(payload.get("signal_time_to_resolution_s")),
+        "remaining_to_resolution_s": remaining_to_resolution_s,
+        "holding_seconds": holding_seconds,
+        "created_at": str(payload.get("created_at") or ""),
+        "resolved_at": str(payload.get("resolved_at") or ""),
+        "resolution": str(payload.get("resolution") or ""),
+    }
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

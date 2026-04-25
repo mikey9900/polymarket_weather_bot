@@ -376,20 +376,32 @@ class WeatherRuntime:
 
     def _temperature_loop(self) -> None:
         self._loop_runner(
-            interval_minutes=int(self.config.app.auto_temperature_scan_minutes),
+            interval_seconds=_scheduled_interval_seconds(
+                self.config.app.auto_temperature_scan_seconds,
+                self.config.app.auto_temperature_scan_minutes,
+                minimum_seconds=5,
+            ),
             enabled_key="temperature_enabled",
             runner=lambda: self.request_scan("temperature", send_alerts=True, reason="scheduled"),
         )
 
     def _precipitation_loop(self) -> None:
         self._loop_runner(
-            interval_minutes=int(self.config.app.auto_precipitation_scan_minutes),
+            interval_seconds=_scheduled_interval_seconds(
+                self.config.app.auto_precipitation_scan_seconds,
+                self.config.app.auto_precipitation_scan_minutes,
+                minimum_seconds=5,
+            ),
             enabled_key="precipitation_enabled",
             runner=lambda: self.request_scan("precipitation", send_alerts=True, reason="scheduled"),
         )
 
     def _resolution_loop(self) -> None:
-        interval_s = max(60, int(self.config.app.resolution_check_minutes) * 60)
+        interval_s = _scheduled_interval_seconds(
+            0,
+            self.config.app.resolution_check_minutes,
+            minimum_seconds=60,
+        )
         while not self._stop_event.wait(interval_s):
             try:
                 self.settle_due_positions(send_alerts=True)
@@ -401,8 +413,8 @@ class WeatherRuntime:
                 )
                 continue
 
-    def _loop_runner(self, *, interval_minutes: int, enabled_key: str, runner) -> None:
-        interval_s = max(60, int(interval_minutes) * 60)
+    def _loop_runner(self, *, interval_seconds: int, enabled_key: str, runner) -> None:
+        interval_s = max(1, int(interval_seconds))
         while not self._stop_event.wait(interval_s):
             try:
                 state = self.get_status_snapshot()
@@ -481,6 +493,22 @@ def _scan_status_fields(scan_type: str) -> dict[str, str]:
         "error": f"{prefix}_scan_error",
         "error_count": f"{prefix}_error_count",
     }
+
+
+def _scheduled_interval_seconds(seconds_value: Any, minutes_value: Any, *, minimum_seconds: int) -> int:
+    try:
+        seconds = int(seconds_value or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds > 0:
+        return max(int(minimum_seconds), seconds)
+    try:
+        minutes = int(minutes_value or 0)
+    except (TypeError, ValueError):
+        minutes = 0
+    if minutes > 0:
+        return max(int(minimum_seconds), minutes * 60)
+    return int(minimum_seconds)
 
 
 def get_market_resolution(market_slug: str) -> str | None:

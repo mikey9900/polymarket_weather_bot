@@ -10,7 +10,7 @@ from weather_bot.control_plane import ControlPlane, ControlRequest
 from weather_bot.dashboard_state import DashboardStateService
 from weather_bot.models import ForecastSnapshot, ScanBatch, WeatherSignal
 from weather_bot.paths import DEFAULT_CONFIG_TEMPLATE_PATH
-from weather_bot.runtime import WeatherRuntime
+from weather_bot.runtime import WeatherRuntime, _scheduled_interval_seconds
 from weather_bot.strategy import WeatherStrategyEngine
 from weather_bot.telegram_client import TelegramClient
 from weather_bot.tracker import WeatherTracker
@@ -138,6 +138,28 @@ def test_dashboard_exposes_recent_resolutions(tmp_path: Path):
     assert state["recent_resolutions"][0]["resolution"] == "YES"
 
 
+def test_dashboard_exposes_enriched_open_trade_cards(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("open-card-1")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    dashboard.refresh_once()
+    state = dashboard.get_state_threadsafe()
+
+    assert len(state["open_positions"]) == 1
+    trade = state["open_positions"][0]
+    assert trade["event_title"] == "Highest temperature in NYC on April 25"
+    assert trade["target_label"] == "70-71F"
+    assert trade["outcome_probability"] == 0.8
+    assert trade["expected_value_pnl"] > 0
+    assert trade["holding_seconds"] is not None
+
+
 def test_control_payload_exposes_paper_metrics(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
@@ -151,6 +173,33 @@ def test_control_payload_exposes_paper_metrics(tmp_path: Path):
     assert payload["paper_balance"] == 750.0
     assert payload["paper_initial_capital"] == 750.0
     assert payload["paper_open_positions"] == 0
+
+
+def test_load_config_reads_second_level_scan_overrides(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(
+        json.dumps(
+            {
+                "temperature_scan_seconds": 5,
+                "precipitation_scan_seconds": 12,
+                "resolution_check_minutes": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.app.auto_temperature_scan_seconds == 5
+    assert config.app.auto_precipitation_scan_seconds == 12
+    assert config.app.resolution_check_minutes == 5
+
+
+def test_scheduled_interval_seconds_prefers_fast_second_overrides():
+    assert _scheduled_interval_seconds(5, 120, minimum_seconds=5) == 5
+    assert _scheduled_interval_seconds(0, 15, minimum_seconds=5) == 900
+    assert _scheduled_interval_seconds(1, 15, minimum_seconds=5) == 5
 
 
 def test_runtime_processes_queued_scan_and_exports_results(tmp_path: Path):

@@ -85,8 +85,9 @@ class DashboardStateService:
                     "win_rate": paper_stats["win_rate"],
                 }
             },
+            "open_positions": self.tracker.get_dashboard_paper_positions(limit=12, status="open"),
             "recent_signals": self.tracker.get_recent_signals(limit=12),
-            "recent_trades": self.tracker.get_recent_paper_positions(limit=12),
+            "recent_trades": self.tracker.get_dashboard_paper_positions(limit=12),
             "recent_resolutions": self.tracker.get_recent_resolutions(limit=12),
             "recent_operator_actions": self.tracker.get_recent_operator_actions(limit=12),
             "signal_summary_24h": self.tracker.get_signal_summary(),
