@@ -68,12 +68,7 @@ def parse_version(version: str) -> tuple[int, ...]:
 
 
 def policy_changed_paths(policy: AddonPolicy, changed_paths: list[str]) -> list[str]:
-    prefix = f"{policy.directory}/"
-    return [
-        path
-        for path in changed_paths
-        if path == policy.directory or path.startswith(prefix)
-    ]
+    return [path for path in changed_paths if path != policy.config_path]
 
 
 def evaluate_policy(
@@ -88,7 +83,7 @@ def evaluate_policy(
             policy=policy,
             changed=False,
             passed=True,
-            detail=f"{policy.name}: no addon files changed.",
+            detail=f"{policy.name}: no shipped repo files changed beyond {policy.config_path}.",
         )
 
     if not after_config:
@@ -121,7 +116,7 @@ def evaluate_policy(
             changed=True,
             passed=False,
             detail=(
-                f"{policy.name}: addon files changed ({', '.join(matching_paths)}) "
+                f"{policy.name}: shipped repo files changed ({', '.join(matching_paths)}) "
                 f"but version stayed at {after_version}. "
                 f"Bump {policy.config_path} above {before_version}."
             ),
@@ -192,7 +187,7 @@ def check_policies(repo_root: Path, base_ref: str, head_ref: str) -> list[Policy
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Require Home Assistant addon version bumps when addon files change."
+        description="Require Home Assistant addon version bumps when shipped repo files change."
     )
     parser.add_argument("--base", help="Base git ref or commit SHA to compare against.")
     parser.add_argument("--head", default="HEAD", help="Head git ref or commit SHA.")
@@ -215,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     failures = [outcome for outcome in relevant_outcomes if not outcome.passed]
 
     if not relevant_outcomes:
-        print("HA addon version check passed: no addon directories changed.")
+        print("HA addon version check passed: no shipped repo files changed beyond addon version files.")
         return 0
 
     for outcome in relevant_outcomes:

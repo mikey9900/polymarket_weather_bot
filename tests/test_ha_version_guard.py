@@ -18,10 +18,10 @@ def test_parse_version_uses_numeric_semver_order() -> None:
     assert parse_version("3.2.11") < parse_version("3.2.12")
 
 
-def test_evaluate_policy_requires_version_bump_for_addon_changes() -> None:
+def test_evaluate_policy_requires_version_bump_for_repo_changes() -> None:
     outcome = evaluate_policy(
         POLICY,
-        ["weather-bot/run.sh"],
+        ["weather_bot/runtime.py"],
         'version: "3.2.11"\n',
         'version: "3.2.11"\n',
     )
@@ -31,10 +31,10 @@ def test_evaluate_policy_requires_version_bump_for_addon_changes() -> None:
     assert "Bump weather-bot/config.yaml above 3.2.11." in outcome.detail
 
 
-def test_evaluate_policy_accepts_bumped_version_for_addon_changes() -> None:
+def test_evaluate_policy_accepts_bumped_version_for_repo_changes() -> None:
     outcome = evaluate_policy(
         POLICY,
-        ["weather-bot/run.sh", "weather-bot/config.yaml"],
+        ["weather_bot/runtime.py", "weather-bot/config.yaml"],
         'version: "3.2.11"\n',
         'version: "3.2.12"\n',
     )
@@ -45,13 +45,25 @@ def test_evaluate_policy_accepts_bumped_version_for_addon_changes() -> None:
     assert outcome.after_version == "3.2.12"
 
 
-def test_evaluate_policy_ignores_non_addon_changes() -> None:
+def test_evaluate_policy_skips_when_only_own_version_changes() -> None:
     outcome = evaluate_policy(
         POLICY,
-        ["weather_bot/runtime.py"],
+        ["weather-bot/config.yaml"],
         'version: "3.2.11"\n',
-        'version: "3.2.11"\n',
+        'version: "3.2.12"\n',
     )
 
     assert outcome.changed is False
     assert outcome.passed is True
+
+
+def test_evaluate_policy_requires_bump_when_other_addon_version_changes() -> None:
+    outcome = evaluate_policy(
+        POLICY,
+        ["weather-codex/config.yaml"],
+        'version: "3.2.11"\n',
+        'version: "3.2.11"\n',
+    )
+
+    assert outcome.changed is True
+    assert outcome.passed is False
