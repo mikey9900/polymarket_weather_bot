@@ -149,7 +149,11 @@ class ControlPlane:
             limit = self.runtime.set_paper_max_open_positions(amount)
             return self._record(ControlResult(True, 200, f"Global open-position cap set to {limit}.", action))
         if action == "close_position":
-            value = request.value if isinstance(request.value, dict) else {"position_id": request.value}
+            value = _coerce_mapping(
+                request.value,
+                fallback_key="position_id",
+                nested_keys=("value", "payload", "data"),
+            )
             try:
                 position_id = int(value.get("position_id"))
             except (TypeError, ValueError, AttributeError):
@@ -214,3 +218,41 @@ def _coerce_int(value: Any, *, keys: tuple[str, ...] = ()) -> int:
                 raise ValueError("invalid numeric value") from exc
             return parsed
     return int(float(raw))
+
+
+def _coerce_mapping(
+    value: Any,
+    *,
+    fallback_key: str,
+    nested_keys: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    raw = value
+    while True:
+        if isinstance(raw, dict):
+            for key in nested_keys:
+                nested = raw.get(key)
+                if isinstance(nested, dict):
+                    raw = nested
+                    break
+                if isinstance(nested, str):
+                    nested_text = nested.strip()
+                    if nested_text.startswith("{") and nested_text.endswith("}"):
+                        try:
+                            parsed = json.loads(nested_text)
+                        except json.JSONDecodeError:
+                            parsed = None
+                        if isinstance(parsed, dict):
+                            raw = parsed
+                            break
+            else:
+                return raw
+            continue
+        if isinstance(raw, str):
+            text = raw.strip()
+            if text.startswith("{") and text.endswith("}"):
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    raw = parsed
+                    continue
+            return {fallback_key: raw}
+        return {fallback_key: raw}
