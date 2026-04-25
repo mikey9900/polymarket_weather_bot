@@ -28,6 +28,8 @@ import os
 import requests
 import math
 import json
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Optional, Dict, Tuple
@@ -50,6 +52,21 @@ def _ha_option(name: str) -> str:
 # API keys from .env or HA options
 WU_API_KEY = os.getenv("WU_API_KEY") or _ha_option("wu_api_key")
 VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY") or _ha_option("visual_crossing_api_key")
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+VISUAL_CROSSING_MAX_CONCURRENT = _int_env("VISUAL_CROSSING_MAX_CONCURRENT", 1)
+VISUAL_CROSSING_MAX_ATTEMPTS = _int_env("VISUAL_CROSSING_MAX_ATTEMPTS", 3)
+_visual_crossing_gate = threading.BoundedSemaphore(VISUAL_CROSSING_MAX_CONCURRENT)
 
 # -------------------------------------------------------------
 # CITY → WU STATION + COORDINATES + UNIT
@@ -313,27 +330,24 @@ def get_visual_crossing_forecast_max_temp(city_slug: str, target_date: date) -> 
     unit       = coords["unit"]
     unit_group = "us" if unit == "fahrenheit" else "metric"
 
-    try:
-        r = requests.get(
-            f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{lat},{lon}/{target_date.isoformat()}",
-            params={
-                "key":       VISUAL_CROSSING_API_KEY,
-                "unitGroup": unit_group,
-                "include":   "days",
-                "elements":  "tempmax",
-            },
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json()
-        days = data.get("days", [])
-        if not days or days[0].get("tempmax") is None:
-            return None
-        return float(days[0]["tempmax"])
-
-    except Exception as e:
-        print(f"    ⚠️  Visual Crossing failed for {city_slug}: {e}")
+    data = get_visual_crossing_timeline_json(
+        path=f"{lat},{lon}/{target_date.isoformat()}",
+        params={
+            "key": VISUAL_CROSSING_API_KEY,
+            "unitGroup": unit_group,
+            "include": "days",
+            "elements": "tempmax",
+        },
+        timeout=10,
+        rate_limit_label=city_slug,
+        failure_label=f"failed for {city_slug}",
+    )
+    if not data:
         return None
+    days = data.get("days", [])
+    if not days or days[0].get("tempmax") is None:
+        return None
+    return float(days[0]["tempmax"])
 
 
 # =============================================================
@@ -407,6 +421,67 @@ def get_noaa_forecast_max_temp(city_slug: str, target_date: date) -> Optional[fl
         print(f"    ⚠️  NOAA failed for {city_slug}: {e}")
         _noaa_grid_cache.pop(city_slug, None)  # clear cache on error so next call retries
         return None
+
+
+def get_visual_crossing_timeline_json(
+    *,
+    path: str,
+    params: dict,
+    timeout: int,
+    rate_limit_label: str,
+    failure_label: str,
+) -> Optional[dict]:
+    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{path}"
+    last_error: Exception | None = None
+    with _visual_crossing_gate:
+        for attempt in range(1, VISUAL_CROSSING_MAX_ATTEMPTS + 1):
+            try:
+                response = requests.get(url, params=params, timeout=timeout)
+                if response.status_code == 429:
+                    last_error = requests.HTTPError(
+                        f"429 Client Error: rate limited for url: {response.url}",
+                        response=response,
+                    )
+                    if attempt < VISUAL_CROSSING_MAX_ATTEMPTS:
+                        delay = _visual_crossing_retry_delay(response, attempt)
+                        print(
+                            f"    ⚠️  Visual Crossing rate limited for {rate_limit_label}; "
+                            f"retrying in {delay:.1f}s"
+                        )
+                        time.sleep(delay)
+                        continue
+                    break
+                response.raise_for_status()
+                return response.json()
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 429 and attempt < VISUAL_CROSSING_MAX_ATTEMPTS:
+                    last_error = exc
+                    delay = _visual_crossing_retry_delay(exc.response, attempt)
+                    print(
+                        f"    ⚠️  Visual Crossing rate limited for {rate_limit_label}; "
+                        f"retrying in {delay:.1f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                last_error = exc
+                break
+            except Exception as exc:
+                last_error = exc
+                break
+    if last_error is not None:
+        print(f"    ⚠️  Visual Crossing {failure_label}: {last_error}")
+    return None
+
+
+def _visual_crossing_retry_delay(response: requests.Response | None, attempt: int) -> float:
+    if response is not None:
+        retry_after = str(response.headers.get("Retry-After", "") or "").strip()
+        if retry_after:
+            try:
+                return max(1.0, float(retry_after))
+            except ValueError:
+                pass
+    return min(8.0, float(2 ** max(0, attempt - 1)))
 
 
 # =============================================================

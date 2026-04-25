@@ -50,7 +50,7 @@ def _ha_option(name: str) -> str:
 VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY") or _ha_option("visual_crossing_api_key")
 
 # Import city coordinates and CDF from the existing forecast engine
-from forecast.forecast_engine import CITY_COORDS, _normal_cdf
+from forecast.forecast_engine import CITY_COORDS, _normal_cdf, get_visual_crossing_timeline_json
 
 # Uncertainty model parameters
 PRECIP_CV       = 0.40   # coefficient of variation for remaining precip
@@ -87,9 +87,6 @@ def _get_om_precip_range(
             "start_date":         start.isoformat(),
             "end_date":           end.isoformat(),
         }
-        if not archive:
-            params["forecast_days"] = 16
-
         r = requests.get(base, params=params, timeout=15)
         r.raise_for_status()
         data   = r.json()
@@ -191,23 +188,21 @@ def get_vc_monthly_precip(city_slug: str, year: int, month: int) -> Optional[dic
     month_start = date(year, month, 1)
     month_end   = date(year, month, calendar.monthrange(year, month)[1])
 
-    try:
-        r = requests.get(
-            f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services"
-            f"/timeline/{lat},{lon}/{month_start.isoformat()}/{month_end.isoformat()}",
-            params={
-                "key":       VISUAL_CROSSING_API_KEY,
-                "unitGroup": unit_group,
-                "include":   "days",
-                "elements":  "datetime,precip",
-            },
-            timeout=15,
-        )
-        r.raise_for_status()
-        days = r.json().get("days", [])
-    except Exception as e:
-        print(f"    ⚠️  Visual Crossing precip failed for {city_slug}: {e}")
+    data = get_visual_crossing_timeline_json(
+        path=f"{lat},{lon}/{month_start.isoformat()}/{month_end.isoformat()}",
+        params={
+            "key": VISUAL_CROSSING_API_KEY,
+            "unitGroup": unit_group,
+            "include": "days",
+            "elements": "datetime,precip",
+        },
+        timeout=15,
+        rate_limit_label=f"precip {city_slug}",
+        failure_label=f"precip failed for {city_slug}",
+    )
+    if not data:
         return None
+    days = data.get("days", [])
 
     observed      = 0.0
     forecast      = 0.0
