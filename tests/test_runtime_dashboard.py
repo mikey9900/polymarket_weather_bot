@@ -114,6 +114,22 @@ def test_dashboard_control_updates_state(tmp_path: Path):
     assert response["state"]["recent_operator_actions"][0]["action"] == "stop"
 
 
+def test_dashboard_rejects_empty_control_action(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe({})
+
+    assert response["ok"] is False
+    assert response["status"] == 400
+    assert "empty" in response["message"].lower()
+
+
 def test_dashboard_exposes_recent_resolutions(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")

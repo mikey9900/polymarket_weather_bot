@@ -86,6 +86,15 @@ class ControlPlane:
 
     def apply_sync(self, request: ControlRequest) -> ControlResult:
         action = request.action
+        if not action:
+            return self._record(
+                ControlResult(
+                    False,
+                    400,
+                    "Dashboard command was empty. Reload the dashboard and try again.",
+                    action,
+                )
+            )
         if action == "start":
             self.runtime.resume()
             return self._record(ControlResult(True, 200, "Automation resumed.", action))
