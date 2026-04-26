@@ -13,6 +13,7 @@ class _FakeResponse:
         self._payload = payload or {}
         self.headers = headers or {}
         self.url = url
+        self.text = "{}" if payload is None else str(payload)
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -23,6 +24,12 @@ class _FakeResponse:
 
     def json(self) -> dict:
         return self._payload
+
+
+class _FakeDate(date):
+    @classmethod
+    def today(cls) -> "_FakeDate":
+        return cls(2026, 4, 26)
 
 
 def test_openmeteo_precip_forecast_request_uses_explicit_date_range_without_forecast_days(monkeypatch):
@@ -181,6 +188,103 @@ def test_openmeteo_temperature_forecast_enters_global_cooldown_after_rate_limit(
     assert second is None
     assert len(calls) == 1
     assert "cooling down" in output
+
+
+def test_wu_temperature_forecast_uses_v3_daily_endpoint_for_future_dates(monkeypatch):
+    calls: list[tuple[str, dict, int]] = []
+
+    def fake_get(url: str, *, params: dict, timeout: int):
+        calls.append((url, dict(params), timeout))
+        return _FakeResponse(
+            payload={
+                "validTimeLocal": [
+                    "2026-04-26T07:00:00-0400",
+                    "2026-04-27T07:00:00-0400",
+                    "2026-04-28T07:00:00-0400",
+                ],
+                "calendarDayTemperatureMax": [85, 87, 86],
+            }
+        )
+
+    monkeypatch.setattr(forecast_engine, "WU_API_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "date", _FakeDate)
+    monkeypatch.setattr(forecast_engine, "_wu_gate", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(forecast_engine, "_wu_daily_cache", {})
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    value = forecast_engine.get_wu_forecast_max_temp("miami", _FakeDate(2026, 4, 27))
+
+    assert value == 87.0
+    assert calls == [
+        (
+            "https://api.weather.com/v3/wx/forecast/daily/5day",
+            {
+                "geocode": "25.7959,-80.287",
+                "units": "e",
+                "language": "en-US",
+                "format": "json",
+                "apiKey": "test-key",
+            },
+            10,
+        )
+    ]
+
+
+def test_wu_temperature_forecast_reuses_cached_window_for_neighboring_dates(monkeypatch):
+    calls: list[tuple[str, dict, int]] = []
+
+    def fake_get(url: str, *, params: dict, timeout: int):
+        calls.append((url, dict(params), timeout))
+        return _FakeResponse(
+            payload={
+                "validTimeLocal": [
+                    "2026-04-26T07:00:00-0400",
+                    "2026-04-27T07:00:00-0400",
+                    "2026-04-28T07:00:00-0400",
+                ],
+                "calendarDayTemperatureMax": [84, 85, 86],
+            }
+        )
+
+    monkeypatch.setattr(forecast_engine, "WU_API_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "date", _FakeDate)
+    monkeypatch.setattr(forecast_engine, "WU_CACHE_TTL_SECONDS", 900.0)
+    monkeypatch.setattr(forecast_engine, "_wu_gate", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(forecast_engine, "_wu_daily_cache", {})
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    first = forecast_engine.get_wu_forecast_max_temp("miami", _FakeDate(2026, 4, 27))
+    second = forecast_engine.get_wu_forecast_max_temp("miami", _FakeDate(2026, 4, 28))
+
+    assert first == 85.0
+    assert second == 86.0
+    assert len(calls) == 1
+
+
+def test_get_both_bucket_probabilities_logs_compact_provider_status(monkeypatch, capsys):
+    monkeypatch.setattr(forecast_engine, "date", _FakeDate)
+    monkeypatch.setattr(forecast_engine, "WU_API_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_API_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_auth_failed", True)
+    monkeypatch.setattr(forecast_engine, "_openmeteo_disabled_until_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "get_wu_forecast_max_temp", lambda city_slug, target_date: 85.0)
+    monkeypatch.setattr(forecast_engine, "get_openmeteo_forecast_max_temp", lambda city_slug, target_date: None)
+    monkeypatch.setattr(forecast_engine, "get_visual_crossing_forecast_max_temp", lambda city_slug, target_date: None)
+    monkeypatch.setattr(forecast_engine, "get_noaa_forecast_max_temp", lambda city_slug, target_date: 84.0)
+
+    forecast_engine.get_both_bucket_probabilities(
+        "miami",
+        _FakeDate(2026, 4, 27),
+        [{"label": "84-85°F", "low": 84, "high": 85}],
+    )
+
+    output = capsys.readouterr().out
+
+    assert "Sources:" in output
+    assert "WU(KMIA) 85.0" in output
+    assert "OM unavailable" in output
+    assert "VC auth-disabled" in output
+    assert "NOAA 84.0" in output
 
 
 def test_visual_crossing_temperature_forecast_disables_after_auth_failure_without_leaking_key(monkeypatch, capsys):

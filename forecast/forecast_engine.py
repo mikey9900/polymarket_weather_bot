@@ -2,8 +2,8 @@
 # forecast/forecast_engine.py
 #
 # PURPOSE:
-#   Fetches daily max temperature forecasts from TWO sources:
-#     1. Weather Underground (WU) — the EXACT station Polymarket uses
+#   Fetches daily max temperature forecasts from multiple sources:
+#     1. Weather Company / WU daily forecast (today + next 5 days)
 #     2. Open-Meteo — free backup, good global coverage
 #
 #   Both forecasts are converted into probability distributions
@@ -13,9 +13,9 @@
 #
 # WU API:
 #   Uses the IBM Weather Company API (which powers WU).
-#   Endpoint: /v1/geocode/{lat}/{lon}/forecast/daily/5day.json
-#   We use station coordinates (not city center) so forecasts match
-#   exactly what Polymarket settles against.
+#   Endpoint: /v3/wx/forecast/daily/5day
+#   We use Polymarket's resolution-station coordinates (not city center)
+#   so forecasts stay anchored to the settlement location.
 #
 # STATION IDs:
 #   Confirmed from debug_discover_stations.py by reading the
@@ -81,16 +81,21 @@ OPENMETEO_MIN_INTERVAL_SECONDS = _float_env("OPENMETEO_MIN_INTERVAL_SECONDS", 1.
 OPENMETEO_RATE_LIMIT_COOLDOWN_SECONDS = _float_env("OPENMETEO_RATE_LIMIT_COOLDOWN_SECONDS", 300.0)
 OPENMETEO_FORECAST_WINDOW_DAYS = _int_env("OPENMETEO_FORECAST_WINDOW_DAYS", 10)
 OPENMETEO_CACHE_TTL_SECONDS = _float_env("OPENMETEO_CACHE_TTL_SECONDS", 900.0)
+WU_MAX_CONCURRENT = _int_env("WU_MAX_CONCURRENT", 1)
+WU_CACHE_TTL_SECONDS = _float_env("WU_CACHE_TTL_SECONDS", 900.0)
 VISUAL_CROSSING_MAX_CONCURRENT = _int_env("VISUAL_CROSSING_MAX_CONCURRENT", 1)
 VISUAL_CROSSING_MAX_ATTEMPTS = _int_env("VISUAL_CROSSING_MAX_ATTEMPTS", 3)
 _openmeteo_gate = threading.BoundedSemaphore(OPENMETEO_MAX_CONCURRENT)
+_wu_gate = threading.BoundedSemaphore(WU_MAX_CONCURRENT)
 _visual_crossing_gate = threading.BoundedSemaphore(VISUAL_CROSSING_MAX_CONCURRENT)
 _openmeteo_rate_limit_lock = threading.Lock()
 _openmeteo_cache_lock = threading.Lock()
+_wu_cache_lock = threading.Lock()
 _openmeteo_disabled_until_monotonic = 0.0
 _openmeteo_last_request_monotonic = 0.0
 _openmeteo_cooldown_notice_sent = False
 _openmeteo_daily_cache: Dict[str, Dict[str, object]] = {}
+_wu_daily_cache: Dict[str, Dict[str, object]] = {}
 _visual_crossing_auth_lock = threading.Lock()
 _visual_crossing_auth_failed = False
 
@@ -209,6 +214,49 @@ def _store_openmeteo_daily_cache(city_slug: str, temps: Dict[str, Optional[float
             "temps": dict(temps),
             "expires_at": time.monotonic() + OPENMETEO_CACHE_TTL_SECONDS,
         }
+
+
+def _wu_cached_temp(city_slug: str, target_date: date) -> Optional[float]:
+    key = target_date.isoformat()
+    now = time.monotonic()
+    with _wu_cache_lock:
+        entry = _wu_daily_cache.get(city_slug)
+        if not entry:
+            return None
+        expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+        if expires_at <= now:
+            _wu_daily_cache.pop(city_slug, None)
+            return None
+        temps = entry.get("temps", {})
+        if not isinstance(temps, dict) or key not in temps:
+            return None
+        value = temps.get(key)
+        return None if value is None else float(value)
+
+
+def _store_wu_daily_cache(city_slug: str, temps: Dict[str, Optional[float]]) -> None:
+    with _wu_cache_lock:
+        _wu_daily_cache[city_slug] = {
+            "temps": dict(temps),
+            "expires_at": time.monotonic() + WU_CACHE_TTL_SECONDS,
+        }
+
+
+def _wu_daily_forecast_temps(data: dict) -> Dict[str, Optional[float]]:
+    raw_dates = data.get("validTimeLocal") or []
+    raw_temps = (
+        data.get("calendarDayTemperatureMax")
+        or data.get("temperatureMax")
+        or []
+    )
+    temps: Dict[str, Optional[float]] = {}
+    for idx, raw_value in enumerate(raw_dates):
+        key = str(raw_value or "")[:10]
+        if not key:
+            continue
+        value = raw_temps[idx] if idx < len(raw_temps) else None
+        temps[key] = None if value is None else float(value)
+    return temps
 
 
 def _openmeteo_window(target_date: date) -> tuple[date, date]:
@@ -371,16 +419,12 @@ UNCERTAINTY_C = 1.5   # °C
 
 def get_wu_forecast_max_temp(city_slug: str, target_date: date) -> Optional[float]:
     """
-    Fetches the daily max temperature from Weather Underground
-    using the PWS (Personal Weather Station) API plan.
+    Fetches the daily max temperature from Weather Company / WU.
 
-    Uses the v2/pws/dailysummary endpoint which is available on
-    the PWS plan. Fetches the 7-day summary for the exact station
-    Polymarket uses to resolve markets.
-
-    For future dates (forecasts), we fall back to Open-Meteo since
-    the PWS plan only provides observations, not forecasts.
-    For today or past dates, we return the actual observed max temp.
+    For today and future dates, use the working v3 daily forecast endpoint
+    keyed to Polymarket's resolution-station coordinates.
+    For past dates, fall back to the station daily summary endpoint so
+    resolved-market lookbacks still prefer observed highs when available.
 
     Args:
         city_slug:   e.g. "san-francisco"
@@ -399,89 +443,78 @@ def get_wu_forecast_max_temp(city_slug: str, target_date: date) -> Optional[floa
     if not coords:
         return None
 
+    today = date.today()
     station = coords["station"]
     wu_unit = coords["wu_unit"]  # "e" = imperial (°F), "m" = metric (°C)
 
-    # PWS plan provides observations (actual readings), not forecasts.
-    # - For past dates:  use v2/pws/dailysummary (end-of-day summary)
-    # - For today:       use v2/pws/observations/current (live reading)
-    #                    and return tempHigh from today so far
-    # - For future dates: return None (no observation exists yet)
-    today = date.today()
-
-    if target_date > today:
-        # No PWS observation available for future dates
-        return None
+    if target_date >= today:
+        cached = _wu_cached_temp(city_slug, target_date)
+        if cached is not None:
+            return cached
+        try:
+            with _wu_gate:
+                r = requests.get(
+                    "https://api.weather.com/v3/wx/forecast/daily/5day",
+                    params={
+                        "geocode": f"{coords['lat']},{coords['lon']}",
+                        "units": wu_unit,
+                        "language": "en-US",
+                        "format": "json",
+                        "apiKey": WU_API_KEY,
+                    },
+                    timeout=10,
+                )
+                r.raise_for_status()
+            raw = r.text.strip()
+            if not raw:
+                print(f"    ⚠️  WU daily forecast: empty response for {station}")
+                return None
+            temps = _wu_daily_forecast_temps(r.json())
+            if not temps:
+                print(f"    ⚠️  WU daily forecast: no usable days for {station}")
+                return None
+            _store_wu_daily_cache(city_slug, temps)
+            value = temps.get(target_date.isoformat())
+            return None if value is None else float(value)
+        except Exception as e:
+            print(f"    ⚠️  WU forecast failed for {city_slug} ({station}): {_format_request_error(e)}")
+            return None
 
     try:
-        if target_date == today:
-            # Use current observations for today — tempHigh so far
-            r = requests.get(
-                "https://api.weather.com/v2/pws/observations/current",
-                params={
-                    "stationId": station,
-                    "format":    "json",
-                    "units":     wu_unit,
-                    "apiKey":    WU_API_KEY,
-                },
-                timeout=10,
-            )
-            r.raise_for_status()
-            raw = r.text.strip()
-            if not raw:
-                print(f"    ⚠️  WU current obs: empty response for {station}")
-                return None
-            data = r.json()
-
-            # Response: {"observations": [{"imperial": {"tempHigh": 62, ...}, ...}]}
-            obs_list = data.get("observations", [])
-            if not obs_list:
-                return None
-
-            unit_key  = "imperial" if wu_unit == "e" else "metric"
-            unit_data = obs_list[0].get(unit_key, {})
-            temp_high = unit_data.get("tempHigh")
-            if temp_high is not None:
-                return float(temp_high)
-            # Fall back to current temp if tempHigh not set yet
-            temp = unit_data.get("temp")
-            return float(temp) if temp is not None else None
-
-        else:
-            # Use daily summary for past dates
-            r = requests.get(
-                "https://api.weather.com/v2/pws/dailysummary/7day",
-                params={
-                    "stationId": station,
-                    "format":    "json",
-                    "units":     wu_unit,
-                    "apiKey":    WU_API_KEY,
-                },
-                timeout=10,
-            )
-            r.raise_for_status()
-            raw = r.text.strip()
-            if not raw:
-                print(f"    ⚠️  WU daily summary: empty response for {station}")
-                return None
-            data = r.json()
-
-            # Response: {"summaries": [{"obsTimeLocal": "2026-04-10 00:00:00",
-            #                           "imperial": {"tempHigh": 62, ...}}]}
-            summaries = data.get("summaries", [])
-            target_str = target_date.isoformat()
-            unit_key   = "imperial" if wu_unit == "e" else "metric"
-
-            for summary in summaries:
-                obs_time = (summary.get("obsTimeLocal") or "")[:10]
-                if obs_time == target_str:
-                    unit_data = summary.get(unit_key, {})
-                    temp_high = unit_data.get("tempHigh")
-                    if temp_high is not None:
-                        return float(temp_high)
-
-            print(f"    ⚠️  WU: no summary for {station} on {target_date}")
+        # Use daily summary for past dates.
+        r = requests.get(
+            "https://api.weather.com/v2/pws/dailysummary/7day",
+            params={
+                "stationId": station,
+                "format": "json",
+                "units": wu_unit,
+                "apiKey": WU_API_KEY,
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        raw = r.text.strip()
+        if not raw:
+            print(f"    ⚠️  WU daily summary: empty response for {station}")
             return None
+        data = r.json()
+
+        # Response: {"summaries": [{"obsTimeLocal": "2026-04-10 00:00:00",
+        #                           "imperial": {"tempHigh": 62, ...}}]}
+        summaries = data.get("summaries", [])
+        target_str = target_date.isoformat()
+        unit_key = "imperial" if wu_unit == "e" else "metric"
+
+        for summary in summaries:
+            obs_time = (summary.get("obsTimeLocal") or "")[:10]
+            if obs_time == target_str:
+                unit_data = summary.get(unit_key, {})
+                temp_high = unit_data.get("tempHigh")
+                if temp_high is not None:
+                    return float(temp_high)
+
+        print(f"    ⚠️  WU: no summary for {station} on {target_date}")
+        return None
 
     except Exception as e:
         print(f"    ⚠️  WU API failed for {city_slug} ({station}): {e}")
@@ -877,14 +910,62 @@ def get_bucket_probabilities(
     return _probs_from_temp(temp, buckets, unit)
 
 
+def _provider_status_label(
+    *,
+    name: str,
+    temp: Optional[float],
+    unit_sym: str,
+    unavailable_reason: Optional[str] = None,
+) -> str:
+    if temp is not None:
+        return f"{name} {temp:.1f}{unit_sym}"
+    if unavailable_reason:
+        return f"{name} {unavailable_reason}"
+    return f"{name} N/A"
+
+
+def _wu_status_reason(target_date: date) -> str:
+    if not WU_API_KEY:
+        return "disabled"
+    today = date.today()
+    if target_date < today:
+        return "obs unavailable"
+    if target_date > today + timedelta(days=5):
+        return "5d horizon"
+    return "unavailable"
+
+
+def _openmeteo_status_reason() -> str:
+    if _openmeteo_cooldown_remaining() > 0:
+        return "cooldown"
+    return "unavailable"
+
+
+def _visual_crossing_status_reason() -> str:
+    if not VISUAL_CROSSING_API_KEY:
+        return "disabled"
+    if _visual_crossing_disabled():
+        return "auth-disabled"
+    return "unavailable"
+
+
+def _noaa_status_reason(city_slug: str, target_date: date) -> str:
+    coords = CITY_COORDS.get(city_slug, {})
+    if coords.get("unit") != "fahrenheit":
+        return "us-only"
+    if target_date > date.today() + timedelta(days=6):
+        return "7d horizon"
+    return "unavailable"
+
+
 def get_both_bucket_probabilities(
     city_slug:   str,
     target_date: date,
     buckets:     list,
 ) -> Dict[str, Optional[Dict]]:
     """
-    Returns bucket probabilities from all three sources:
-    Weather Underground, Open-Meteo, and Visual Crossing.
+    Returns bucket probabilities from all configured temperature sources:
+    Weather Company / WU, Open-Meteo, Visual Crossing, and NOAA.
 
     Args:
         city_slug:   e.g. "san-francisco"
@@ -917,11 +998,33 @@ def get_both_bucket_probabilities(
         vc_temp = future_vc.result()
         noaa_temp = future_noaa.result()  # US only, None for international
 
-    print(f"    🌡️  WU ({station}): {f'{wu_temp:.1f}{unit_sym}' if wu_temp is not None else 'N/A'}")
-    print(f"    🌤️  Open-Meteo:   {f'{om_temp:.1f}{unit_sym}' if om_temp is not None else 'N/A'}")
-    print(f"    🌍  Vis.Crossing: {f'{vc_temp:.1f}{unit_sym}' if vc_temp is not None else 'N/A'}")
-    if noaa_temp is not None:
-        print(f"    🇺🇸  NOAA/NWS:    {noaa_temp:.1f}{unit_sym}")
+    status_parts = [
+        _provider_status_label(
+            name=f"WU({station})",
+            temp=wu_temp,
+            unit_sym=unit_sym,
+            unavailable_reason=_wu_status_reason(target_date),
+        ),
+        _provider_status_label(
+            name="OM",
+            temp=om_temp,
+            unit_sym=unit_sym,
+            unavailable_reason=_openmeteo_status_reason(),
+        ),
+        _provider_status_label(
+            name="VC",
+            temp=vc_temp,
+            unit_sym=unit_sym,
+            unavailable_reason=_visual_crossing_status_reason(),
+        ),
+        _provider_status_label(
+            name="NOAA",
+            temp=noaa_temp,
+            unit_sym=unit_sym,
+            unavailable_reason=_noaa_status_reason(city_slug, target_date),
+        ),
+    ]
+    print(f"    🌦️  Sources: {' | '.join(status_parts)}")
 
     wu_probs   = _probs_from_temp(wu_temp,   buckets, unit) if wu_temp   is not None else None
     om_probs   = _probs_from_temp(om_temp,   buckets, unit) if om_temp   is not None else None
