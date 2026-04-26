@@ -63,26 +63,65 @@ def test_openmeteo_precip_forecast_request_uses_explicit_date_range_without_fore
 def test_visual_crossing_temperature_forecast_retries_after_rate_limit(monkeypatch):
     responses = [
         _FakeResponse(status_code=429, headers={"Retry-After": "1"}, url="https://weather.visualcrossing.com/rate-limit"),
-        _FakeResponse(payload={"days": [{"tempmax": 30.2}]}),
+        _FakeResponse(payload={"days": [{"datetime": "2026-04-27", "tempmax": 30.2}]}),
     ]
     sleeps: list[float] = []
 
     def fake_get(url: str, *, params: dict, timeout: int):
-        assert "timeline/6.5774,3.3214/2026-04-27" in url
+        assert "timeline/6.5774,3.3214" in url
         assert params["elements"] == "tempmax"
         assert timeout == 10
         return responses.pop(0)
 
+    monkeypatch.setattr(forecast_engine, "date", _FakeDate)
     monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_API_KEY", "test-key")
     monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_MAX_ATTEMPTS", 2)
     monkeypatch.setattr(forecast_engine, "_visual_crossing_gate", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_daily_cache", {})
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_disabled_until_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_cooldown_notice_sent", False)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_auth_failed", False)
     monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
     monkeypatch.setattr(forecast_engine.time, "sleep", lambda delay: sleeps.append(delay))
 
-    value = forecast_engine.get_visual_crossing_forecast_max_temp("lagos", date(2026, 4, 27))
+    value = forecast_engine.get_visual_crossing_forecast_max_temp("lagos", _FakeDate(2026, 4, 27))
 
     assert value == 30.2
     assert sleeps == [1.0]
+
+
+def test_visual_crossing_temperature_forecast_reuses_cached_window_for_neighboring_dates(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_get(url: str, *, params: dict, timeout: int):
+        calls.append((url, dict(params)))
+        return _FakeResponse(
+            payload={
+                "days": [
+                    {"datetime": "2026-04-27", "tempmax": 30.2},
+                    {"datetime": "2026-04-28", "tempmax": 31.1},
+                ]
+            }
+        )
+
+    monkeypatch.setattr(forecast_engine, "date", _FakeDate)
+    monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_API_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_FORECAST_WINDOW_DAYS", 15)
+    monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_CACHE_TTL_SECONDS", 7200.0)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_gate", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_daily_cache", {})
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_disabled_until_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_cooldown_notice_sent", False)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_auth_failed", False)
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    first = forecast_engine.get_visual_crossing_forecast_max_temp("lagos", _FakeDate(2026, 4, 27))
+    second = forecast_engine.get_visual_crossing_forecast_max_temp("lagos", _FakeDate(2026, 4, 28))
+
+    assert first == 30.2
+    assert second == 31.1
+    assert len(calls) == 1
+    assert calls[0][0].endswith("/timeline/6.5774,3.3214")
 
 
 def test_openmeteo_temperature_forecast_retries_after_rate_limit(monkeypatch):
@@ -190,6 +229,37 @@ def test_openmeteo_temperature_forecast_enters_global_cooldown_after_rate_limit(
     assert "cooling down" in output
 
 
+def test_visual_crossing_temperature_forecast_enters_global_cooldown_after_rate_limit(monkeypatch, capsys):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_get(url: str, *, params: dict, timeout: int):
+        calls.append((url, dict(params)))
+        return _FakeResponse(
+            status_code=429,
+            headers={"Retry-After": "1"},
+            url="https://weather.visualcrossing.com/rate-limit",
+        )
+
+    monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_API_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_RATE_LIMIT_COOLDOWN_SECONDS", 60.0)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_gate", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_daily_cache", {})
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_disabled_until_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_cooldown_notice_sent", False)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_auth_failed", False)
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    first = forecast_engine.get_visual_crossing_forecast_max_temp("lagos", date(2026, 4, 27))
+    second = forecast_engine.get_visual_crossing_forecast_max_temp("jakarta", date(2026, 4, 27))
+    output = capsys.readouterr().out
+
+    assert first is None
+    assert second is None
+    assert len(calls) == 1
+    assert "cooling down" in output
+
+
 def test_wu_temperature_forecast_uses_v3_daily_endpoint_for_future_dates(monkeypatch):
     calls: list[tuple[str, dict, int]] = []
 
@@ -261,6 +331,135 @@ def test_wu_temperature_forecast_reuses_cached_window_for_neighboring_dates(monk
     assert len(calls) == 1
 
 
+def test_weatherapi_temperature_forecast_skips_when_key_missing(monkeypatch):
+    def fake_get(url: str, *, params: dict, timeout: int):
+        raise AssertionError("WeatherAPI should not be called without a key")
+
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_KEY", "")
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_ENABLE_TEMPERATURE", True)
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    assert forecast_engine.get_weatherapi_forecast_max_temp("miami", date(2026, 4, 27)) is None
+
+
+def test_weatherapi_temperature_forecast_returns_none_outside_free_horizon(monkeypatch):
+    def fake_get(url: str, *, params: dict, timeout: int):
+        raise AssertionError("WeatherAPI should not be called beyond the free forecast horizon")
+
+    monkeypatch.setattr(forecast_engine, "date", _FakeDate)
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_ENABLE_TEMPERATURE", True)
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    assert forecast_engine.get_weatherapi_forecast_max_temp("lagos", _FakeDate(2026, 4, 29)) is None
+
+
+def test_weatherapi_temperature_forecast_parses_fahrenheit_and_celsius(monkeypatch):
+    calls: list[dict] = []
+    responses = [
+        _FakeResponse(
+            payload={
+                "forecast": {
+                    "forecastday": [
+                        {"date": "2026-04-27", "day": {"maxtemp_f": 86.0, "maxtemp_c": 30.0}},
+                    ]
+                }
+            }
+        ),
+        _FakeResponse(
+            payload={
+                "forecast": {
+                    "forecastday": [
+                        {"date": "2026-04-27", "day": {"maxtemp_f": 86.0, "maxtemp_c": 30.0}},
+                    ]
+                }
+            }
+        ),
+    ]
+
+    def fake_get(url: str, *, params: dict, timeout: int):
+        calls.append(dict(params))
+        return responses.pop(0)
+
+    monkeypatch.setattr(forecast_engine, "date", _FakeDate)
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_ENABLE_TEMPERATURE", True)
+    monkeypatch.setattr(forecast_engine, "_weatherapi_daily_cache", {})
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    miami = forecast_engine.get_weatherapi_forecast_max_temp("miami", _FakeDate(2026, 4, 27))
+    lagos = forecast_engine.get_weatherapi_forecast_max_temp("lagos", _FakeDate(2026, 4, 27))
+
+    assert miami == 86.0
+    assert lagos == 30.0
+    assert calls[0]["q"] == "25.7959,-80.287"
+    assert calls[1]["q"] == "6.5774,3.3214"
+
+
+def test_weatherapi_temperature_forecast_reuses_cached_window_for_neighboring_dates(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_get(url: str, *, params: dict, timeout: int):
+        calls.append(dict(params))
+        return _FakeResponse(
+            payload={
+                "forecast": {
+                    "forecastday": [
+                        {"date": "2026-04-26", "day": {"maxtemp_f": 84.0, "maxtemp_c": 29.0}},
+                        {"date": "2026-04-27", "day": {"maxtemp_f": 85.0, "maxtemp_c": 29.5}},
+                        {"date": "2026-04-28", "day": {"maxtemp_f": 86.0, "maxtemp_c": 30.0}},
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr(forecast_engine, "date", _FakeDate)
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_ENABLE_TEMPERATURE", True)
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_CACHE_TTL_SECONDS", 3600.0)
+    monkeypatch.setattr(forecast_engine, "_weatherapi_daily_cache", {})
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    first = forecast_engine.get_weatherapi_forecast_max_temp("miami", _FakeDate(2026, 4, 27))
+    second = forecast_engine.get_weatherapi_forecast_max_temp("miami", _FakeDate(2026, 4, 28))
+
+    assert first == 85.0
+    assert second == 86.0
+    assert len(calls) == 1
+
+
+def test_visual_crossing_review_temperature_disabled_by_default(monkeypatch):
+    def fake_get(url: str, *, params: dict, timeout: int):
+        raise AssertionError("Visual Crossing should not be called for review mode by default")
+
+    monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_API_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_ENABLE_TEMPERATURE", True)
+    monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_ENABLE_REVIEW_TEMPERATURE", False)
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    assert forecast_engine.get_visual_crossing_forecast_max_temp(
+        "lagos",
+        date(2026, 4, 27),
+        provider_context="review",
+    ) is None
+
+
+def test_temperature_review_context_horizons_short_circuit_provider_calls(monkeypatch):
+    def fake_get(url: str, *args, **kwargs):
+        raise AssertionError("Provider request should have been skipped by the review horizon")
+
+    monkeypatch.setattr(forecast_engine, "date", _FakeDate)
+    monkeypatch.setattr(forecast_engine, "WU_API_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine, "WEATHERAPI_ENABLE_TEMPERATURE", True)
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    assert forecast_engine.get_wu_forecast_max_temp("miami", _FakeDate(2026, 5, 2), provider_context="review") is None
+    assert forecast_engine.get_openmeteo_forecast_max_temp("lagos", _FakeDate(2026, 5, 5), provider_context="review") is None
+    assert forecast_engine.get_noaa_forecast_max_temp("miami", _FakeDate(2026, 5, 5), provider_context="review") is None
+    assert forecast_engine.get_weatherapi_forecast_max_temp("lagos", _FakeDate(2026, 4, 29), provider_context="review") is None
+
+
 def test_get_both_bucket_probabilities_logs_compact_provider_status(monkeypatch, capsys):
     monkeypatch.setattr(forecast_engine, "date", _FakeDate)
     monkeypatch.setattr(forecast_engine, "WU_API_KEY", "test-key")
@@ -301,6 +500,9 @@ def test_visual_crossing_temperature_forecast_disables_after_auth_failure_withou
     monkeypatch.setattr(forecast_engine, "VISUAL_CROSSING_API_KEY", api_key)
     monkeypatch.setattr(forecast_engine, "_visual_crossing_auth_failed", False)
     monkeypatch.setattr(forecast_engine, "_visual_crossing_gate", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_daily_cache", {})
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_disabled_until_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_cooldown_notice_sent", False)
     monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
 
     first = forecast_engine.get_visual_crossing_forecast_max_temp("lagos", date(2026, 4, 27))
@@ -312,3 +514,51 @@ def test_visual_crossing_temperature_forecast_disables_after_auth_failure_withou
     assert len(calls) == 1
     assert api_key not in output
     assert "disabling VC for this run" in output
+
+
+def test_visual_crossing_precipitation_reuses_cached_month(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_get(url: str, *, params: dict, timeout: int):
+        calls.append((url, dict(params)))
+        return _FakeResponse(
+            payload={
+                "days": [
+                    {"datetime": "2026-04-01", "precip": 0.4},
+                    {"datetime": "2026-04-02", "precip": 0.3},
+                ]
+            }
+        )
+
+    class _PrecipDate(date):
+        @classmethod
+        def today(cls) -> "_PrecipDate":
+            return cls(2026, 4, 2)
+
+    monkeypatch.setattr(precip_forecast, "VISUAL_CROSSING_API_KEY", "test-key")
+    monkeypatch.setattr(precip_forecast, "VISUAL_CROSSING_PRECIP_CACHE_TTL_SECONDS", 43200.0)
+    monkeypatch.setattr(precip_forecast, "_visual_crossing_precip_cache", {})
+    monkeypatch.setattr(precip_forecast, "date", _PrecipDate)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_gate", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_disabled_until_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_cooldown_notice_sent", False)
+    monkeypatch.setattr(forecast_engine, "_visual_crossing_auth_failed", False)
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    first = precip_forecast.get_vc_monthly_precip("lagos", 2026, 4)
+    second = precip_forecast.get_vc_monthly_precip("lagos", 2026, 4)
+
+    assert first is not None
+    assert second == first
+    assert len(calls) == 1
+
+
+def test_visual_crossing_precipitation_can_be_disabled_by_config(monkeypatch):
+    def fake_get(url: str, *, params: dict, timeout: int):
+        raise AssertionError("Visual Crossing should be skipped when precip is disabled")
+
+    monkeypatch.setattr(precip_forecast, "VISUAL_CROSSING_ENABLE_PRECIP", False)
+    monkeypatch.setattr(precip_forecast, "VISUAL_CROSSING_API_KEY", "test-key")
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    assert precip_forecast.get_vc_monthly_precip("lagos", 2026, 4) is None

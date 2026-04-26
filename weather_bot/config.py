@@ -23,7 +23,7 @@ class AppSettings:
     auto_temperature_scan_seconds: int = 0
     auto_precipitation_scan_seconds: int = 0
     open_position_review_seconds: int = 15
-    open_position_weather_refresh_minutes: int = 15
+    open_position_weather_refresh_minutes: int = 60
 
 
 @dataclass(frozen=True)
@@ -200,7 +200,7 @@ def _load_env_overrides() -> dict[str, Any]:
         payload.setdefault("app", {})["open_position_review_seconds"] = int(os.getenv("WEATHER_OPEN_POSITION_REVIEW_SECONDS", "15"))
     if os.getenv("WEATHER_OPEN_POSITION_WEATHER_REFRESH_MINUTES"):
         payload.setdefault("app", {})["open_position_weather_refresh_minutes"] = int(
-            os.getenv("WEATHER_OPEN_POSITION_WEATHER_REFRESH_MINUTES", "15")
+            os.getenv("WEATHER_OPEN_POSITION_WEATHER_REFRESH_MINUTES", "60")
         )
     return payload
 

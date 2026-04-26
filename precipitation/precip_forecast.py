@@ -29,6 +29,8 @@ import math
 import requests
 import calendar
 import json
+import threading
+import time
 from datetime import date, timedelta
 from typing import Optional
 from dotenv import load_dotenv
@@ -47,7 +49,42 @@ def _ha_option(name: str) -> str:
     return str(payload.get(name) or "").strip()
 
 
+def _float_env(name: str, default: float) -> float:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+def _bool_setting(env_name: str, ha_name: str, default: bool) -> bool:
+    raw = os.getenv(env_name)
+    if raw is None or not str(raw).strip():
+        raw = _ha_option(ha_name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+VISUAL_CROSSING_FREE_PLAN_MODE = _bool_setting(
+    "VISUAL_CROSSING_FREE_PLAN_MODE",
+    "visual_crossing_free_plan_mode",
+    False,
+)
 VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY") or _ha_option("visual_crossing_api_key")
+VISUAL_CROSSING_ENABLE_PRECIP = _bool_setting(
+    "VISUAL_CROSSING_ENABLE_PRECIP",
+    "visual_crossing_enable_precip",
+    not VISUAL_CROSSING_FREE_PLAN_MODE,
+)
+VISUAL_CROSSING_PRECIP_CACHE_TTL_SECONDS = _float_env(
+    "VISUAL_CROSSING_PRECIP_CACHE_TTL_SECONDS",
+    86400.0 if VISUAL_CROSSING_FREE_PLAN_MODE else 43200.0,
+)
+_visual_crossing_precip_cache_lock = threading.Lock()
+_visual_crossing_precip_cache: dict[tuple[str, int, int], dict[str, object]] = {}
 
 # Import city coordinates and shared provider helpers from the existing forecast engine
 from forecast.forecast_engine import CITY_COORDS, _normal_cdf, get_openmeteo_json, get_visual_crossing_timeline_json
@@ -56,6 +93,32 @@ from forecast.forecast_engine import CITY_COORDS, _normal_cdf, get_openmeteo_jso
 PRECIP_CV       = 0.40   # coefficient of variation for remaining precip
 MIN_SIGMA_INCH  = 0.25   # minimum σ in inches
 MIN_SIGMA_MM    = 6.0    # minimum σ in mm
+
+
+def _get_cached_vc_monthly_precip(city_slug: str, year: int, month: int) -> Optional[dict]:
+    key = (city_slug, int(year), int(month))
+    now = time.monotonic()
+    with _visual_crossing_precip_cache_lock:
+        entry = _visual_crossing_precip_cache.get(key)
+        if not entry:
+            return None
+        expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+        if expires_at <= now:
+            _visual_crossing_precip_cache.pop(key, None)
+            return None
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        return dict(payload)
+
+
+def _store_vc_monthly_precip(city_slug: str, year: int, month: int, payload: dict) -> None:
+    key = (city_slug, int(year), int(month))
+    with _visual_crossing_precip_cache_lock:
+        _visual_crossing_precip_cache[key] = {
+            "payload": dict(payload),
+            "expires_at": time.monotonic() + VISUAL_CROSSING_PRECIP_CACHE_TTL_SECONDS,
+        }
 
 
 # =============================================================
@@ -177,9 +240,15 @@ def get_vc_monthly_precip(city_slug: str, year: int, month: int) -> Optional[dic
 
     Returns same structure as get_om_monthly_precip, or None on failure.
     """
+    if not VISUAL_CROSSING_ENABLE_PRECIP:
+        return None
     if not VISUAL_CROSSING_API_KEY:
         print("    ⚠️  VISUAL_CROSSING_API_KEY not set — skipping VC precip")
         return None
+
+    cached = _get_cached_vc_monthly_precip(city_slug, year, month)
+    if cached is not None:
+        return cached
 
     coords = CITY_COORDS.get(city_slug)
     if not coords:
@@ -233,7 +302,7 @@ def get_vc_monthly_precip(city_slug: str, year: int, month: int) -> Optional[dic
             forecast      += float(precip)
             days_forecast += 1
 
-    return {
+    result = {
         "observed":        round(observed, 3),
         "forecast":        round(forecast, 3),
         "total_projected": round(observed + forecast, 3),
@@ -241,6 +310,8 @@ def get_vc_monthly_precip(city_slug: str, year: int, month: int) -> Optional[dic
         "days_observed":   days_observed,
         "days_forecast":   days_forecast,
     }
+    _store_vc_monthly_precip(city_slug, year, month, result)
+    return result
 
 
 # =============================================================

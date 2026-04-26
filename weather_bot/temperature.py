@@ -92,7 +92,7 @@ def _process_temperature_bundle(bundle: dict, created_at: datetime) -> dict[str,
         for bucket in buckets:
             bucket["event_slug"] = event_slug
         forecast_data = get_both_bucket_probabilities(city_slug, event_date, buckets)
-        if not any(forecast_data.get(key) is not None for key in ("wu", "openmeteo", "vc", "noaa")):
+        if not any(forecast_data.get(key) is not None for key in ("wu", "openmeteo", "vc", "noaa", "weatherapi")):
             return _bundle_result(skipped_events=1)
         discrepancies = find_discrepancies(
             event_title=str(event.get("title") or "Unknown"),
@@ -108,6 +108,8 @@ def _process_temperature_bundle(bundle: dict, created_at: datetime) -> dict[str,
             vc_temp=forecast_data.get("vc_temp"),
             noaa_probs=forecast_data.get("noaa"),
             noaa_temp=forecast_data.get("noaa_temp"),
+            weatherapi_probs=forecast_data.get("weatherapi"),
+            weatherapi_temp=forecast_data.get("weatherapi_temp"),
         )
         event_end = _parse_event_end_time(event.get("endDate"))
         signals = [
@@ -159,6 +161,7 @@ def _build_temperature_signal(*, event: dict, discrepancy: dict, event_end: date
         "openmeteo": discrepancy.get("om_prob"),
         "visual_crossing": discrepancy.get("vc_prob"),
         "noaa": discrepancy.get("noaa_prob"),
+        "weatherapi": discrepancy.get("weatherapi_prob"),
     }
     available = [float(value) for value in forecast_probs.values() if value is not None]
     dispersion = max(available) - min(available) if len(available) >= 2 else 0.0
@@ -186,6 +189,7 @@ def _build_temperature_signal(*, event: dict, discrepancy: dict, event_end: date
         om_temp=_as_float(discrepancy.get("om_temp")),
         vc_temp=_as_float(discrepancy.get("vc_temp")),
         noaa_temp=_as_float(discrepancy.get("noaa_temp")),
+        weatherapi_temp=_as_float(discrepancy.get("weatherapi_temp")),
         source_probabilities=forecast_probs,
     )
     return WeatherSignal(

@@ -53,6 +53,7 @@ def _ha_option(name: str) -> str:
 # API keys from .env or HA options
 WU_API_KEY = os.getenv("WU_API_KEY") or _ha_option("wu_api_key")
 VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY") or _ha_option("visual_crossing_api_key")
+WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY") or _ha_option("weatherapi_key")
 
 
 def _int_env(name: str, default: int) -> int:
@@ -75,6 +76,35 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _bool_setting(env_name: str, ha_name: str, default: bool) -> bool:
+    raw = os.getenv(env_name)
+    if raw is None or not str(raw).strip():
+        raw = _ha_option(ha_name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+VISUAL_CROSSING_FREE_PLAN_MODE = _bool_setting(
+    "VISUAL_CROSSING_FREE_PLAN_MODE",
+    "visual_crossing_free_plan_mode",
+    True,
+)
+VISUAL_CROSSING_ENABLE_TEMPERATURE = _bool_setting(
+    "VISUAL_CROSSING_ENABLE_TEMPERATURE",
+    "visual_crossing_enable_temperature",
+    True,
+)
+VISUAL_CROSSING_ENABLE_REVIEW_TEMPERATURE = _bool_setting(
+    "VISUAL_CROSSING_ENABLE_REVIEW_TEMPERATURE",
+    "visual_crossing_enable_review_temperature",
+    False,
+)
+WEATHERAPI_ENABLE_TEMPERATURE = _bool_setting(
+    "WEATHERAPI_ENABLE_TEMPERATURE",
+    "weatherapi_enable_temperature",
+    bool(WEATHERAPI_KEY),
+)
 OPENMETEO_MAX_CONCURRENT = _int_env("OPENMETEO_MAX_CONCURRENT", 1)
 OPENMETEO_MAX_ATTEMPTS = _int_env("OPENMETEO_MAX_ATTEMPTS", 3)
 OPENMETEO_MIN_INTERVAL_SECONDS = _float_env("OPENMETEO_MIN_INTERVAL_SECONDS", 1.0)
@@ -83,19 +113,36 @@ OPENMETEO_FORECAST_WINDOW_DAYS = _int_env("OPENMETEO_FORECAST_WINDOW_DAYS", 10)
 OPENMETEO_CACHE_TTL_SECONDS = _float_env("OPENMETEO_CACHE_TTL_SECONDS", 900.0)
 WU_MAX_CONCURRENT = _int_env("WU_MAX_CONCURRENT", 1)
 WU_CACHE_TTL_SECONDS = _float_env("WU_CACHE_TTL_SECONDS", 900.0)
+WEATHERAPI_CACHE_TTL_SECONDS = _float_env("WEATHERAPI_CACHE_TTL_SECONDS", 3600.0)
 VISUAL_CROSSING_MAX_CONCURRENT = _int_env("VISUAL_CROSSING_MAX_CONCURRENT", 1)
 VISUAL_CROSSING_MAX_ATTEMPTS = _int_env("VISUAL_CROSSING_MAX_ATTEMPTS", 3)
+VISUAL_CROSSING_RATE_LIMIT_COOLDOWN_SECONDS = _float_env(
+    "VISUAL_CROSSING_RATE_LIMIT_COOLDOWN_SECONDS",
+    3600.0 if VISUAL_CROSSING_FREE_PLAN_MODE else 900.0,
+)
+VISUAL_CROSSING_FORECAST_WINDOW_DAYS = _int_env("VISUAL_CROSSING_FORECAST_WINDOW_DAYS", 15)
+VISUAL_CROSSING_CACHE_TTL_SECONDS = _float_env(
+    "VISUAL_CROSSING_CACHE_TTL_SECONDS",
+    21600.0 if VISUAL_CROSSING_FREE_PLAN_MODE else 7200.0,
+)
 _openmeteo_gate = threading.BoundedSemaphore(OPENMETEO_MAX_CONCURRENT)
 _wu_gate = threading.BoundedSemaphore(WU_MAX_CONCURRENT)
 _visual_crossing_gate = threading.BoundedSemaphore(VISUAL_CROSSING_MAX_CONCURRENT)
 _openmeteo_rate_limit_lock = threading.Lock()
 _openmeteo_cache_lock = threading.Lock()
 _wu_cache_lock = threading.Lock()
+_weatherapi_cache_lock = threading.Lock()
+_visual_crossing_rate_limit_lock = threading.Lock()
+_visual_crossing_cache_lock = threading.Lock()
 _openmeteo_disabled_until_monotonic = 0.0
 _openmeteo_last_request_monotonic = 0.0
 _openmeteo_cooldown_notice_sent = False
 _openmeteo_daily_cache: Dict[str, Dict[str, object]] = {}
 _wu_daily_cache: Dict[str, Dict[str, object]] = {}
+_weatherapi_daily_cache: Dict[str, Dict[str, object]] = {}
+_visual_crossing_disabled_until_monotonic = 0.0
+_visual_crossing_cooldown_notice_sent = False
+_visual_crossing_daily_cache: Dict[str, Dict[str, object]] = {}
 _visual_crossing_auth_lock = threading.Lock()
 _visual_crossing_auth_failed = False
 
@@ -242,6 +289,92 @@ def _store_wu_daily_cache(city_slug: str, temps: Dict[str, Optional[float]]) -> 
         }
 
 
+def _weatherapi_cached_temp(city_slug: str, target_date: date) -> Optional[float]:
+    key = target_date.isoformat()
+    now = time.monotonic()
+    with _weatherapi_cache_lock:
+        entry = _weatherapi_daily_cache.get(city_slug)
+        if not entry:
+            return None
+        expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+        if expires_at <= now:
+            _weatherapi_daily_cache.pop(city_slug, None)
+            return None
+        temps = entry.get("temps", {})
+        if not isinstance(temps, dict) or key not in temps:
+            return None
+        value = temps.get(key)
+        return None if value is None else float(value)
+
+
+def _store_weatherapi_daily_cache(city_slug: str, temps: Dict[str, Optional[float]]) -> None:
+    with _weatherapi_cache_lock:
+        _weatherapi_daily_cache[city_slug] = {
+            "temps": dict(temps),
+            "expires_at": time.monotonic() + WEATHERAPI_CACHE_TTL_SECONDS,
+        }
+
+
+def _visual_crossing_cooldown_remaining() -> float:
+    with _visual_crossing_rate_limit_lock:
+        return max(0.0, _visual_crossing_disabled_until_monotonic - time.monotonic())
+
+
+def _set_visual_crossing_cooldown(seconds: float) -> None:
+    global _visual_crossing_disabled_until_monotonic, _visual_crossing_cooldown_notice_sent
+    cooldown = max(0.0, float(seconds))
+    if cooldown <= 0:
+        return
+    with _visual_crossing_rate_limit_lock:
+        _visual_crossing_disabled_until_monotonic = max(
+            _visual_crossing_disabled_until_monotonic,
+            time.monotonic() + cooldown,
+        )
+        _visual_crossing_cooldown_notice_sent = False
+
+
+def _maybe_log_visual_crossing_cooldown(rate_limit_label: str) -> bool:
+    global _visual_crossing_cooldown_notice_sent
+    remaining = _visual_crossing_cooldown_remaining()
+    if remaining <= 0:
+        return False
+    with _visual_crossing_rate_limit_lock:
+        if _visual_crossing_cooldown_notice_sent:
+            return True
+        _visual_crossing_cooldown_notice_sent = True
+    print(
+        f"    ⚠️  Visual Crossing cooling down for {remaining:.0f}s after rate limits; "
+        f"skipping {rate_limit_label}"
+    )
+    return True
+
+
+def _visual_crossing_cached_temp(city_slug: str, target_date: date) -> Optional[float]:
+    key = target_date.isoformat()
+    now = time.monotonic()
+    with _visual_crossing_cache_lock:
+        entry = _visual_crossing_daily_cache.get(city_slug)
+        if not entry:
+            return None
+        expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+        if expires_at <= now:
+            _visual_crossing_daily_cache.pop(city_slug, None)
+            return None
+        temps = entry.get("temps", {})
+        if not isinstance(temps, dict) or key not in temps:
+            return None
+        value = temps.get(key)
+        return None if value is None else float(value)
+
+
+def _store_visual_crossing_daily_cache(city_slug: str, temps: Dict[str, Optional[float]]) -> None:
+    with _visual_crossing_cache_lock:
+        _visual_crossing_daily_cache[city_slug] = {
+            "temps": dict(temps),
+            "expires_at": time.monotonic() + VISUAL_CROSSING_CACHE_TTL_SECONDS,
+        }
+
+
 def _wu_daily_forecast_temps(data: dict) -> Dict[str, Optional[float]]:
     raw_dates = data.get("validTimeLocal") or []
     raw_temps = (
@@ -283,6 +416,62 @@ def _openmeteo_daily_temps(data: dict, *, fallback_date: date) -> Dict[str, Opti
         value = raw_temps[0]
         temps[fallback_date.isoformat()] = None if value is None else float(value)
     return temps
+
+
+def _visual_crossing_daily_temps(data: dict, *, fallback_date: date) -> Dict[str, Optional[float]]:
+    raw_days = data.get("days") or []
+    temps: Dict[str, Optional[float]] = {}
+    for day in raw_days:
+        if not isinstance(day, dict):
+            continue
+        key = str(day.get("datetime") or "").strip()
+        if not key:
+            continue
+        value = day.get("tempmax")
+        temps[key] = None if value is None else float(value)
+    if temps:
+        return temps
+    tempmax = data.get("tempmax")
+    if tempmax is not None:
+        temps[fallback_date.isoformat()] = float(tempmax)
+    return temps
+
+
+def _weatherapi_daily_temps(data: dict) -> Dict[str, Optional[float]]:
+    forecast = data.get("forecast", {}) if isinstance(data, dict) else {}
+    raw_days = forecast.get("forecastday") or []
+    temps: Dict[str, Optional[float]] = {}
+    for day in raw_days:
+        if not isinstance(day, dict):
+            continue
+        key = str(day.get("date") or "").strip()
+        if not key:
+            continue
+        day_payload = day.get("day", {}) if isinstance(day.get("day"), dict) else {}
+        value = day_payload.get("maxtemp_f")
+        if value is None:
+            value = day_payload.get("maxtemp_c")
+        temps[key] = None if value is None else float(value)
+    return temps
+
+
+def _visual_crossing_uses_forecast_window(target_date: date) -> bool:
+    today = date.today()
+    if target_date < today:
+        return False
+    horizon_end = today + timedelta(days=max(0, VISUAL_CROSSING_FORECAST_WINDOW_DAYS - 1))
+    return target_date <= horizon_end
+
+
+def _provider_context(provider_context: str) -> str:
+    return "review" if str(provider_context or "").strip().lower() == "review" else "scheduled"
+
+
+def _in_provider_window(target_date: date, *, past_days: int, future_days: int) -> bool:
+    today = date.today()
+    earliest = today - timedelta(days=max(0, int(past_days)))
+    latest = today + timedelta(days=max(0, int(future_days)))
+    return earliest <= target_date <= latest
 
 
 def _visual_crossing_disabled() -> bool:
@@ -417,7 +606,12 @@ UNCERTAINTY_C = 1.5   # °C
 # WEATHER UNDERGROUND API
 # =============================================================
 
-def get_wu_forecast_max_temp(city_slug: str, target_date: date) -> Optional[float]:
+def get_wu_forecast_max_temp(
+    city_slug: str,
+    target_date: date,
+    *,
+    provider_context: str = "scheduled",
+) -> Optional[float]:
     """
     Fetches the daily max temperature from Weather Company / WU.
 
@@ -441,6 +635,9 @@ def get_wu_forecast_max_temp(city_slug: str, target_date: date) -> Optional[floa
 
     coords = CITY_COORDS.get(city_slug)
     if not coords:
+        return None
+
+    if _provider_context(provider_context) == "review" and not _in_provider_window(target_date, past_days=1, future_days=5):
         return None
 
     today = date.today()
@@ -525,7 +722,12 @@ def get_wu_forecast_max_temp(city_slug: str, target_date: date) -> Optional[floa
 # OPEN-METEO API (free backup)
 # =============================================================
 
-def get_openmeteo_forecast_max_temp(city_slug: str, target_date: date) -> Optional[float]:
+def get_openmeteo_forecast_max_temp(
+    city_slug: str,
+    target_date: date,
+    *,
+    provider_context: str = "scheduled",
+) -> Optional[float]:
     """
     Fetches the forecasted daily max temperature from Open-Meteo.
     Free, no API key needed, good global coverage.
@@ -540,6 +742,9 @@ def get_openmeteo_forecast_max_temp(city_slug: str, target_date: date) -> Option
         float — max temp in city's native unit (°F or °C)
         None  — if call fails
     """
+
+    if _provider_context(provider_context) == "review" and not _in_provider_window(target_date, past_days=1, future_days=7):
+        return None
 
     coords = CITY_COORDS.get(city_slug)
     if not coords:
@@ -589,7 +794,12 @@ def get_openmeteo_forecast_max_temp(city_slug: str, target_date: date) -> Option
 # VISUAL CROSSING API (free third source, 15-day global forecast)
 # =============================================================
 
-def get_visual_crossing_forecast_max_temp(city_slug: str, target_date: date) -> Optional[float]:
+def get_visual_crossing_forecast_max_temp(
+    city_slug: str,
+    target_date: date,
+    *,
+    provider_context: str = "scheduled",
+) -> Optional[float]:
     """
     Fetches the daily max temperature from Visual Crossing.
     Free tier: 1000 records/day. No restrictions on forecast range.
@@ -603,20 +813,28 @@ def get_visual_crossing_forecast_max_temp(city_slug: str, target_date: date) -> 
         None  — if API key missing or call fails
     """
 
-    if not VISUAL_CROSSING_API_KEY or _visual_crossing_disabled():
+    if _provider_context(provider_context) == "review" and not VISUAL_CROSSING_ENABLE_REVIEW_TEMPERATURE:
+        return None
+
+    if not VISUAL_CROSSING_ENABLE_TEMPERATURE or not VISUAL_CROSSING_API_KEY or _visual_crossing_disabled():
         return None
 
     coords = CITY_COORDS.get(city_slug)
     if not coords:
         return None
 
+    cached = _visual_crossing_cached_temp(city_slug, target_date)
+    if cached is not None:
+        return cached
+
     lat        = coords["lat"]
     lon        = coords["lon"]
     unit       = coords["unit"]
     unit_group = "us" if unit == "fahrenheit" else "metric"
+    use_forecast_window = _visual_crossing_uses_forecast_window(target_date)
 
     data = get_visual_crossing_timeline_json(
-        path=f"{lat},{lon}/{target_date.isoformat()}",
+        path=f"{lat},{lon}" if use_forecast_window else f"{lat},{lon}/{target_date.isoformat()}",
         params={
             "key": VISUAL_CROSSING_API_KEY,
             "unitGroup": unit_group,
@@ -629,10 +847,76 @@ def get_visual_crossing_forecast_max_temp(city_slug: str, target_date: date) -> 
     )
     if not data:
         return None
-    days = data.get("days", [])
-    if not days or days[0].get("tempmax") is None:
+    temps = _visual_crossing_daily_temps(data, fallback_date=target_date)
+    if not temps:
         return None
-    return float(days[0]["tempmax"])
+    _store_visual_crossing_daily_cache(city_slug, temps)
+    value = temps.get(target_date.isoformat())
+    return None if value is None else float(value)
+
+
+def get_weatherapi_forecast_max_temp(
+    city_slug: str,
+    target_date: date,
+    *,
+    provider_context: str = "scheduled",
+) -> Optional[float]:
+    """
+    Fetches the daily max temperature from WeatherAPI.com's free forecast tier.
+    Forecast access is limited to today through today+2.
+    """
+
+    _provider_context(provider_context)
+    if not WEATHERAPI_ENABLE_TEMPERATURE or not WEATHERAPI_KEY:
+        return None
+    if not _in_provider_window(target_date, past_days=0, future_days=2):
+        return None
+
+    coords = CITY_COORDS.get(city_slug)
+    if not coords:
+        return None
+
+    cached = _weatherapi_cached_temp(city_slug, target_date)
+    if cached is not None:
+        return cached
+
+    try:
+        response = requests.get(
+            "https://api.weatherapi.com/v1/forecast.json",
+            params={
+                "key": WEATHERAPI_KEY,
+                "q": f"{coords['lat']},{coords['lon']}",
+                "days": 3,
+                "alerts": "no",
+                "aqi": "no",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        raw_days = ((data.get("forecast", {}) or {}).get("forecastday") or []) if isinstance(data, dict) else []
+        temps: Dict[str, Optional[float]] = {}
+        use_celsius = coords.get("unit") == "celsius"
+        for item in raw_days:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("date") or "").strip()
+            if not key:
+                continue
+            day_payload = item.get("day", {}) if isinstance(item.get("day"), dict) else {}
+            raw_value = day_payload.get("maxtemp_c") if use_celsius else day_payload.get("maxtemp_f")
+            if raw_value is None:
+                fallback_value = day_payload.get("maxtemp_f") if use_celsius else day_payload.get("maxtemp_c")
+                raw_value = fallback_value
+            temps[key] = None if raw_value is None else float(raw_value)
+        if not temps:
+            return None
+        _store_weatherapi_daily_cache(city_slug, temps)
+        value = temps.get(target_date.isoformat())
+        return None if value is None else float(value)
+    except Exception as exc:
+        print(f"    âš ï¸  WeatherAPI failed for {city_slug}: {_format_request_error(exc)}")
+        return None
 
 
 # =============================================================
@@ -647,7 +931,12 @@ NOAA_HEADERS = {
 }
 
 
-def get_noaa_forecast_max_temp(city_slug: str, target_date: date) -> Optional[float]:
+def get_noaa_forecast_max_temp(
+    city_slug: str,
+    target_date: date,
+    *,
+    provider_context: str = "scheduled",
+) -> Optional[float]:
     """
     Fetches the daily max temperature from NOAA/NWS.
     Free, no API key required. US cities only (fahrenheit markets).
@@ -664,6 +953,9 @@ def get_noaa_forecast_max_temp(city_slug: str, target_date: date) -> Optional[fl
         float — max temp in °F
         None  — if city is non-US, call fails, or date out of range
     """
+    if _provider_context(provider_context) == "review" and not _in_provider_window(target_date, past_days=0, future_days=6):
+        return None
+
     coords = CITY_COORDS.get(city_slug)
     if not coords:
         return None
@@ -718,10 +1010,14 @@ def get_visual_crossing_timeline_json(
 ) -> Optional[dict]:
     if _visual_crossing_disabled():
         return None
+    if _maybe_log_visual_crossing_cooldown(rate_limit_label):
+        return None
     url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{path}"
     last_error: Exception | None = None
     with _visual_crossing_gate:
         if _visual_crossing_disabled():
+            return None
+        if _maybe_log_visual_crossing_cooldown(rate_limit_label):
             return None
         for attempt in range(1, VISUAL_CROSSING_MAX_ATTEMPTS + 1):
             try:
@@ -765,6 +1061,8 @@ def get_visual_crossing_timeline_json(
                 last_error = exc
                 break
     if last_error is not None:
+        if isinstance(last_error, requests.HTTPError) and last_error.response is not None and last_error.response.status_code == 429:
+            _set_visual_crossing_cooldown(VISUAL_CROSSING_RATE_LIMIT_COOLDOWN_SECONDS)
         if isinstance(last_error, requests.HTTPError) and last_error.response is not None and last_error.response.status_code in {401, 403}:
             print(
                 "    ⚠️  Visual Crossing auth failed; disabling VC for this run. "
@@ -924,10 +1222,12 @@ def _provider_status_label(
     return f"{name} N/A"
 
 
-def _wu_status_reason(target_date: date) -> str:
+def _wu_status_reason(target_date: date, *, provider_context: str = "scheduled") -> str:
     if not WU_API_KEY:
         return "disabled"
     today = date.today()
+    if _provider_context(provider_context) == "review" and not _in_provider_window(target_date, past_days=1, future_days=5):
+        return "review horizon"
     if target_date < today:
         return "obs unavailable"
     if target_date > today + timedelta(days=5):
@@ -935,33 +1235,61 @@ def _wu_status_reason(target_date: date) -> str:
     return "unavailable"
 
 
-def _openmeteo_status_reason() -> str:
+def _openmeteo_status_reason(*, provider_context: str = "scheduled", target_date: Optional[date] = None) -> str:
+    if target_date is not None and _provider_context(provider_context) == "review":
+        if not _in_provider_window(target_date, past_days=1, future_days=7):
+            return "review horizon"
     if _openmeteo_cooldown_remaining() > 0:
         return "cooldown"
     return "unavailable"
 
 
-def _visual_crossing_status_reason() -> str:
-    if not VISUAL_CROSSING_API_KEY:
+def _visual_crossing_status_reason(*, provider_context: str = "scheduled") -> str:
+    if not VISUAL_CROSSING_ENABLE_TEMPERATURE or not VISUAL_CROSSING_API_KEY:
         return "disabled"
+    if _provider_context(provider_context) == "review" and not VISUAL_CROSSING_ENABLE_REVIEW_TEMPERATURE:
+        return "review-disabled"
     if _visual_crossing_disabled():
         return "auth-disabled"
+    if _visual_crossing_cooldown_remaining() > 0:
+        return "cooldown"
     return "unavailable"
 
 
-def _noaa_status_reason(city_slug: str, target_date: date) -> str:
+def _weatherapi_status_reason(target_date: date) -> str:
+    if not WEATHERAPI_ENABLE_TEMPERATURE or not WEATHERAPI_KEY:
+        return "disabled"
+    if not _in_provider_window(target_date, past_days=0, future_days=2):
+        return "3d horizon"
+    return "unavailable"
+
+
+def _noaa_status_reason(city_slug: str, target_date: date, *, provider_context: str = "scheduled") -> str:
     coords = CITY_COORDS.get(city_slug, {})
     if coords.get("unit") != "fahrenheit":
         return "us-only"
+    if _provider_context(provider_context) == "review" and not _in_provider_window(target_date, past_days=0, future_days=6):
+        return "review horizon"
     if target_date > date.today() + timedelta(days=6):
         return "7d horizon"
     return "unavailable"
+
+
+def _call_temperature_provider(provider, city_slug: str, target_date: date, provider_context: str) -> Optional[float]:
+    try:
+        return provider(city_slug, target_date, provider_context=provider_context)
+    except TypeError as exc:
+        if "provider_context" not in str(exc):
+            raise
+        return provider(city_slug, target_date)
 
 
 def get_both_bucket_probabilities(
     city_slug:   str,
     target_date: date,
     buckets:     list,
+    *,
+    provider_context: str = "scheduled",
 ) -> Dict[str, Optional[Dict]]:
     """
     Returns bucket probabilities from all configured temperature sources:
@@ -988,40 +1316,50 @@ def get_both_bucket_probabilities(
     unit_sym = "°F" if unit == "fahrenheit" else "°C"
     station  = coords.get("station", "?")
 
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="weather-provider") as executor:
-        future_wu = executor.submit(get_wu_forecast_max_temp, city_slug, target_date)
-        future_om = executor.submit(get_openmeteo_forecast_max_temp, city_slug, target_date)
-        future_vc = executor.submit(get_visual_crossing_forecast_max_temp, city_slug, target_date)
-        future_noaa = executor.submit(get_noaa_forecast_max_temp, city_slug, target_date)
+    context = _provider_context(provider_context)
+
+    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="weather-provider") as executor:
+        future_wu = executor.submit(_call_temperature_provider, get_wu_forecast_max_temp, city_slug, target_date, context)
+        future_om = executor.submit(_call_temperature_provider, get_openmeteo_forecast_max_temp, city_slug, target_date, context)
+        future_vc = executor.submit(_call_temperature_provider, get_visual_crossing_forecast_max_temp, city_slug, target_date, context)
+        future_noaa = executor.submit(_call_temperature_provider, get_noaa_forecast_max_temp, city_slug, target_date, context)
+        future_weatherapi = executor.submit(_call_temperature_provider, get_weatherapi_forecast_max_temp, city_slug, target_date, context)
         wu_temp = future_wu.result()
         om_temp = future_om.result()
         vc_temp = future_vc.result()
         noaa_temp = future_noaa.result()  # US only, None for international
+        weatherapi_temp = future_weatherapi.result()
 
     status_parts = [
         _provider_status_label(
             name=f"WU({station})",
             temp=wu_temp,
             unit_sym=unit_sym,
-            unavailable_reason=_wu_status_reason(target_date),
+            unavailable_reason=_wu_status_reason(target_date, provider_context=context),
         ),
         _provider_status_label(
             name="OM",
             temp=om_temp,
             unit_sym=unit_sym,
-            unavailable_reason=_openmeteo_status_reason(),
+            unavailable_reason=_openmeteo_status_reason(provider_context=context, target_date=target_date),
         ),
         _provider_status_label(
             name="VC",
             temp=vc_temp,
             unit_sym=unit_sym,
-            unavailable_reason=_visual_crossing_status_reason(),
+            unavailable_reason=_visual_crossing_status_reason(provider_context=context),
         ),
         _provider_status_label(
             name="NOAA",
             temp=noaa_temp,
             unit_sym=unit_sym,
-            unavailable_reason=_noaa_status_reason(city_slug, target_date),
+            unavailable_reason=_noaa_status_reason(city_slug, target_date, provider_context=context),
+        ),
+        _provider_status_label(
+            name="WA",
+            temp=weatherapi_temp,
+            unit_sym=unit_sym,
+            unavailable_reason=_weatherapi_status_reason(target_date),
         ),
     ]
     print(f"    🌦️  Sources: {' | '.join(status_parts)}")
@@ -1030,15 +1368,18 @@ def get_both_bucket_probabilities(
     om_probs   = _probs_from_temp(om_temp,   buckets, unit) if om_temp   is not None else None
     vc_probs   = _probs_from_temp(vc_temp,   buckets, unit) if vc_temp   is not None else None
     noaa_probs = _probs_from_temp(noaa_temp, buckets, unit) if noaa_temp is not None else None
+    weatherapi_probs = _probs_from_temp(weatherapi_temp, buckets, unit) if weatherapi_temp is not None else None
 
     return {
         "wu":        wu_probs,
         "openmeteo": om_probs,
         "vc":        vc_probs,
         "noaa":      noaa_probs,
+        "weatherapi": weatherapi_probs,
         "wu_temp":   wu_temp,
         "om_temp":   om_temp,
         "vc_temp":   vc_temp,
         "noaa_temp": noaa_temp,
+        "weatherapi_temp": weatherapi_temp,
         "unit":      unit_sym,
     }

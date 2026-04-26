@@ -26,6 +26,7 @@ class ForecastSnapshot:
     om_temp: float | None = None
     vc_temp: float | None = None
     noaa_temp: float | None = None
+    weatherapi_temp: float | None = None
     source_probabilities: dict[str, float | None] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

@@ -8,18 +8,23 @@ import threading
 import time
 from collections import deque
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import requests
 
+from forecast.forecast_engine import get_both_bucket_probabilities
+from logic.discrepancy_logic import find_discrepancies
 from polymarket.polymarket_prices import get_yes_price
+from precipitation.precip_forecast import calc_precip_bucket_probs, get_om_monthly_precip, get_vc_monthly_precip
+from precipitation.precip_parser import parse_precip_bucket
+from parser.weather_parser import parse_temperature_bucket
 
 from .messages import format_resolution_message, format_scan_summary, format_signal_message
 from .models import ResolutionOutcome, ScanBatch, WeatherSignal
-from .precipitation_signals import scan_precipitation_signals
-from .temperature import scan_temperature_signals
+from .precipitation_signals import _build_precip_signal, scan_precipitation_signals
+from .temperature import _build_temperature_signal, scan_temperature_signals
 
 
 logger = logging.getLogger(__name__)
@@ -376,17 +381,25 @@ class WeatherRuntime:
             self._update_state(open_position_review_in_progress=True)
             reviewed_count = 0
             closed_count = 0
-            market_groups = sorted({str(item.get("market_type") or "") for item in positions})
             try:
                 self.settle_due_positions(send_alerts=False)
+                active_positions = self.tracker.get_dashboard_paper_positions(limit=500, status="open")
+                if market_types:
+                    active_positions = [item for item in active_positions if str(item.get("market_type") or "") in market_types]
+                market_groups = sorted({str(item.get("market_type") or "") for item in active_positions})
                 for market_type in market_groups:
-                    batch = self._get_review_weather_batch(market_type)
+                    type_positions = [
+                        item for item in active_positions if str(item.get("market_type") or "") == market_type
+                    ]
+                    batch, refresh_market_prices = self._get_review_weather_batch(market_type, type_positions)
                     allow_missing_signal_close = int(batch.error_count or 0) == 0
                     summary = self._review_positions_for_signals(
                         scan_type=market_type,
                         signals=batch.signals,
+                        positions=type_positions,
                         trigger=reason,
                         allow_close_on_missing_signal=allow_missing_signal_close,
+                        refresh_market_prices=refresh_market_prices,
                     )
                     reviewed_count += int(summary["reviewed"])
                     closed_count += int(summary["closed"])
@@ -578,18 +591,25 @@ class WeatherRuntime:
         *,
         scan_type: str,
         signals: list[WeatherSignal],
+        positions: list[dict[str, Any]] | None = None,
         trigger: str,
         allow_close_on_missing_signal: bool,
+        refresh_market_prices: bool = True,
     ) -> dict[str, int]:
-        positions = [
-            item
-            for item in self.tracker.get_dashboard_paper_positions(limit=500, status="open")
-            if str(item.get("market_type") or "") == scan_type
-        ]
+        if positions is None:
+            positions = [
+                item
+                for item in self.tracker.get_dashboard_paper_positions(limit=500, status="open")
+                if str(item.get("market_type") or "") == scan_type
+            ]
         if not positions:
             return {"reviewed": 0, "closed": 0}
 
-        signal_map = self._build_review_signal_map(signals=signals, positions=positions)
+        signal_map = self._build_review_signal_map(
+            signals=signals,
+            positions=positions,
+            refresh_market_prices=refresh_market_prices,
+        )
         reviewed = 0
         closed = 0
         reviewed_at = datetime.now(timezone.utc).isoformat()
@@ -637,46 +657,72 @@ class WeatherRuntime:
         return {"reviewed": reviewed, "closed": closed}
 
     def _open_position_weather_refresh_interval_seconds(self) -> int:
-        minutes = int(getattr(self.config.app, "open_position_weather_refresh_minutes", 15) or 0)
+        minutes = int(getattr(self.config.app, "open_position_weather_refresh_minutes", 60) or 0)
         if minutes <= 0:
             return 0
         return max(60, minutes * 60)
 
     def _store_open_position_weather_batch(self, market_type: str, batch: ScanBatch) -> None:
         self._open_position_weather_cache[str(market_type or "")] = {
+            "scope": "scan",
             "batch": batch,
             "refreshed_at_monotonic": time.monotonic(),
         }
 
-    def _get_review_weather_batch(self, market_type: str) -> ScanBatch:
+    def _get_review_weather_batch(
+        self,
+        market_type: str,
+        positions: list[dict[str, Any]],
+    ) -> tuple[ScanBatch, bool]:
         cache_key = str(market_type or "")
+        if not positions:
+            return self._empty_batch(cache_key), False
+
         cache_entry = self._open_position_weather_cache.get(cache_key)
         refresh_interval_s = self._open_position_weather_refresh_interval_seconds()
         now = time.monotonic()
-        if cache_entry is not None and refresh_interval_s > 0:
+        position_keys = self._review_position_keys(cache_key, positions)
+
+        if (
+            cache_entry is not None
+            and str(cache_entry.get("scope") or "") == "review"
+            and tuple(cache_entry.get("position_keys") or ()) == position_keys
+            and refresh_interval_s > 0
+        ):
             age_s = now - float(cache_entry.get("refreshed_at_monotonic") or 0.0)
             if age_s < refresh_interval_s:
-                return cache_entry["batch"]
+                payload = list(cache_entry.get("payload") or [])
+                return self._build_review_batch_from_payload(cache_key, payload), False
+
         try:
-            if cache_key == "temperature":
-                batch = self.temperature_scanner(limit=self.config.temperature.scan_limit)
-            elif cache_key == "precipitation":
-                batch = self.precipitation_scanner()
-            else:
-                return self._empty_batch(cache_key)
+            payload = self._build_review_weather_payload(cache_key, positions)
+            batch = self._build_review_batch_from_payload(cache_key, payload)
+            self._open_position_weather_cache[cache_key] = {
+                "scope": "review",
+                "batch": batch,
+                "payload": payload,
+                "position_keys": position_keys,
+                "refreshed_at_monotonic": now,
+            }
+            return batch, False
         except Exception as exc:
             if cache_entry is not None:
-                logger.warning("open position weather refresh failed for %s; reusing cached batch: %s", cache_key, exc)
-                return cache_entry["batch"]
+                logger.warning("open position weather refresh failed for %s; reusing cached data: %s", cache_key, exc)
+                if str(cache_entry.get("scope") or "") == "review":
+                    payload = list(cache_entry.get("payload") or [])
+                    if payload:
+                        return self._build_review_batch_from_payload(cache_key, payload), False
+                batch = cache_entry.get("batch")
+                if isinstance(batch, ScanBatch):
+                    return batch, True
             raise
-        self._store_open_position_weather_batch(cache_key, batch)
-        return batch
 
     def _build_review_signal_map(
         self,
         *,
         signals: list[WeatherSignal],
         positions: list[dict[str, Any]],
+        refresh_market_prices: bool = True,
     ) -> dict[tuple[str, str], WeatherSignal]:
         active_markets = {
             str(position.get("market_slug") or "").strip()
@@ -697,8 +743,13 @@ class WeatherRuntime:
         if not base_signals:
             return {}
 
-        market_probs = self._fetch_review_market_probs(base_signals.keys())
         signal_map: dict[tuple[str, str], WeatherSignal] = {}
+        if not refresh_market_prices:
+            for market_slug, base_signal in base_signals.items():
+                signal_map[(market_slug, str(base_signal.direction or "").upper())] = base_signal
+            return signal_map
+
+        market_probs = self._fetch_review_market_probs(base_signals.keys())
         for market_slug, base_signal in base_signals.items():
             market_prob = market_probs.get(market_slug)
             if market_prob is None:
@@ -721,6 +772,294 @@ class WeatherRuntime:
                 logger.warning("open position review price refresh failed for %s: %s", slug, exc)
                 market_probs[slug] = None
         return market_probs
+
+    def _review_position_keys(self, market_type: str, positions: list[dict[str, Any]]) -> tuple[tuple[Any, ...], ...]:
+        keys: list[tuple[Any, ...]] = []
+        for position in positions:
+            market_slug = str(position.get("market_slug") or "").strip()
+            city_slug = str(position.get("city_slug") or "").strip()
+            label = self._review_position_label(position)
+            if market_type == "temperature":
+                event_date = str(position.get("event_date") or "").strip()
+                keys.append((market_slug, city_slug, event_date, label))
+                continue
+            if market_type == "precipitation":
+                year_month = self._review_precip_year_month(position)
+                if year_month is None:
+                    continue
+                year, month = year_month
+                keys.append((market_slug, city_slug, year, month, label))
+                continue
+            keys.append((market_slug, city_slug, label))
+        return tuple(sorted(set(keys)))
+
+    def _review_position_label(self, position: dict[str, Any]) -> str:
+        return str(position.get("target_label") or position.get("label") or "").strip()
+
+    def _build_review_weather_payload(self, market_type: str, positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if market_type == "temperature":
+            return self._build_review_temperature_payload(positions)
+        if market_type == "precipitation":
+            return self._build_review_precipitation_payload(positions)
+        return []
+
+    def _build_review_temperature_payload(self, positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[tuple[str, date], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+        for position in positions:
+            city_slug = str(position.get("city_slug") or "").strip()
+            event_date = self._review_event_date(position)
+            label = self._review_position_label(position)
+            bucket = parse_temperature_bucket(label) if label else None
+            if not city_slug or event_date is None or not isinstance(bucket, dict):
+                continue
+            grouped.setdefault((city_slug, event_date), []).append((position, bucket))
+
+        payload: list[dict[str, Any]] = []
+        for (city_slug, event_date), items in grouped.items():
+            buckets = [dict(bucket) for _, bucket in items]
+            forecast_data = get_both_bucket_probabilities(
+                city_slug,
+                event_date,
+                buckets,
+                provider_context="review",
+            )
+            provider_available = any(
+                forecast_data.get(key) is not None for key in ("wu", "openmeteo", "vc", "noaa", "weatherapi")
+            )
+            for position, bucket in items:
+                payload.append(
+                    {
+                        "market_type": "temperature",
+                        "market_slug": str(position.get("market_slug") or "").strip(),
+                        "event_slug": str(position.get("event_slug") or "").strip(),
+                        "event_title": str(position.get("event_title") or position.get("market_slug") or "Unknown market"),
+                        "city_slug": city_slug,
+                        "event_date": event_date.isoformat(),
+                        "label": bucket.get("label"),
+                        "bucket": dict(bucket),
+                        "liquidity": float(position.get("liquidity") or 0.0),
+                        "fallback_market_prob": _as_probability(
+                            position.get("market_probability") or position.get("mark_price") or position.get("entry_price")
+                        ),
+                        "remaining_to_resolution_s": _as_float(position.get("remaining_to_resolution_s")),
+                        "forecast_data": dict(forecast_data) if provider_available else None,
+                    }
+                )
+        return payload
+
+    def _build_review_precipitation_payload(self, positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[tuple[str, int, int], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+        for position in positions:
+            city_slug = str(position.get("city_slug") or "").strip()
+            year_month = self._review_precip_year_month(position)
+            label = self._review_position_label(position)
+            bucket = parse_precip_bucket(label) if label else None
+            if not city_slug or year_month is None or not isinstance(bucket, dict):
+                continue
+            year, month = year_month
+            grouped.setdefault((city_slug, year, month), []).append((position, bucket))
+
+        payload: list[dict[str, Any]] = []
+        for (city_slug, year, month), items in grouped.items():
+            om_data = get_om_monthly_precip(city_slug, year, month)
+            vc_data = get_vc_monthly_precip(city_slug, year, month)
+            provider_data = None
+            if om_data or vc_data:
+                observed = (om_data or vc_data)["observed"]
+                unit = str((om_data or vc_data)["unit"])
+                unique_buckets: dict[str, dict[str, Any]] = {}
+                for _, bucket in items:
+                    unique_buckets.setdefault(str(bucket.get("label") or ""), dict(bucket))
+                bucket_list = list(unique_buckets.values())
+                om_probs = calc_precip_bucket_probs(observed, om_data["forecast"], bucket_list, unit) if om_data else None
+                vc_probs = calc_precip_bucket_probs(observed, vc_data["forecast"], bucket_list, unit) if vc_data else None
+                provider_data = {
+                    "observed": observed,
+                    "openmeteo": om_probs,
+                    "vc": vc_probs,
+                    "om_temp": om_data["total_projected"] if om_data else None,
+                    "vc_temp": vc_data["total_projected"] if vc_data else None,
+                    "unit": unit,
+                }
+            for position, bucket in items:
+                payload.append(
+                    {
+                        "market_type": "precipitation",
+                        "market_slug": str(position.get("market_slug") or "").strip(),
+                        "event_slug": str(position.get("event_slug") or "").strip(),
+                        "event_title": str(position.get("event_title") or position.get("market_slug") or "Unknown market"),
+                        "city_slug": city_slug,
+                        "event_date": f"{year:04d}-{month:02d}-01",
+                        "label": bucket.get("label"),
+                        "bucket": dict(bucket),
+                        "liquidity": float(position.get("liquidity") or 0.0),
+                        "fallback_market_prob": _as_probability(
+                            position.get("market_probability") or position.get("mark_price") or position.get("entry_price")
+                        ),
+                        "forecast_data": provider_data,
+                    }
+                )
+        return payload
+
+    def _build_review_batch_from_payload(self, market_type: str, payload: list[dict[str, Any]]) -> ScanBatch:
+        if market_type == "temperature":
+            return self._build_temperature_review_batch(payload)
+        if market_type == "precipitation":
+            return self._build_precipitation_review_batch(payload)
+        return self._empty_batch(market_type)
+
+    def _build_temperature_review_batch(self, payload: list[dict[str, Any]]) -> ScanBatch:
+        created_at = datetime.now(timezone.utc)
+        market_probs = self._fetch_review_market_probs([item.get("market_slug") for item in payload])
+        signals: list[WeatherSignal] = []
+        error_count = 0
+        error_samples: list[str] = []
+        skipped_events = 0
+
+        for item in payload:
+            forecast_data = item.get("forecast_data")
+            if not isinstance(forecast_data, dict):
+                error_count += 1
+                skipped_events += 1
+                if len(error_samples) < 5:
+                    error_samples.append(f"temperature provider unavailable for {item.get('market_slug')}")
+                continue
+            market_slug = str(item.get("market_slug") or "").strip()
+            market_prob = market_probs.get(market_slug)
+            if market_prob is None:
+                market_prob = _as_probability(item.get("fallback_market_prob"))
+            if market_prob is None:
+                skipped_events += 1
+                continue
+            bucket = dict(item.get("bucket") or {})
+            bucket["market_yes_price"] = market_prob
+            bucket["market_slug"] = market_slug
+            bucket["event_slug"] = str(item.get("event_slug") or "")
+            bucket["liquidity"] = float(item.get("liquidity") or 0.0)
+            discrepancies = find_discrepancies(
+                event_title=str(item.get("event_title") or "Unknown"),
+                city_slug=str(item.get("city_slug") or ""),
+                event_date=str(item.get("event_date") or ""),
+                buckets=[bucket],
+                wu_probs=forecast_data.get("wu"),
+                om_probs=forecast_data.get("openmeteo"),
+                wu_temp=forecast_data.get("wu_temp"),
+                om_temp=forecast_data.get("om_temp"),
+                unit_symbol=str(forecast_data.get("unit") or "F"),
+                vc_probs=forecast_data.get("vc"),
+                vc_temp=forecast_data.get("vc_temp"),
+                noaa_probs=forecast_data.get("noaa"),
+                noaa_temp=forecast_data.get("noaa_temp"),
+                weatherapi_probs=forecast_data.get("weatherapi"),
+                weatherapi_temp=forecast_data.get("weatherapi_temp"),
+            )
+            event_end = self._review_event_end(created_at, item.get("remaining_to_resolution_s"))
+            for discrepancy in discrepancies:
+                signals.append(
+                    _build_temperature_signal(
+                        event={"title": item.get("event_title"), "slug": item.get("event_slug")},
+                        discrepancy=discrepancy,
+                        event_end=event_end,
+                        created_at=created_at,
+                    )
+                )
+
+        signals.sort(key=lambda signal: signal.score, reverse=True)
+        finished_at = datetime.now(timezone.utc).isoformat()
+        return ScanBatch(
+            scan_type="temperature",
+            signals=signals,
+            total_events=len(payload),
+            processed_events=len(payload),
+            flagged_events=len(signals),
+            skipped_events=skipped_events,
+            started_at=created_at.isoformat(),
+            finished_at=finished_at,
+            error_count=error_count,
+            error_samples=error_samples,
+        )
+
+    def _build_precipitation_review_batch(self, payload: list[dict[str, Any]]) -> ScanBatch:
+        created_at = datetime.now(timezone.utc)
+        market_probs = self._fetch_review_market_probs([item.get("market_slug") for item in payload])
+        signals: list[WeatherSignal] = []
+        error_count = 0
+        error_samples: list[str] = []
+        skipped_events = 0
+
+        for item in payload:
+            forecast_data = item.get("forecast_data")
+            if not isinstance(forecast_data, dict):
+                error_count += 1
+                skipped_events += 1
+                if len(error_samples) < 5:
+                    error_samples.append(f"precip provider unavailable for {item.get('market_slug')}")
+                continue
+            market_slug = str(item.get("market_slug") or "").strip()
+            market_prob = market_probs.get(market_slug)
+            if market_prob is None:
+                market_prob = _as_probability(item.get("fallback_market_prob"))
+            if market_prob is None:
+                skipped_events += 1
+                continue
+            bucket = dict(item.get("bucket") or {})
+            bucket["market_yes_price"] = market_prob
+            bucket["market_slug"] = market_slug
+            bucket["event_slug"] = str(item.get("event_slug") or "")
+            bucket["liquidity"] = float(item.get("liquidity") or 0.0)
+            discrepancies = find_discrepancies(
+                event_title=str(item.get("event_title") or "Unknown"),
+                city_slug=str(item.get("city_slug") or ""),
+                event_date=str(item.get("event_date") or ""),
+                buckets=[bucket],
+                wu_probs=None,
+                om_probs=forecast_data.get("openmeteo"),
+                wu_temp=forecast_data.get("observed"),
+                om_temp=forecast_data.get("om_temp"),
+                unit_symbol=str(forecast_data.get("unit") or "in"),
+                vc_probs=forecast_data.get("vc"),
+                vc_temp=forecast_data.get("vc_temp"),
+                noaa_probs=None,
+                noaa_temp=None,
+            )
+            for discrepancy in discrepancies:
+                signals.append(_build_precip_signal(discrepancy, created_at))
+
+        signals.sort(key=lambda signal: signal.score, reverse=True)
+        finished_at = datetime.now(timezone.utc).isoformat()
+        return ScanBatch(
+            scan_type="precipitation",
+            signals=signals,
+            total_events=len(payload),
+            processed_events=len(payload),
+            flagged_events=len(signals),
+            skipped_events=skipped_events,
+            started_at=created_at.isoformat(),
+            finished_at=finished_at,
+            error_count=error_count,
+            error_samples=error_samples,
+        )
+
+    def _review_event_date(self, position: dict[str, Any]) -> date | None:
+        raw = str(position.get("event_date") or "").strip()
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw[:10])
+        except ValueError:
+            return None
+
+    def _review_precip_year_month(self, position: dict[str, Any]) -> tuple[int, int] | None:
+        event_date = self._review_event_date(position)
+        if event_date is None:
+            return None
+        return event_date.year, event_date.month
+
+    def _review_event_end(self, created_at: datetime, remaining_to_resolution_s: Any) -> datetime | None:
+        seconds = _as_float(remaining_to_resolution_s)
+        if seconds is None:
+            return None
+        return created_at + timedelta(seconds=max(0.0, seconds))
 
     def _temperature_loop(self) -> None:
         self._loop_runner(

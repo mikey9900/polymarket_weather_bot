@@ -33,6 +33,11 @@ def _signal(
     *,
     direction: str = "YES",
     market_slug: str | None = None,
+    market_type: str = "temperature",
+    city_slug: str = "nyc",
+    event_date: str = "2026-04-25",
+    event_title: str = "Highest temperature in NYC on April 25",
+    label: str = "70-71F",
     market_prob: float = 0.25,
     forecast_prob: float = 0.80,
     edge: float = 0.55,
@@ -40,13 +45,13 @@ def _signal(
 ) -> WeatherSignal:
     return WeatherSignal(
         signal_key=key,
-        market_type="temperature",
-        event_title="Highest temperature in NYC on April 25",
+        market_type=market_type,
+        event_title=event_title,
         market_slug=market_slug or f"market-{key}",
         event_slug=f"event-{key}",
-        city_slug="nyc",
-        event_date="2026-04-25",
-        label="70-71F",
+        city_slug=city_slug,
+        event_date=event_date,
+        label=label,
         direction=direction,
         market_prob=market_prob,
         forecast_prob=forecast_prob,
@@ -60,15 +65,15 @@ def _signal(
         source_dispersion_pct=0.02,
         score=0.85,
         forecast_snapshot=ForecastSnapshot(
-            market_type="temperature",
-            city_slug="nyc",
-            event_date="2026-04-25",
+            market_type=market_type,
+            city_slug=city_slug,
+            event_date=event_date,
             unit="F",
             om_temp=72.0,
             vc_temp=73.0,
             source_probabilities={"openmeteo": 0.8, "visual_crossing": 0.79},
         ),
-        raw_payload={"event_title": "Highest temperature in NYC on April 25", "label": "70-71F", "direction": "YES"},
+        raw_payload={"event_title": event_title, "label": label, "direction": "YES"},
     )
 
 
@@ -504,6 +509,48 @@ def test_load_config_reads_second_level_scan_overrides(tmp_path: Path):
         encoding="utf-8",
     )
 
+
+def _precip_signal(
+    key: str = "rain-1",
+    *,
+    market_slug: str | None = None,
+    market_prob: float = 0.30,
+    forecast_prob: float = 0.78,
+) -> WeatherSignal:
+    return WeatherSignal(
+        signal_key=key,
+        market_type="precipitation",
+        event_title="Rainfall in NYC for April 2026",
+        market_slug=market_slug or f"precip-{key}",
+        event_slug=f"precip-event-{key}",
+        city_slug="nyc",
+        event_date="2026-04-01",
+        label="1 to 2 inches",
+        direction="YES",
+        market_prob=market_prob,
+        forecast_prob=forecast_prob,
+        edge=forecast_prob - market_prob,
+        edge_abs=abs(forecast_prob - market_prob),
+        edge_size="large",
+        confidence="confirmed",
+        source_count=2,
+        liquidity=450.0,
+        time_to_resolution_s=None,
+        source_dispersion_pct=0.02,
+        score=0.81,
+        forecast_snapshot=ForecastSnapshot(
+            market_type="precipitation",
+            city_slug="nyc",
+            event_date="2026-04-01",
+            unit="in",
+            observed_value=0.8,
+            om_temp=1.7,
+            vc_temp=1.6,
+            source_probabilities={"openmeteo": forecast_prob, "visual_crossing": 0.76},
+        ),
+        raw_payload={"event_title": "Rainfall in NYC for April 2026", "label": "1 to 2 inches", "direction": "YES"},
+    )
+
     config = load_config(config_path, ha_options_path=options_path)
 
     assert config.app.auto_temperature_scan_seconds == 5
@@ -848,7 +895,7 @@ def test_runtime_scan_export_failure_is_non_fatal(tmp_path: Path, monkeypatch):
     assert state["last_scan_export_error"] == "disk full"
 
 
-def test_runtime_review_closes_position_when_clean_scan_loses_edge(tmp_path: Path):
+def test_runtime_review_closes_position_when_targeted_refresh_loses_edge(tmp_path: Path, monkeypatch):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     tracker.ensure_paper_capital(1000.0)
@@ -859,7 +906,25 @@ def test_runtime_review_closes_position_when_clean_scan_loses_edge(tmp_path: Pat
         tracker=tracker,
         strategy_engine=strategy,
         telegram=TelegramClient(),
-        temperature_scanner=lambda *, limit=300: _batch(None),
+        temperature_scanner=lambda *, limit=300: (_ for _ in ()).throw(AssertionError("temperature scanner should not run")),
+        price_fetcher=lambda slug: 0.50,
+    )
+
+    monkeypatch.setattr(
+        "weather_bot.runtime.get_both_bucket_probabilities",
+        lambda city_slug, target_date, buckets, provider_context="scheduled": {
+            "wu": None,
+            "openmeteo": {buckets[0]["label"]: 0.52},
+            "vc": None,
+            "noaa": None,
+            "weatherapi": None,
+            "wu_temp": None,
+            "om_temp": 72.0,
+            "vc_temp": None,
+            "noaa_temp": None,
+            "weatherapi_temp": None,
+            "unit": "F",
+        },
     )
 
     summary = runtime.review_open_positions(reason="test_review_close")
@@ -871,27 +936,41 @@ def test_runtime_review_closes_position_when_clean_scan_loses_edge(tmp_path: Pat
     assert "No fresh qualifying signal" in positions[0]["exit_reason"]
 
 
-def test_runtime_review_reuses_cached_weather_scan_but_refreshes_market_price(tmp_path: Path):
+def test_runtime_review_reuses_cached_provider_payload_but_refreshes_market_price(tmp_path: Path, monkeypatch):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     tracker.ensure_paper_capital(1000.0)
     strategy = WeatherStrategyEngine(config, tracker)
     strategy.process_signals([_signal("cached-review-1")], auto_trade_enabled=True)
-    scan_calls: list[int] = []
+    provider_calls: list[tuple[str, str, tuple[str, ...]]] = []
     market_probs = iter([0.50, 0.79])
-
-    def temperature_scanner(*, limit=300) -> ScanBatch:
-        scan_calls.append(limit)
-        return _batch(_signal("cached-review-1"))
 
     runtime = WeatherRuntime(
         config=config,
         tracker=tracker,
         strategy_engine=strategy,
         telegram=TelegramClient(),
-        temperature_scanner=temperature_scanner,
+        temperature_scanner=lambda *, limit=300: (_ for _ in ()).throw(AssertionError("temperature scanner should not run")),
         price_fetcher=lambda slug: next(market_probs),
     )
+
+    def fake_bucket_probs(city_slug, target_date, buckets, provider_context="scheduled"):
+        provider_calls.append((city_slug, str(target_date), tuple(bucket["label"] for bucket in buckets)))
+        return {
+            "wu": None,
+            "openmeteo": {bucket["label"]: 0.80 for bucket in buckets},
+            "vc": None,
+            "noaa": None,
+            "weatherapi": None,
+            "wu_temp": None,
+            "om_temp": 72.0,
+            "vc_temp": None,
+            "noaa_temp": None,
+            "weatherapi_temp": None,
+            "unit": "F",
+        }
+
+    monkeypatch.setattr("weather_bot.runtime.get_both_bucket_probabilities", fake_bucket_probs)
 
     first = runtime.review_open_positions(reason="test_cached_review_first")
     second = runtime.review_open_positions(reason="test_cached_review_second")
@@ -902,29 +981,43 @@ def test_runtime_review_reuses_cached_weather_scan_but_refreshes_market_price(tm
     assert second["reviewed"] == 1
     assert second["closed"] == 1
     assert latest_trade["status"] == "closed"
-    assert scan_calls == [300]
+    assert provider_calls == [("nyc", "2026-04-25", ("70-71F",))]
 
 
-def test_runtime_review_refreshes_weather_scan_after_cache_interval(tmp_path: Path):
+def test_runtime_review_refreshes_targeted_provider_payload_after_cache_interval(tmp_path: Path, monkeypatch):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     tracker.ensure_paper_capital(1000.0)
     strategy = WeatherStrategyEngine(config, tracker)
     strategy.process_signals([_signal("stale-review-1")], auto_trade_enabled=True)
-    scan_calls: list[int] = []
-
-    def temperature_scanner(*, limit=300) -> ScanBatch:
-        scan_calls.append(limit)
-        return _batch(_signal("stale-review-1"))
+    provider_calls: list[int] = []
 
     runtime = WeatherRuntime(
         config=config,
         tracker=tracker,
         strategy_engine=strategy,
         telegram=TelegramClient(),
-        temperature_scanner=temperature_scanner,
+        temperature_scanner=lambda *, limit=300: (_ for _ in ()).throw(AssertionError("temperature scanner should not run")),
         price_fetcher=lambda slug: 0.5,
     )
+
+    def fake_bucket_probs(city_slug, target_date, buckets, provider_context="scheduled"):
+        provider_calls.append(1)
+        return {
+            "wu": None,
+            "openmeteo": {bucket["label"]: 0.80 for bucket in buckets},
+            "vc": None,
+            "noaa": None,
+            "weatherapi": None,
+            "wu_temp": None,
+            "om_temp": 72.0,
+            "vc_temp": None,
+            "noaa_temp": None,
+            "weatherapi_temp": None,
+            "unit": "F",
+        }
+
+    monkeypatch.setattr("weather_bot.runtime.get_both_bucket_probabilities", fake_bucket_probs)
 
     first = runtime.review_open_positions(reason="test_stale_review_first")
     refresh_interval_s = runtime._open_position_weather_refresh_interval_seconds()
@@ -933,7 +1026,94 @@ def test_runtime_review_refreshes_weather_scan_after_cache_interval(tmp_path: Pa
 
     assert first["reviewed"] == 1
     assert second["reviewed"] == 1
-    assert scan_calls == [300, 300]
+    assert provider_calls == [1, 1]
+
+
+def test_runtime_review_temperature_refresh_only_requests_open_position_buckets(tmp_path: Path, monkeypatch):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals(
+        [
+            _signal("review-target-1", market_slug="market-review-target-1", label="70-71F"),
+            _signal("review-target-2", market_slug="market-review-target-2", label="72-73F"),
+        ],
+        auto_trade_enabled=True,
+    )
+    requested: list[tuple[str, str, tuple[str, ...], str]] = []
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        temperature_scanner=lambda *, limit=300: (_ for _ in ()).throw(AssertionError("temperature scanner should not run")),
+        price_fetcher=lambda slug: 0.40,
+    )
+
+    def fake_bucket_probs(city_slug, target_date, buckets, provider_context="scheduled"):
+        requested.append((city_slug, str(target_date), tuple(bucket["label"] for bucket in buckets), provider_context))
+        return {
+            "wu": None,
+            "openmeteo": {bucket["label"]: 0.82 for bucket in buckets},
+            "vc": None,
+            "noaa": None,
+            "weatherapi": None,
+            "wu_temp": None,
+            "om_temp": 72.0,
+            "vc_temp": None,
+            "noaa_temp": None,
+            "weatherapi_temp": None,
+            "unit": "F",
+        }
+
+    monkeypatch.setattr("weather_bot.runtime.get_both_bucket_probabilities", fake_bucket_probs)
+
+    summary = runtime.review_open_positions(reason="test_targeted_review_scope")
+
+    assert summary["reviewed"] == 2
+    assert len(requested) == 1
+    city_slug, target_date, labels, provider_context = requested[0]
+    assert city_slug == "nyc"
+    assert target_date == "2026-04-25"
+    assert set(labels) == {"70-71F", "72-73F"}
+    assert provider_context == "review"
+
+
+def test_runtime_review_precipitation_uses_targeted_refresh_without_full_scanner(tmp_path: Path, monkeypatch):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_precip_signal("review-rain-1")], auto_trade_enabled=True)
+    om_calls: list[tuple[str, int, int]] = []
+
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        precipitation_scanner=lambda: (_ for _ in ()).throw(AssertionError("precipitation scanner should not run")),
+        price_fetcher=lambda slug: 0.35,
+    )
+
+    monkeypatch.setattr(
+        "weather_bot.runtime.get_om_monthly_precip",
+        lambda city_slug, year, month: (
+            om_calls.append((city_slug, year, month))
+            or {"observed": 0.8, "forecast": 0.9, "total_projected": 1.7, "unit": "in"}
+        ),
+    )
+    monkeypatch.setattr("weather_bot.runtime.get_vc_monthly_precip", lambda city_slug, year, month: None)
+    monkeypatch.setattr(
+        "weather_bot.runtime.calc_precip_bucket_probs",
+        lambda observed, forecast, buckets, unit: {bucket["label"]: 0.78 for bucket in buckets},
+    )
+
+    summary = runtime.review_open_positions(reason="test_precip_targeted_review", market_types={"precipitation"})
+
+    assert summary["reviewed"] == 1
+    assert om_calls == [("nyc", 2026, 4)]
 
 
 def test_dashboard_manual_close_action_closes_open_trade(tmp_path: Path):
