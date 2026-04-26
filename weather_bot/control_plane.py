@@ -8,6 +8,17 @@ from typing import Any
 
 from .models import iso_now
 
+OPEN_POSITION_CAP_KEYS = (
+    "limit",
+    "paper_max_open_positions",
+    "max_open_positions",
+    "open_position_cap",
+    "openPositionCap",
+    "paperMaxOpenPositions",
+    "maxOpenPositions",
+)
+OPEN_POSITION_CAP_VALUE_KEYS = ("value", *OPEN_POSITION_CAP_KEYS)
+
 
 @dataclass(frozen=True)
 class ControlRequest:
@@ -159,7 +170,7 @@ class ControlPlane:
                     fallback_key="limit",
                     nested_keys=("value", "payload", "data"),
                 )
-                amount = _coerce_int(value, keys=("limit", "value", "paper_max_open_positions", "max_open_positions"))
+                amount = _coerce_int(value, keys=OPEN_POSITION_CAP_VALUE_KEYS)
             except (TypeError, ValueError):
                 return self._record(ControlResult(False, 400, "Open-position cap must be numeric.", action))
             limit = self.runtime.set_paper_max_open_positions(amount)
@@ -310,7 +321,7 @@ def _infer_action_from_payload(payload: dict[str, Any]) -> str:
                 if nested is not None:
                     sources.append(nested)
     for source in sources:
-        if any(key in source for key in ("limit", "paper_max_open_positions", "max_open_positions", "open_position_cap")):
+        if any(key in source for key in OPEN_POSITION_CAP_KEYS):
             return "set_paper_max_open_positions"
         if any(key in source for key in ("position_id", "positionId", "paper_position_id", "open_position_id")):
             return "close_position"

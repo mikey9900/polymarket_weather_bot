@@ -560,6 +560,42 @@ def test_control_updates_open_position_cap_from_nested_payload(tmp_path: Path):
     assert strategy.paper_max_open_positions == 90
 
 
+def test_control_updates_open_position_cap_from_open_position_cap_alias(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe(
+        {"action": "set_paper_max_open_positions", "value": {"open_position_cap": "95"}}
+    )
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["paper_max_open_positions"] == 95
+    assert runtime.get_status_snapshot()["paper_max_open_positions"] == 95
+    assert strategy.paper_max_open_positions == 95
+
+
+def test_control_infers_open_cap_action_from_open_position_cap_alias_payload(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe({"open_position_cap": "85"})
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["paper_max_open_positions"] == 85
+    assert runtime.get_status_snapshot()["paper_max_open_positions"] == 85
+    assert strategy.paper_max_open_positions == 85
+
+
 def test_runtime_respects_live_open_position_cap_override(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")

@@ -11,11 +11,8 @@ RUN case "${BUILD_ARCH}" in \
       *) echo "Skipping duckdb install for ${BUILD_ARCH}" ;; \
     esac
 
-ADD https://github.com/mikey9900/polymarket_weather_bot/archive/refs/heads/main.tar.gz /tmp/polymarket_weather_bot.tar.gz
-RUN python -c "import tarfile; tarfile.open('/tmp/polymarket_weather_bot.tar.gz').extractall('/tmp')" \
- && cp -a /tmp/polymarket_weather_bot-main/. /app/ \
- && rm -rf /tmp/polymarket_weather_bot-main /tmp/polymarket_weather_bot.tar.gz \
- && chmod +x /app/weather-bot/run.sh
+COPY . /app
+RUN chmod +x /app/weather-bot/run.sh
 
 EXPOSE 8099
 
