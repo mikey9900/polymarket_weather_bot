@@ -148,13 +148,15 @@ def test_dashboard_rejects_empty_control_action(tmp_path: Path):
 def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     html = render_dashboard_html()
 
-    assert "controlQueryEntries" in html
+    assert "buildControlRequestSpec" in html
+    assert "buildControlRoutePlans" in html
     assert "appendQuery" in html
-    assert 'apiCandidates("./api/control").map(url=>appendQuery(url,entries))' in html
-    assert 'apiCandidates(`./api/control/${encoded}`).map(url=>appendQuery(url,entries))' in html
-    assert 'JSON.stringify({action,value})' in html
+    assert "endpointCandidates" in html
+    assert 'JSON.stringify(plan.body)' in html
     assert "dashboardBaseCandidates" in html
     assert "recoverControlState" in html
+    assert "renderControlDiagnostics" in html
+    assert 'id="control-diagnostics"' in html
     assert "openProposalModal" in html
     assert "copyExportPath" in html
 
