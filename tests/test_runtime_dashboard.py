@@ -145,11 +145,13 @@ def test_dashboard_rejects_empty_control_action(tmp_path: Path):
     assert "empty" in response["message"].lower()
 
 
-def test_dashboard_posts_controls_with_recovery_and_route_fallback():
+def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     html = render_dashboard_html()
 
-    assert 'apiCandidates(`./api/control?action=${encoded}`)' in html
-    assert 'apiCandidates(`./api/control/${encoded}`)' in html
+    assert "controlQueryEntries" in html
+    assert "appendQuery" in html
+    assert 'apiCandidates("./api/control").map(url=>appendQuery(url,entries))' in html
+    assert 'apiCandidates(`./api/control/${encoded}`).map(url=>appendQuery(url,entries))' in html
     assert 'JSON.stringify({action,value})' in html
     assert "dashboardBaseCandidates" in html
     assert "recoverControlState" in html
@@ -237,6 +239,68 @@ def test_live_api_control_returns_json_when_handler_raises(tmp_path: Path):
     assert payload["ok"] is False
     assert payload["status"] == 500
     assert "Control handler crashed: RuntimeError: boom" in payload["message"]
+
+
+def test_live_api_control_accepts_query_params_when_body_missing(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+    dashboard.refresh_once()
+
+    server = LiveApiServer(dashboard, host="127.0.0.1", port=0)
+    server.start_threaded()
+    try:
+        port = int(server._server.server_address[1])  # type: ignore[union-attr]
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/control/set_paper_max_open_positions?limit=80",
+            data=b"",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.stop_threaded()
+
+    assert payload["ok"] is True
+    assert payload["state"]["controls"]["paper_max_open_positions"] == 80
+
+
+def test_live_api_manual_close_accepts_query_params_when_body_missing(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("manual-close-query-1")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+    dashboard.refresh_once()
+    open_positions = tracker.get_dashboard_paper_positions(limit=12, status="open")
+
+    server = LiveApiServer(dashboard, host="127.0.0.1", port=0)
+    server.start_threaded()
+    try:
+        port = int(server._server.server_address[1])  # type: ignore[union-attr]
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/control/close_position?position_id={open_positions[0]['id']}&reason=manual_test_close_query",
+            data=b"",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.stop_threaded()
+
+    latest_trade = tracker.get_dashboard_paper_positions(limit=12)[0]
+    assert payload["ok"] is True
+    assert latest_trade["status"] == "closed"
+    assert latest_trade["exit_reason"] == "manual_test_close_query"
 
 
 def test_control_infers_open_cap_action_from_actionless_payload(tmp_path: Path):

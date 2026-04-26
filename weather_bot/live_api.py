@@ -7,7 +7,7 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 
 _DASHBOARD_PATH = Path(__file__).with_name("live_api_dashboard.html")
@@ -66,7 +66,8 @@ class LiveApiServer:
                 self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
             def do_POST(self) -> None:  # noqa: N802
-                route = urlsplit(self.path).path
+                parts = urlsplit(self.path)
+                route = parts.path
                 if route != "/api/control" and not route.startswith("/api/control/"):
                     self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
                     return
@@ -79,6 +80,10 @@ class LiveApiServer:
                     return
                 if not isinstance(payload, dict):
                     payload = {}
+                for key, values in parse_qs(parts.query, keep_blank_values=True).items():
+                    if not values or key in payload:
+                        continue
+                    payload[key] = values[-1]
                 path_action = _control_action_from_path(route)
                 if path_action and not payload.get("action"):
                     payload["action"] = path_action
