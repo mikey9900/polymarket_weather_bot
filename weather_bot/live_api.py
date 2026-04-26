@@ -82,7 +82,18 @@ class LiveApiServer:
                 path_action = _control_action_from_path(route)
                 if path_action and not payload.get("action"):
                     payload["action"] = path_action
-                response = dashboard_state.apply_control_threadsafe(payload)
+                try:
+                    response = dashboard_state.apply_control_threadsafe(payload)
+                except Exception as exc:
+                    self._send_json(
+                        {
+                            "ok": False,
+                            "status": 500,
+                            "message": f"Control handler crashed: {type(exc).__name__}: {exc}",
+                        },
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    return
                 self._send_json(response, status=HTTPStatus(int(response.get("status", 200))))
 
             def _send_text(self, text: str, *, content_type: str) -> None:

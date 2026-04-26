@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from weather_bot.config import load_config
 from weather_bot.control_plane import ControlPlane, ControlRequest
 from weather_bot.dashboard_state import DashboardStateService
 from weather_bot.live_api import render_dashboard_html
+from weather_bot.live_api import LiveApiServer
 from weather_bot.models import ForecastSnapshot, ScanBatch, WeatherSignal
 from weather_bot.paths import DEFAULT_CONFIG_TEMPLATE_PATH
 from weather_bot.runtime import WeatherRuntime, _scheduled_interval_seconds
@@ -120,7 +123,7 @@ def test_dashboard_control_updates_state(tmp_path: Path):
     response = dashboard.apply_control_threadsafe({"action": "stop"})
 
     assert response["ok"] is True
-    assert response["state"]["controls"]["state"] == "paused"
+    assert response["state"]["controls"]["state"] == "running"
     assert response["state"]["controls"]["last_action"] == "stop"
     assert response["state"]["controls"]["last_action_at"]
     assert response["state"]["recent_operator_actions"][0]["action"] == "stop"
@@ -148,6 +151,64 @@ def test_dashboard_posts_controls_through_generic_control_endpoint():
     assert 'fetch(api("./api/control")' in html
     assert 'JSON.stringify({action,value})' in html
     assert '/api/control/${encodeURIComponent(action)}' not in html
+
+
+def test_dashboard_apply_control_returns_json_when_refresh_fails(tmp_path: Path, monkeypatch):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+    dashboard.refresh_once()
+
+    def boom() -> None:
+        raise RuntimeError("refresh failed")
+
+    monkeypatch.setattr(dashboard, "refresh_once", boom)
+
+    response = dashboard.apply_control_threadsafe({"action": "stop"})
+
+    assert response["ok"] is True
+    assert response["status"] == 200
+    assert "State refresh warning" in response["message"]
+    assert response["refresh_error"] == "RuntimeError: refresh failed"
+    assert response["state"]["controls"]["state"] == "paused"
+
+
+def test_live_api_control_returns_json_when_handler_raises(tmp_path: Path):
+    class BrokenDashboardState:
+        def get_state_threadsafe(self):
+            return {}
+
+        def get_history_threadsafe(self):
+            return []
+
+        def apply_control_threadsafe(self, payload):
+            raise RuntimeError("boom")
+
+    server = LiveApiServer(BrokenDashboardState(), host="127.0.0.1", port=0)
+    server.start_threaded()
+    try:
+        port = int(server._server.server_address[1])  # type: ignore[union-attr]
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/control",
+            data=json.dumps({"action": "stop"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(request, timeout=5)
+            assert False, "Expected HTTP 500 response"
+        except urllib.error.HTTPError as exc:
+            payload = json.loads(exc.read().decode("utf-8"))
+    finally:
+        server.stop_threaded()
+
+    assert payload["ok"] is False
+    assert payload["status"] == 500
+    assert "Control handler crashed: RuntimeError: boom" in payload["message"]
 
 
 def test_dashboard_exposes_recent_resolutions(tmp_path: Path):

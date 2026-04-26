@@ -142,10 +142,25 @@ class DashboardStateService:
             return list(self._history)
 
     def apply_control_threadsafe(self, payload: dict[str, Any]) -> dict[str, Any]:
-        result = self.control_plane.apply_sync(self.control_plane_request(payload))
-        self.refresh_once()
+        try:
+            result = self.control_plane.apply_sync(self.control_plane_request(payload))
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": 500,
+                "message": f"Control handler crashed: {type(exc).__name__}: {exc}",
+                "state": self.get_state_threadsafe(),
+            }
+        refresh_error: str | None = None
+        try:
+            self.refresh_once()
+        except Exception as exc:
+            refresh_error = f"{type(exc).__name__}: {exc}"
         response = result.to_dict()
         response["state"] = self.get_state_threadsafe()
+        if refresh_error:
+            response["refresh_error"] = refresh_error
+            response["message"] = f"{response.get('message', 'Control applied.')} State refresh warning: {refresh_error}"
         return response
 
     @staticmethod
