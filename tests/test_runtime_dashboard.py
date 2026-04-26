@@ -159,6 +159,7 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert 'id="control-diagnostics"' in html
     assert "openProposalModal" in html
     assert "copyExportPath" in html
+    assert "Showing ${shown} of ${total} open trades" in html
 
 
 def test_dashboard_apply_control_returns_json_when_refresh_fails(tmp_path: Path, monkeypatch):
