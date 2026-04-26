@@ -65,12 +65,28 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-OPENMETEO_MAX_CONCURRENT = _int_env("OPENMETEO_MAX_CONCURRENT", 2)
+def _float_env(name: str, default: float) -> float:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+OPENMETEO_MAX_CONCURRENT = _int_env("OPENMETEO_MAX_CONCURRENT", 1)
 OPENMETEO_MAX_ATTEMPTS = _int_env("OPENMETEO_MAX_ATTEMPTS", 3)
+OPENMETEO_MIN_INTERVAL_SECONDS = _float_env("OPENMETEO_MIN_INTERVAL_SECONDS", 1.0)
+OPENMETEO_RATE_LIMIT_COOLDOWN_SECONDS = _float_env("OPENMETEO_RATE_LIMIT_COOLDOWN_SECONDS", 300.0)
 VISUAL_CROSSING_MAX_CONCURRENT = _int_env("VISUAL_CROSSING_MAX_CONCURRENT", 1)
 VISUAL_CROSSING_MAX_ATTEMPTS = _int_env("VISUAL_CROSSING_MAX_ATTEMPTS", 3)
 _openmeteo_gate = threading.BoundedSemaphore(OPENMETEO_MAX_CONCURRENT)
 _visual_crossing_gate = threading.BoundedSemaphore(VISUAL_CROSSING_MAX_CONCURRENT)
+_openmeteo_rate_limit_lock = threading.Lock()
+_openmeteo_disabled_until_monotonic = 0.0
+_openmeteo_last_request_monotonic = 0.0
+_openmeteo_cooldown_notice_sent = False
 _visual_crossing_auth_lock = threading.Lock()
 _visual_crossing_auth_failed = False
 
@@ -118,6 +134,53 @@ def _retry_delay(response: requests.Response | None, attempt: int) -> float:
     return min(8.0, float(2 ** max(0, attempt - 1)))
 
 
+def _openmeteo_cooldown_remaining() -> float:
+    with _openmeteo_rate_limit_lock:
+        return max(0.0, _openmeteo_disabled_until_monotonic - time.monotonic())
+
+
+def _set_openmeteo_cooldown(seconds: float) -> None:
+    global _openmeteo_disabled_until_monotonic, _openmeteo_cooldown_notice_sent
+    cooldown = max(0.0, float(seconds))
+    if cooldown <= 0:
+        return
+    with _openmeteo_rate_limit_lock:
+        _openmeteo_disabled_until_monotonic = max(
+            _openmeteo_disabled_until_monotonic,
+            time.monotonic() + cooldown,
+        )
+        _openmeteo_cooldown_notice_sent = False
+
+
+def _maybe_log_openmeteo_cooldown(rate_limit_label: str) -> bool:
+    global _openmeteo_cooldown_notice_sent
+    remaining = _openmeteo_cooldown_remaining()
+    if remaining <= 0:
+        return False
+    with _openmeteo_rate_limit_lock:
+        if _openmeteo_cooldown_notice_sent:
+            return True
+        _openmeteo_cooldown_notice_sent = True
+    print(
+        f"    ⚠️  Open-Meteo cooling down for {remaining:.0f}s after rate limits; "
+        f"skipping {rate_limit_label}"
+    )
+    return True
+
+
+def _wait_for_openmeteo_slot() -> None:
+    global _openmeteo_last_request_monotonic
+    delay = 0.0
+    with _openmeteo_rate_limit_lock:
+        if OPENMETEO_MIN_INTERVAL_SECONDS > 0:
+            elapsed = time.monotonic() - _openmeteo_last_request_monotonic
+            delay = max(0.0, OPENMETEO_MIN_INTERVAL_SECONDS - elapsed)
+    if delay > 0:
+        time.sleep(delay)
+    with _openmeteo_rate_limit_lock:
+        _openmeteo_last_request_monotonic = time.monotonic()
+
+
 def _visual_crossing_disabled() -> bool:
     with _visual_crossing_auth_lock:
         return _visual_crossing_auth_failed
@@ -137,10 +200,15 @@ def get_openmeteo_json(
     rate_limit_label: str,
     failure_label: str,
 ) -> Optional[dict]:
+    if _maybe_log_openmeteo_cooldown(rate_limit_label):
+        return None
     last_error: Exception | None = None
     with _openmeteo_gate:
+        if _maybe_log_openmeteo_cooldown(rate_limit_label):
+            return None
         for attempt in range(1, OPENMETEO_MAX_ATTEMPTS + 1):
             try:
+                _wait_for_openmeteo_slot()
                 response = requests.get(url, params=params, timeout=timeout)
                 if response.status_code == 429:
                     last_error = requests.HTTPError("429 Client Error: rate limited", response=response)
@@ -181,6 +249,8 @@ def get_openmeteo_json(
             except Exception as exc:
                 last_error = exc
                 break
+    if isinstance(last_error, requests.HTTPError) and last_error.response is not None and last_error.response.status_code == 429:
+        _set_openmeteo_cooldown(OPENMETEO_RATE_LIMIT_COOLDOWN_SECONDS)
     if last_error is not None:
         print(f"    ⚠️  Open-Meteo {failure_label}: {_format_request_error(last_error)}")
     return None

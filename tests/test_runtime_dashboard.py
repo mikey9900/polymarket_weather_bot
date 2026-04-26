@@ -179,6 +179,30 @@ def test_dashboard_apply_control_returns_json_when_refresh_fails(tmp_path: Path,
     assert response["state"]["controls"]["state"] == "running"
 
 
+def test_dashboard_scan_control_returns_fast_state_without_full_refresh(tmp_path: Path, monkeypatch):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+    dashboard.refresh_once()
+
+    def boom() -> None:
+        raise AssertionError("refresh_once should not run for queued scan controls")
+
+    monkeypatch.setattr(dashboard, "refresh_once", boom)
+
+    response = dashboard.apply_control_threadsafe({"action": "scan_temperature"})
+
+    assert response["ok"] is True
+    assert response["status"] == 202
+    assert response["state"]["controls"]["scan_queue_depth"] == 1
+    assert response["state"]["controls"]["pending_scan_types"] == ["temperature"]
+    assert response["state"]["runtime"]["scan_queue_depth"] == 1
+
+
 def test_live_api_control_returns_json_when_handler_raises(tmp_path: Path):
     class BrokenDashboardState:
         def get_state_threadsafe(self):

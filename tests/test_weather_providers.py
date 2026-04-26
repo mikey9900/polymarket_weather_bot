@@ -98,7 +98,11 @@ def test_openmeteo_temperature_forecast_retries_after_rate_limit(monkeypatch):
         return responses.pop(0)
 
     monkeypatch.setattr(forecast_engine, "OPENMETEO_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(forecast_engine, "OPENMETEO_MIN_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(forecast_engine, "_openmeteo_gate", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(forecast_engine, "_openmeteo_disabled_until_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_openmeteo_last_request_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_openmeteo_cooldown_notice_sent", False)
     monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
     monkeypatch.setattr(forecast_engine.time, "sleep", lambda delay: sleeps.append(delay))
 
@@ -106,6 +110,35 @@ def test_openmeteo_temperature_forecast_retries_after_rate_limit(monkeypatch):
 
     assert value == 31.4
     assert sleeps == [2.0]
+
+
+def test_openmeteo_temperature_forecast_enters_global_cooldown_after_rate_limit(monkeypatch, capsys):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_get(url: str, *, params: dict, timeout: int):
+        calls.append((url, dict(params)))
+        return _FakeResponse(
+            status_code=429,
+            url="https://api.open-meteo.com/v1/forecast?latitude=6.5774&longitude=3.3214",
+        )
+
+    monkeypatch.setattr(forecast_engine, "OPENMETEO_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(forecast_engine, "OPENMETEO_MIN_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(forecast_engine, "OPENMETEO_RATE_LIMIT_COOLDOWN_SECONDS", 60.0)
+    monkeypatch.setattr(forecast_engine, "_openmeteo_gate", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(forecast_engine, "_openmeteo_disabled_until_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_openmeteo_last_request_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_openmeteo_cooldown_notice_sent", False)
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    first = forecast_engine.get_openmeteo_forecast_max_temp("lagos", date(2026, 4, 27))
+    second = forecast_engine.get_openmeteo_forecast_max_temp("jakarta", date(2026, 4, 27))
+    output = capsys.readouterr().out
+
+    assert first is None
+    assert second is None
+    assert len(calls) == 1
+    assert "cooling down" in output
 
 
 def test_visual_crossing_temperature_forecast_disables_after_auth_failure_without_leaking_key(monkeypatch, capsys):

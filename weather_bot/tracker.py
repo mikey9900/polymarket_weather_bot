@@ -17,11 +17,12 @@ class WeatherTracker:
     def __init__(self, db_path: str | Path = TRACKER_DB_PATH):
         self.db_path = str(Path(db_path))
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS signals (
@@ -230,31 +231,34 @@ class WeatherTracker:
         return float(payload.get("initial", 0.0) or 0.0), float(payload.get("available", 0.0) or 0.0)
 
     def count_open_positions(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) AS count FROM paper_positions WHERE status = 'open'").fetchone()
-        return int(row["count"] or 0)
+        with self._lock:
+            row = self.conn.execute("SELECT COUNT(*) AS count FROM paper_positions WHERE status = 'open'").fetchone()
+            return int(row["count"] or 0)
 
     def has_open_position(self, market_slug: str, direction: str) -> bool:
-        row = self.conn.execute(
-            """
-            SELECT 1
-            FROM paper_positions
-            WHERE market_slug = ? AND direction = ? AND status = 'open'
-            LIMIT 1
-            """,
-            (market_slug, direction),
-        ).fetchone()
-        return row is not None
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT 1
+                FROM paper_positions
+                WHERE market_slug = ? AND direction = ? AND status = 'open'
+                LIMIT 1
+                """,
+                (market_slug, direction),
+            ).fetchone()
+            return row is not None
 
     def count_open_positions_for_market(self, market_slug: str) -> int:
-        row = self.conn.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM paper_positions
-            WHERE market_slug = ? AND status = 'open'
-            """,
-            (market_slug,),
-        ).fetchone()
-        return int(row["count"] or 0)
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM paper_positions
+                WHERE market_slug = ? AND status = 'open'
+                """,
+                (market_slug,),
+            ).fetchone()
+            return int(row["count"] or 0)
 
     def create_paper_position(
         self,
@@ -594,12 +598,14 @@ class WeatherTracker:
             )
 
     def get_open_positions(self) -> list[dict[str, Any]]:
-        rows = self.conn.execute("SELECT * FROM paper_positions WHERE status = 'open' ORDER BY created_at DESC").fetchall()
-        return [dict(row) for row in rows]
+        with self._lock:
+            rows = self.conn.execute("SELECT * FROM paper_positions WHERE status = 'open' ORDER BY created_at DESC").fetchall()
+            return [dict(row) for row in rows]
 
     def get_recent_paper_positions(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = self.conn.execute("SELECT * FROM paper_positions ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
-        return [dict(row) for row in rows]
+        with self._lock:
+            rows = self.conn.execute("SELECT * FROM paper_positions ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
+            return [dict(row) for row in rows]
 
     def get_dashboard_paper_positions(
         self,
@@ -621,36 +627,37 @@ class WeatherTracker:
             where = f"WHERE p.status IN ({placeholders})"
             params.extend(status_values)
         params.append(int(limit))
-        rows = self.conn.execute(
-            f"""
-            SELECT
-                p.*,
-                s.event_title AS signal_event_title,
-                s.market_prob AS signal_market_prob,
-                s.forecast_prob AS signal_forecast_prob,
-                s.edge AS signal_edge,
-                s.edge_abs AS signal_edge_abs,
-                s.edge_size AS signal_edge_size,
-                s.confidence AS signal_confidence,
-                s.source_count AS signal_source_count,
-                s.liquidity AS signal_liquidity,
-                s.time_to_resolution_s AS signal_time_to_resolution_s,
-                s.source_dispersion_pct AS signal_source_dispersion_pct,
-                s.score AS signal_adapter_score,
-                d.final_score AS decision_final_score,
-                d.reason AS decision_reason,
-                d.policy_action AS decision_policy_action,
-                d.metadata_json AS decision_metadata_json
-            FROM paper_positions p
-            LEFT JOIN signals s ON s.id = p.signal_id
-            LEFT JOIN decisions d ON d.id = p.decision_id
-            {where}
-            ORDER BY COALESCE(p.resolved_at, p.created_at) DESC
-            LIMIT ?
-            """,
-            tuple(params),
-        ).fetchall()
-        items = [_serialize_dashboard_position(row) for row in rows]
+        with self._lock:
+            rows = self.conn.execute(
+                f"""
+                SELECT
+                    p.*,
+                    s.event_title AS signal_event_title,
+                    s.market_prob AS signal_market_prob,
+                    s.forecast_prob AS signal_forecast_prob,
+                    s.edge AS signal_edge,
+                    s.edge_abs AS signal_edge_abs,
+                    s.edge_size AS signal_edge_size,
+                    s.confidence AS signal_confidence,
+                    s.source_count AS signal_source_count,
+                    s.liquidity AS signal_liquidity,
+                    s.time_to_resolution_s AS signal_time_to_resolution_s,
+                    s.source_dispersion_pct AS signal_source_dispersion_pct,
+                    s.score AS signal_adapter_score,
+                    d.final_score AS decision_final_score,
+                    d.reason AS decision_reason,
+                    d.policy_action AS decision_policy_action,
+                    d.metadata_json AS decision_metadata_json
+                FROM paper_positions p
+                LEFT JOIN signals s ON s.id = p.signal_id
+                LEFT JOIN decisions d ON d.id = p.decision_id
+                {where}
+                ORDER BY COALESCE(p.resolved_at, p.created_at) DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+            items = [_serialize_dashboard_position(row) for row in rows]
         if mark_stale_after_seconds is None:
             return items
         threshold = max(0, int(mark_stale_after_seconds))
@@ -661,25 +668,26 @@ class WeatherTracker:
 
     def get_recent_resolutions(self, limit: int = 20) -> list[dict[str, Any]]:
         limit = max(0, int(limit))
-        resolved_rows = self.conn.execute(
-            "SELECT * FROM resolution_events ORDER BY resolved_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        closed_rows = self.conn.execute(
-            """
-            SELECT
-                market_slug,
-                realized_pnl,
-                net_exit_payout,
-                exit_reason,
-                resolved_at
-            FROM paper_positions
-            WHERE status = 'closed' AND resolved_at IS NOT NULL
-            ORDER BY resolved_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        with self._lock:
+            resolved_rows = self.conn.execute(
+                "SELECT * FROM resolution_events ORDER BY resolved_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            closed_rows = self.conn.execute(
+                """
+                SELECT
+                    market_slug,
+                    realized_pnl,
+                    net_exit_payout,
+                    exit_reason,
+                    resolved_at
+                FROM paper_positions
+                WHERE status = 'closed' AND resolved_at IS NOT NULL
+                ORDER BY resolved_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
         items: list[dict[str, Any]] = []
         for row in resolved_rows:
             items.append(
@@ -713,10 +721,11 @@ class WeatherTracker:
         return items[:limit]
 
     def get_recent_operator_actions(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
-            "SELECT * FROM operator_events ORDER BY created_at DESC, id DESC LIMIT ?",
-            (int(limit),),
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM operator_events ORDER BY created_at DESC, id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
         items: list[dict[str, Any]] = []
         for row in rows:
             payload = {}
@@ -735,60 +744,63 @@ class WeatherTracker:
         return items
 
     def get_recent_signals(self, limit: int = 20, *, market_type: str | None = None) -> list[dict[str, Any]]:
-        if market_type:
-            rows = self.conn.execute(
-                "SELECT * FROM signals WHERE market_type = ? ORDER BY created_at DESC LIMIT ?",
-                (market_type, int(limit)),
-            ).fetchall()
-        else:
-            rows = self.conn.execute("SELECT * FROM signals ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
-        return [dict(row) for row in rows]
+        with self._lock:
+            if market_type:
+                rows = self.conn.execute(
+                    "SELECT * FROM signals WHERE market_type = ? ORDER BY created_at DESC LIMIT ?",
+                    (market_type, int(limit)),
+                ).fetchall()
+            else:
+                rows = self.conn.execute("SELECT * FROM signals ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
+            return [dict(row) for row in rows]
 
     def get_signal_summary(self) -> dict[str, Any]:
-        rows = self.conn.execute(
-            """
-            SELECT market_type, COUNT(*) AS count
-            FROM signals
-            WHERE created_at >= datetime('now', '-1 day')
-            GROUP BY market_type
-            """
-        ).fetchall()
-        return {str(row["market_type"]): int(row["count"]) for row in rows}
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT market_type, COUNT(*) AS count
+                FROM signals
+                WHERE created_at >= datetime('now', '-1 day')
+                GROUP BY market_type
+                """
+            ).fetchall()
+            return {str(row["market_type"]): int(row["count"]) for row in rows}
 
     def get_paper_stats(self) -> dict[str, Any]:
-        initial, available = self.get_paper_capital()
-        summary = self.conn.execute(
-            """
-            SELECT
-                SUM(CASE WHEN status IN ('resolved', 'closed') AND realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
-                SUM(CASE WHEN status IN ('resolved', 'closed') AND realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
-                SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_positions,
-                COALESCE(SUM(CASE WHEN status IN ('resolved', 'closed') THEN realized_pnl ELSE 0 END), 0.0) AS realized_pnl
-            FROM paper_positions
-            """
-        ).fetchone()
-        wins = int(summary["wins"] or 0)
-        losses = int(summary["losses"] or 0)
-        open_positions = int(summary["open_positions"] or 0)
-        realized_pnl = float(summary["realized_pnl"] or 0.0)
-        open_mark_value = sum(
-            float(item.get("net_liquidation_value") or 0.0)
-            for item in self.get_dashboard_paper_positions(limit=500, status="open")
-        )
-        current_equity = float(available) + open_mark_value
-        total_pnl = current_equity - float(initial)
-        total_closed = wins + losses
-        return {
-            "initial_capital": float(initial),
-            "current_balance": float(available),
-            "current_equity": float(current_equity),
-            "wins": wins,
-            "losses": losses,
-            "open_positions": open_positions,
-            "realized_pnl": realized_pnl,
-            "total_pnl": float(total_pnl),
-            "win_rate": (wins / total_closed * 100.0) if total_closed else 0.0,
-        }
+        with self._lock:
+            initial, available = self.get_paper_capital()
+            summary = self.conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status IN ('resolved', 'closed') AND realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN status IN ('resolved', 'closed') AND realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
+                    SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_positions,
+                    COALESCE(SUM(CASE WHEN status IN ('resolved', 'closed') THEN realized_pnl ELSE 0 END), 0.0) AS realized_pnl
+                FROM paper_positions
+                """
+            ).fetchone()
+            wins = int(summary["wins"] or 0)
+            losses = int(summary["losses"] or 0)
+            open_positions = int(summary["open_positions"] or 0)
+            realized_pnl = float(summary["realized_pnl"] or 0.0)
+            open_mark_value = sum(
+                float(item.get("net_liquidation_value") or 0.0)
+                for item in self.get_dashboard_paper_positions(limit=500, status="open")
+            )
+            current_equity = float(available) + open_mark_value
+            total_pnl = current_equity - float(initial)
+            total_closed = wins + losses
+            return {
+                "initial_capital": float(initial),
+                "current_balance": float(available),
+                "current_equity": float(current_equity),
+                "wins": wins,
+                "losses": losses,
+                "open_positions": open_positions,
+                "realized_pnl": realized_pnl,
+                "total_pnl": float(total_pnl),
+                "win_rate": (wins / total_closed * 100.0) if total_closed else 0.0,
+            }
 
     def _ensure_paper_position_columns(self) -> None:
         existing = {
@@ -834,10 +846,11 @@ class WeatherTracker:
             self.conn.commit()
 
     def get_setting(self, key: str) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT value_json FROM settings WHERE key = ?", (key,)).fetchone()
-        if row is None:
-            return None
-        return json.loads(row["value_json"])
+        with self._lock:
+            row = self.conn.execute("SELECT value_json FROM settings WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                return None
+            return json.loads(row["value_json"])
 
     def set_runtime_state(self, key: str, value: dict[str, Any]) -> None:
         payload = json.dumps(value, sort_keys=True)
@@ -853,10 +866,11 @@ class WeatherTracker:
             self.conn.commit()
 
     def get_runtime_state(self, key: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
-        row = self.conn.execute("SELECT value_json FROM runtime_state WHERE key = ?", (key,)).fetchone()
-        if row is None:
-            return dict(default or {})
-        return json.loads(row["value_json"])
+        with self._lock:
+            row = self.conn.execute("SELECT value_json FROM runtime_state WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                return dict(default or {})
+            return json.loads(row["value_json"])
 
     def record_operator_action(self, action: str, payload: dict[str, Any]) -> None:
         with self._lock:

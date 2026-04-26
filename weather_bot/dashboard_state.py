@@ -143,7 +143,8 @@ class DashboardStateService:
 
     def apply_control_threadsafe(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            result = self.control_plane.apply_sync(self.control_plane_request(payload))
+            request = self.control_plane_request(payload)
+            result = self.control_plane.apply_sync(request)
         except Exception as exc:
             return {
                 "ok": False,
@@ -151,6 +152,10 @@ class DashboardStateService:
                 "message": f"Control handler crashed: {type(exc).__name__}: {exc}",
                 "state": self.get_state_threadsafe(),
             }
+        if self._should_skip_refresh(request.action, result.status):
+            response = result.to_dict()
+            response["state"] = self._fast_control_state()
+            return response
         refresh_error: str | None = None
         try:
             self.refresh_once()
@@ -162,6 +167,44 @@ class DashboardStateService:
             response["refresh_error"] = refresh_error
             response["message"] = f"{response.get('message', 'Control applied.')} State refresh warning: {refresh_error}"
         return response
+
+    def _fast_control_state(self) -> dict[str, Any]:
+        snapshot = self.get_state_threadsafe()
+        if not snapshot:
+            return {
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "controls": self.control_plane.build_controls_payload(),
+                "runtime": self.runtime.get_status_snapshot(),
+                "summary": {"paper": {}},
+                "open_positions": [],
+                "recent_signals": [],
+                "recent_trades": [],
+                "recent_outcomes": [],
+                "recent_resolutions": [],
+                "recent_operator_actions": [],
+                "signal_summary_24h": {},
+                "exports": {
+                    "dashboard_state_path": str(self.state_export_path) if self.state_export_path is not None else None,
+                    "dashboard_state_error": self._state_export_error,
+                    "scan_export_root": str(self.runtime.scan_export_root) if getattr(self.runtime, "scan_export_root", None) is not None else None,
+                    "scan_export_error": self.runtime.get_status_snapshot().get("last_scan_export_error"),
+                },
+            }
+        runtime_status = self.runtime.get_status_snapshot()
+        snapshot["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+        snapshot["runtime"] = runtime_status
+        snapshot["controls"] = self.control_plane.build_controls_payload()
+        exports = dict(snapshot.get("exports") or {})
+        exports["dashboard_state_path"] = str(self.state_export_path) if self.state_export_path is not None else None
+        exports["dashboard_state_error"] = self._state_export_error
+        exports["scan_export_root"] = str(self.runtime.scan_export_root) if getattr(self.runtime, "scan_export_root", None) is not None else None
+        exports["scan_export_error"] = runtime_status.get("last_scan_export_error")
+        snapshot["exports"] = exports
+        return snapshot
+
+    @staticmethod
+    def _should_skip_refresh(action: str, status: int) -> bool:
+        return int(status) == 202 and str(action or "") in {"scan_temperature", "scan_precipitation"}
 
     @staticmethod
     def control_plane_request(payload: dict[str, Any]):
