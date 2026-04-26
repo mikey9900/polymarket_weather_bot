@@ -145,12 +145,14 @@ def test_dashboard_rejects_empty_control_action(tmp_path: Path):
     assert "empty" in response["message"].lower()
 
 
-def test_dashboard_posts_controls_through_generic_endpoint():
+def test_dashboard_posts_controls_through_path_endpoint():
     html = render_dashboard_html()
 
-    assert 'apiCandidates("./api/control")' in html
+    assert 'apiCandidates(`./api/control/${encoded}`)' in html
     assert 'JSON.stringify({action,value})' in html
     assert "dashboardBaseCandidates" in html
+    assert "openProposalModal" in html
+    assert "copyExportPath" in html
 
 
 def test_dashboard_apply_control_returns_json_when_refresh_fails(tmp_path: Path, monkeypatch):
