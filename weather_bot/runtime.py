@@ -68,6 +68,8 @@ class WeatherRuntime:
             "precipitation_enabled": bool(self.config.precipitation.enabled),
             "paper_auto_trade": True,
             "paper_max_open_positions": int(getattr(self.strategy_engine, "paper_max_open_positions", self.config.paper.max_open_positions)),
+            "auto_temperature_scan_interval_seconds": self._configured_temperature_scan_interval_seconds(),
+            "auto_precipitation_scan_interval_seconds": self._configured_precipitation_scan_interval_seconds(),
             "paper_entry_min_edge_abs": float(
                 getattr(self.strategy_engine, "paper_entry_min_edge_abs", self.config.strategy.temperature.min_edge_abs)
             ),
@@ -108,6 +110,14 @@ class WeatherRuntime:
         saved_state = self.tracker.get_runtime_state("runtime_status", default=default_state)
         self._state = {**default_state, **saved_state}
         self._state["open_position_weather_refresh_interval_seconds"] = self._open_position_weather_refresh_interval_seconds()
+        self._state["auto_temperature_scan_interval_seconds"] = _normalize_scan_interval_seconds(
+            self._state.get("auto_temperature_scan_interval_seconds"),
+            default_seconds=self._configured_temperature_scan_interval_seconds(),
+        )
+        self._state["auto_precipitation_scan_interval_seconds"] = _normalize_scan_interval_seconds(
+            self._state.get("auto_precipitation_scan_interval_seconds"),
+            default_seconds=self._configured_precipitation_scan_interval_seconds(),
+        )
         if hasattr(self.strategy_engine, "set_paper_max_open_positions"):
             limit = self.strategy_engine.set_paper_max_open_positions(int(self._state.get("paper_max_open_positions") or self.config.paper.max_open_positions))
             self._state["paper_max_open_positions"] = int(limit)
@@ -184,6 +194,16 @@ class WeatherRuntime:
             paper_entry_min_edge_abs_override=float(floor),
         )
         return float(floor)
+
+    def set_auto_temperature_scan_minutes(self, value: int) -> int:
+        minutes = _normalize_scan_interval_minutes(value)
+        self._update_state(auto_temperature_scan_interval_seconds=minutes * 60)
+        return int(minutes)
+
+    def set_auto_precipitation_scan_minutes(self, value: int) -> int:
+        minutes = _normalize_scan_interval_minutes(value)
+        self._update_state(auto_precipitation_scan_interval_seconds=minutes * 60)
+        return int(minutes)
 
     def get_status_snapshot(self) -> dict:
         with self._state_lock:
@@ -704,10 +724,9 @@ class WeatherRuntime:
 
     def _temperature_loop(self) -> None:
         self._loop_runner(
-            interval_seconds=_scheduled_interval_seconds(
-                self.config.app.auto_temperature_scan_seconds,
-                self.config.app.auto_temperature_scan_minutes,
-                minimum_seconds=5,
+            interval_seconds_provider=lambda: self.get_status_snapshot().get(
+                "auto_temperature_scan_interval_seconds",
+                self._configured_temperature_scan_interval_seconds(),
             ),
             enabled_key="temperature_enabled",
             runner=lambda: self.request_scan("temperature", send_alerts=True, reason="scheduled"),
@@ -715,10 +734,9 @@ class WeatherRuntime:
 
     def _precipitation_loop(self) -> None:
         self._loop_runner(
-            interval_seconds=_scheduled_interval_seconds(
-                self.config.app.auto_precipitation_scan_seconds,
-                self.config.app.auto_precipitation_scan_minutes,
-                minimum_seconds=5,
+            interval_seconds_provider=lambda: self.get_status_snapshot().get(
+                "auto_precipitation_scan_interval_seconds",
+                self._configured_precipitation_scan_interval_seconds(),
             ),
             enabled_key="precipitation_enabled",
             runner=lambda: self.request_scan("precipitation", send_alerts=True, reason="scheduled"),
@@ -758,16 +776,40 @@ class WeatherRuntime:
                 )
                 continue
 
-    def _loop_runner(self, *, interval_seconds: int, enabled_key: str, runner) -> None:
-        interval_s = max(1, int(interval_seconds))
-        while not self._stop_event.wait(interval_s):
+    def _loop_runner(self, *, interval_seconds_provider, enabled_key: str, runner) -> None:
+        last_cycle_at = time.monotonic()
+        while not self._stop_event.is_set():
+            interval_s = max(1, int(interval_seconds_provider()))
+            due_at = last_cycle_at + interval_s
+            remaining = due_at - time.monotonic()
+            if remaining > 0:
+                if self._stop_event.wait(min(1.0, remaining)):
+                    break
+                continue
             try:
                 state = self.get_status_snapshot()
                 if state.get("state") == "paused" or not state.get(enabled_key, True):
+                    last_cycle_at = time.monotonic()
                     continue
                 runner()
+                last_cycle_at = time.monotonic()
             except Exception:
+                last_cycle_at = time.monotonic()
                 continue
+
+    def _configured_temperature_scan_interval_seconds(self) -> int:
+        return _scheduled_interval_seconds(
+            self.config.app.auto_temperature_scan_seconds,
+            self.config.app.auto_temperature_scan_minutes,
+            minimum_seconds=5,
+        )
+
+    def _configured_precipitation_scan_interval_seconds(self) -> int:
+        return _scheduled_interval_seconds(
+            self.config.app.auto_precipitation_scan_seconds,
+            self.config.app.auto_precipitation_scan_minutes,
+            minimum_seconds=5,
+        )
 
     def _empty_batch(self, scan_type: str) -> ScanBatch:
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -854,6 +896,24 @@ def _scheduled_interval_seconds(seconds_value: Any, minutes_value: Any, *, minim
     if minutes > 0:
         return max(int(minimum_seconds), minutes * 60)
     return int(minimum_seconds)
+
+
+def _normalize_scan_interval_seconds(value: Any, *, default_seconds: int) -> int:
+    try:
+        seconds = int(value or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        seconds = int(default_seconds)
+    return max(300, min(21600, int(seconds)))
+
+
+def _normalize_scan_interval_minutes(value: Any) -> int:
+    try:
+        minutes = int(value or 0)
+    except (TypeError, ValueError):
+        minutes = 0
+    return max(5, min(360, int(minutes)))
 
 
 def _build_review_signal(signal: WeatherSignal, market_prob: float) -> WeatherSignal:

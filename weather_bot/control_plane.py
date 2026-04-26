@@ -18,6 +18,24 @@ OPEN_POSITION_CAP_KEYS = (
     "maxOpenPositions",
 )
 OPEN_POSITION_CAP_VALUE_KEYS = ("value", *OPEN_POSITION_CAP_KEYS)
+TEMPERATURE_SCAN_INTERVAL_KEYS = (
+    "temperature_scan_minutes",
+    "temperature_scan_interval_minutes",
+    "temp_scan_minutes",
+    "temp_scan_interval_minutes",
+    "scan_minutes",
+    "minutes",
+    "value",
+)
+PRECIPITATION_SCAN_INTERVAL_KEYS = (
+    "precipitation_scan_minutes",
+    "precipitation_scan_interval_minutes",
+    "rain_scan_minutes",
+    "rain_scan_interval_minutes",
+    "scan_minutes",
+    "minutes",
+    "value",
+)
 ENTRY_EDGE_LIMIT_KEYS = (
     "edge_pct",
     "min_edge_abs_pct",
@@ -82,6 +100,22 @@ class ControlPlane:
     def build_controls_payload(self) -> dict[str, Any]:
         runtime_status = self.runtime.get_status_snapshot()
         paper = self.tracker.get_paper_stats()
+        temperature_scan_interval_seconds = runtime_status.get(
+            "auto_temperature_scan_interval_seconds",
+            _scheduled_interval_seconds(
+                getattr(self.runtime.config.app, "auto_temperature_scan_seconds", 0),
+                getattr(self.runtime.config.app, "auto_temperature_scan_minutes", 120),
+                minimum_seconds=5,
+            ),
+        )
+        precipitation_scan_interval_seconds = runtime_status.get(
+            "auto_precipitation_scan_interval_seconds",
+            _scheduled_interval_seconds(
+                getattr(self.runtime.config.app, "auto_precipitation_scan_seconds", 0),
+                getattr(self.runtime.config.app, "auto_precipitation_scan_minutes", 360),
+                minimum_seconds=5,
+            ),
+        )
         return {
             "state": runtime_status.get("state", "unknown"),
             "temperature_enabled": runtime_status.get("temperature_enabled", True),
@@ -101,6 +135,8 @@ class ControlPlane:
             "last_open_position_review_reason": runtime_status.get("last_open_position_review_reason"),
             "last_open_position_review_count": runtime_status.get("last_open_position_review_count", 0),
             "last_open_position_close_count": runtime_status.get("last_open_position_close_count", 0),
+            "temperature_scan_interval_minutes": max(5, int(round(float(temperature_scan_interval_seconds) / 60.0))),
+            "precipitation_scan_interval_minutes": max(5, int(round(float(precipitation_scan_interval_seconds) / 60.0))),
             "paper_balance": paper.get("current_balance", 0.0),
             "paper_equity": paper.get("current_equity", 0.0),
             "paper_initial_capital": paper.get("initial_capital", 0.0),
@@ -115,6 +151,8 @@ class ControlPlane:
                 "stop": True,
                 "scan_temperature": True,
                 "scan_precipitation": True,
+                "set_temperature_scan_interval_minutes": True,
+                "set_precipitation_scan_interval_minutes": True,
                 "set_paper_capital": True,
                 "set_paper_max_open_positions": True,
                 "set_paper_entry_min_edge_abs": True,
@@ -171,6 +209,44 @@ class ControlPlane:
             )
             return self._record(
                 ControlResult(bool(queued.get("ok")), 202, str(queued.get("message")), action),
+            )
+        if action == "set_temperature_scan_interval_minutes":
+            try:
+                value = _coerce_mapping(
+                    request.value,
+                    fallback_key="temperature_scan_minutes",
+                    nested_keys=("value", "payload", "data"),
+                )
+                minutes = _coerce_int(value, keys=TEMPERATURE_SCAN_INTERVAL_KEYS)
+            except (TypeError, ValueError):
+                return self._record(ControlResult(False, 400, "Temperature scan cadence must be numeric.", action))
+            cadence = self.runtime.set_auto_temperature_scan_minutes(minutes)
+            return self._record(
+                ControlResult(
+                    True,
+                    200,
+                    f"Temperature edge scan cadence set to every {cadence} minutes for future scheduled sweeps.",
+                    action,
+                )
+            )
+        if action == "set_precipitation_scan_interval_minutes":
+            try:
+                value = _coerce_mapping(
+                    request.value,
+                    fallback_key="precipitation_scan_minutes",
+                    nested_keys=("value", "payload", "data"),
+                )
+                minutes = _coerce_int(value, keys=PRECIPITATION_SCAN_INTERVAL_KEYS)
+            except (TypeError, ValueError):
+                return self._record(ControlResult(False, 400, "Precipitation scan cadence must be numeric.", action))
+            cadence = self.runtime.set_auto_precipitation_scan_minutes(minutes)
+            return self._record(
+                ControlResult(
+                    True,
+                    200,
+                    f"Precipitation edge scan cadence set to every {cadence} minutes for future scheduled sweeps.",
+                    action,
+                )
             )
         if action == "set_paper_capital":
             try:
@@ -363,6 +439,10 @@ def _infer_action_from_payload(payload: dict[str, Any]) -> str:
                 if nested is not None:
                     sources.append(nested)
     for source in sources:
+        if any(key in source for key in ("temperature_scan_minutes", "temperature_scan_interval_minutes", "temp_scan_minutes", "temp_scan_interval_minutes")):
+            return "set_temperature_scan_interval_minutes"
+        if any(key in source for key in ("precipitation_scan_minutes", "precipitation_scan_interval_minutes", "rain_scan_minutes", "rain_scan_interval_minutes")):
+            return "set_precipitation_scan_interval_minutes"
         if any(key in source for key in ENTRY_EDGE_LIMIT_KEYS):
             return "set_paper_entry_min_edge_abs"
         if any(key in source for key in OPEN_POSITION_CAP_KEYS):
@@ -400,3 +480,19 @@ def _coerce_percent_as_probability(value: Any, *, keys: tuple[str, ...] = ()) ->
     if amount > 1.0:
         amount = amount / 100.0
     return float(amount)
+
+
+def _scheduled_interval_seconds(seconds_value: Any, minutes_value: Any, *, minimum_seconds: int) -> int:
+    try:
+        seconds = int(seconds_value or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds > 0:
+        return max(int(minimum_seconds), seconds)
+    try:
+        minutes = int(minutes_value or 0)
+    except (TypeError, ValueError):
+        minutes = 0
+    if minutes > 0:
+        return max(int(minimum_seconds), minutes * 60)
+    return int(minimum_seconds)

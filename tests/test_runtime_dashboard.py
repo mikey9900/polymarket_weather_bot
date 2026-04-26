@@ -162,6 +162,10 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "Showing ${shown} of ${total} open trades" in html
     assert "set_paper_entry_min_edge_abs" in html
     assert "setEdgeLimit()" in html
+    assert "set_temperature_scan_interval_minutes" in html
+    assert "set_precipitation_scan_interval_minutes" in html
+    assert "setTempCadence()" in html
+    assert "setRainCadence()" in html
 
 
 def test_dashboard_apply_control_returns_json_when_refresh_fails(tmp_path: Path, monkeypatch):
@@ -479,6 +483,8 @@ def test_control_payload_exposes_paper_metrics(tmp_path: Path):
     assert payload["paper_initial_capital"] == 750.0
     assert payload["paper_max_open_positions"] == 20
     assert payload["paper_entry_min_edge_abs"] == config.strategy.temperature.min_edge_abs
+    assert payload["temperature_scan_interval_minutes"] == config.app.auto_temperature_scan_minutes
+    assert payload["precipitation_scan_interval_minutes"] == config.app.auto_precipitation_scan_minutes
     assert payload["paper_open_positions"] == 0
 
 
@@ -580,6 +586,40 @@ def test_control_updates_open_position_cap(tmp_path: Path):
     assert response["state"]["controls"]["paper_max_open_positions"] == 40
     assert runtime.get_status_snapshot()["paper_max_open_positions"] == 40
     assert strategy.paper_max_open_positions == 40
+
+
+def test_control_updates_temperature_scan_interval_minutes(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe({"action": "set_temperature_scan_interval_minutes", "value": {"temperature_scan_minutes": "30"}})
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["temperature_scan_interval_minutes"] == 30
+    assert runtime.get_status_snapshot()["auto_temperature_scan_interval_seconds"] == 1800
+
+
+def test_control_updates_precipitation_scan_interval_minutes(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe(
+        {"action": "set_precipitation_scan_interval_minutes", "value": {"precipitation_scan_minutes": "60"}}
+    )
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["precipitation_scan_interval_minutes"] == 60
+    assert runtime.get_status_snapshot()["auto_precipitation_scan_interval_seconds"] == 3600
 
 
 def test_control_updates_paper_entry_edge_floor(tmp_path: Path):

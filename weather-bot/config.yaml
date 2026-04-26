@@ -1,6 +1,6 @@
 name: "Polymarket Weather Bot"
 description: "Weather-market paper trader with HA ingress, research artifacts, and Telegram backup controls"
-version: "3.2.42"
+version: "3.2.43"
 slug: "polymarket_weather_bot"
 startup: application
 boot: auto
