@@ -186,6 +186,13 @@ def test_dashboard_rejects_empty_control_action(tmp_path: Path):
 def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     html = render_dashboard_html()
 
+    assert "TRADE_COLLAPSE_KEY" in html
+    assert "weather-ops-open-trade-collapse-v1" in html
+    assert "toggleTradeExpanded" in html
+    assert "tradeToggleKey" in html
+    assert "trade-summary-pills" in html
+    assert "trade-expanded-body" in html
+    assert "aria-expanded=" in html
     assert "buildControlRequestSpec" in html
     assert "buildControlRoutePlans" in html
     assert "appendQuery" in html
