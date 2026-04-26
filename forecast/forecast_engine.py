@@ -31,7 +31,7 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional, Dict, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dotenv import load_dotenv
@@ -79,14 +79,18 @@ OPENMETEO_MAX_CONCURRENT = _int_env("OPENMETEO_MAX_CONCURRENT", 1)
 OPENMETEO_MAX_ATTEMPTS = _int_env("OPENMETEO_MAX_ATTEMPTS", 3)
 OPENMETEO_MIN_INTERVAL_SECONDS = _float_env("OPENMETEO_MIN_INTERVAL_SECONDS", 1.0)
 OPENMETEO_RATE_LIMIT_COOLDOWN_SECONDS = _float_env("OPENMETEO_RATE_LIMIT_COOLDOWN_SECONDS", 300.0)
+OPENMETEO_FORECAST_WINDOW_DAYS = _int_env("OPENMETEO_FORECAST_WINDOW_DAYS", 10)
+OPENMETEO_CACHE_TTL_SECONDS = _float_env("OPENMETEO_CACHE_TTL_SECONDS", 900.0)
 VISUAL_CROSSING_MAX_CONCURRENT = _int_env("VISUAL_CROSSING_MAX_CONCURRENT", 1)
 VISUAL_CROSSING_MAX_ATTEMPTS = _int_env("VISUAL_CROSSING_MAX_ATTEMPTS", 3)
 _openmeteo_gate = threading.BoundedSemaphore(OPENMETEO_MAX_CONCURRENT)
 _visual_crossing_gate = threading.BoundedSemaphore(VISUAL_CROSSING_MAX_CONCURRENT)
 _openmeteo_rate_limit_lock = threading.Lock()
+_openmeteo_cache_lock = threading.Lock()
 _openmeteo_disabled_until_monotonic = 0.0
 _openmeteo_last_request_monotonic = 0.0
 _openmeteo_cooldown_notice_sent = False
+_openmeteo_daily_cache: Dict[str, Dict[str, object]] = {}
 _visual_crossing_auth_lock = threading.Lock()
 _visual_crossing_auth_failed = False
 
@@ -179,6 +183,58 @@ def _wait_for_openmeteo_slot() -> None:
         time.sleep(delay)
     with _openmeteo_rate_limit_lock:
         _openmeteo_last_request_monotonic = time.monotonic()
+
+
+def _openmeteo_cached_temp(city_slug: str, target_date: date) -> Optional[float]:
+    key = target_date.isoformat()
+    now = time.monotonic()
+    with _openmeteo_cache_lock:
+        entry = _openmeteo_daily_cache.get(city_slug)
+        if not entry:
+            return None
+        expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+        if expires_at <= now:
+            _openmeteo_daily_cache.pop(city_slug, None)
+            return None
+        temps = entry.get("temps", {})
+        if not isinstance(temps, dict) or key not in temps:
+            return None
+        value = temps.get(key)
+        return None if value is None else float(value)
+
+
+def _store_openmeteo_daily_cache(city_slug: str, temps: Dict[str, Optional[float]]) -> None:
+    with _openmeteo_cache_lock:
+        _openmeteo_daily_cache[city_slug] = {
+            "temps": dict(temps),
+            "expires_at": time.monotonic() + OPENMETEO_CACHE_TTL_SECONDS,
+        }
+
+
+def _openmeteo_window(target_date: date) -> tuple[date, date]:
+    span = max(1, int(OPENMETEO_FORECAST_WINDOW_DAYS))
+    baseline_start = min(target_date, date.today() - timedelta(days=1))
+    baseline_end = baseline_start + timedelta(days=span - 1)
+    return baseline_start, max(target_date, baseline_end)
+
+
+def _openmeteo_daily_temps(data: dict, *, fallback_date: date) -> Dict[str, Optional[float]]:
+    daily = data.get("daily", {}) if isinstance(data, dict) else {}
+    raw_dates = daily.get("time") or []
+    raw_temps = daily.get("temperature_2m_max") or []
+    temps: Dict[str, Optional[float]] = {}
+    if raw_dates:
+        for idx, raw_date in enumerate(raw_dates):
+            key = str(raw_date or "").strip()
+            if not key:
+                continue
+            value = raw_temps[idx] if idx < len(raw_temps) else None
+            temps[key] = None if value is None else float(value)
+        return temps
+    if raw_temps:
+        value = raw_temps[0]
+        temps[fallback_date.isoformat()] = None if value is None else float(value)
+    return temps
 
 
 def _visual_crossing_disabled() -> bool:
@@ -456,9 +512,14 @@ def get_openmeteo_forecast_max_temp(city_slug: str, target_date: date) -> Option
     if not coords:
         return None
 
+    cached = _openmeteo_cached_temp(city_slug, target_date)
+    if cached is not None:
+        return cached
+
     lat  = coords["lat"]
     lon  = coords["lon"]
     unit = coords["unit"]  # "fahrenheit" or "celsius"
+    start_date, end_date = _openmeteo_window(target_date)
 
     params = {
         "latitude": lat,
@@ -466,8 +527,8 @@ def get_openmeteo_forecast_max_temp(city_slug: str, target_date: date) -> Option
         "daily": "temperature_2m_max",
         "temperature_unit": unit,
         "timezone": "auto",
-        "start_date": target_date.isoformat(),
-        "end_date": target_date.isoformat(),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
     }
     try:
         data = get_openmeteo_json(
@@ -479,12 +540,12 @@ def get_openmeteo_forecast_max_temp(city_slug: str, target_date: date) -> Option
         )
         if not data:
             return None
-        temps = data.get("daily", {}).get("temperature_2m_max", [])
-
-        if not temps or temps[0] is None:
+        temps = _openmeteo_daily_temps(data, fallback_date=target_date)
+        if not temps:
             return None
-
-        return float(temps[0])
+        _store_openmeteo_daily_cache(city_slug, temps)
+        value = temps.get(target_date.isoformat())
+        return None if value is None else float(value)
 
     except Exception as e:
         print(f"    ⚠️  Open-Meteo failed for {city_slug}: {_format_request_error(e)}")
