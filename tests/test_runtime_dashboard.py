@@ -145,12 +145,14 @@ def test_dashboard_rejects_empty_control_action(tmp_path: Path):
     assert "empty" in response["message"].lower()
 
 
-def test_dashboard_posts_controls_through_path_endpoint():
+def test_dashboard_posts_controls_with_recovery_and_route_fallback():
     html = render_dashboard_html()
 
+    assert 'apiCandidates(`./api/control?action=${encoded}`)' in html
     assert 'apiCandidates(`./api/control/${encoded}`)' in html
     assert 'JSON.stringify({action,value})' in html
     assert "dashboardBaseCandidates" in html
+    assert "recoverControlState" in html
     assert "openProposalModal" in html
     assert "copyExportPath" in html
 
