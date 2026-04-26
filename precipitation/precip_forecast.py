@@ -49,8 +49,8 @@ def _ha_option(name: str) -> str:
 
 VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY") or _ha_option("visual_crossing_api_key")
 
-# Import city coordinates and CDF from the existing forecast engine
-from forecast.forecast_engine import CITY_COORDS, _normal_cdf, get_visual_crossing_timeline_json
+# Import city coordinates and shared provider helpers from the existing forecast engine
+from forecast.forecast_engine import CITY_COORDS, _normal_cdf, get_openmeteo_json, get_visual_crossing_timeline_json
 
 # Uncertainty model parameters
 PRECIP_CV       = 0.40   # coefficient of variation for remaining precip
@@ -87,9 +87,15 @@ def _get_om_precip_range(
             "start_date":         start.isoformat(),
             "end_date":           end.isoformat(),
         }
-        r = requests.get(base, params=params, timeout=15)
-        r.raise_for_status()
-        data   = r.json()
+        data = get_openmeteo_json(
+            url=base,
+            params=params,
+            timeout=15,
+            rate_limit_label=f"precip {'archive' if archive else 'forecast'}",
+            failure_label=f"precip failed ({'archive' if archive else 'forecast'})",
+        )
+        if not data:
+            return None
         values = data.get("daily", {}).get("precipitation_sum", [])
         # Sum non-null values
         total = sum(v for v in values if v is not None)

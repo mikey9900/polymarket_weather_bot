@@ -33,6 +33,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Optional, Dict, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -64,9 +65,126 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+OPENMETEO_MAX_CONCURRENT = _int_env("OPENMETEO_MAX_CONCURRENT", 2)
+OPENMETEO_MAX_ATTEMPTS = _int_env("OPENMETEO_MAX_ATTEMPTS", 3)
 VISUAL_CROSSING_MAX_CONCURRENT = _int_env("VISUAL_CROSSING_MAX_CONCURRENT", 1)
 VISUAL_CROSSING_MAX_ATTEMPTS = _int_env("VISUAL_CROSSING_MAX_ATTEMPTS", 3)
+_openmeteo_gate = threading.BoundedSemaphore(OPENMETEO_MAX_CONCURRENT)
 _visual_crossing_gate = threading.BoundedSemaphore(VISUAL_CROSSING_MAX_CONCURRENT)
+_visual_crossing_auth_lock = threading.Lock()
+_visual_crossing_auth_failed = False
+
+_SECRET_QUERY_KEYS = frozenset({"apikey", "key"})
+
+
+def _redact_url_query_secrets(url: str) -> str:
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return url
+    if not parts.query:
+        return url
+    redacted_query = []
+    changed = False
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key.lower() in _SECRET_QUERY_KEYS:
+            redacted_query.append((key, "REDACTED" if value else ""))
+            changed = True
+        else:
+            redacted_query.append((key, value))
+    if not changed:
+        return url
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(redacted_query, doseq=True), parts.fragment)
+    )
+
+
+def _format_request_error(exc: Exception) -> str:
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        base = str(exc).split(" for url:", 1)[0]
+        url = _redact_url_query_secrets(str(getattr(exc.response, "url", "") or ""))
+        return f"{base} for url: {url}" if url else base
+    return str(exc)
+
+
+def _retry_delay(response: requests.Response | None, attempt: int) -> float:
+    if response is not None:
+        retry_after = str(response.headers.get("Retry-After", "") or "").strip()
+        if retry_after:
+            try:
+                return max(1.0, float(retry_after))
+            except ValueError:
+                pass
+    return min(8.0, float(2 ** max(0, attempt - 1)))
+
+
+def _visual_crossing_disabled() -> bool:
+    with _visual_crossing_auth_lock:
+        return _visual_crossing_auth_failed
+
+
+def _disable_visual_crossing_for_run() -> None:
+    global _visual_crossing_auth_failed
+    with _visual_crossing_auth_lock:
+        _visual_crossing_auth_failed = True
+
+
+def get_openmeteo_json(
+    *,
+    url: str,
+    params: dict,
+    timeout: int,
+    rate_limit_label: str,
+    failure_label: str,
+) -> Optional[dict]:
+    last_error: Exception | None = None
+    with _openmeteo_gate:
+        for attempt in range(1, OPENMETEO_MAX_ATTEMPTS + 1):
+            try:
+                response = requests.get(url, params=params, timeout=timeout)
+                if response.status_code == 429:
+                    last_error = requests.HTTPError("429 Client Error: rate limited", response=response)
+                    if attempt < OPENMETEO_MAX_ATTEMPTS:
+                        delay = _retry_delay(response, attempt)
+                        print(
+                            f"    ⚠️  Open-Meteo rate limited for {rate_limit_label}; "
+                            f"retrying in {delay:.1f}s"
+                        )
+                        time.sleep(delay)
+                        continue
+                    break
+                response.raise_for_status()
+                return response.json()
+            except requests.HTTPError as exc:
+                last_error = exc
+                status_code = exc.response.status_code if exc.response is not None else None
+                if status_code in {429, 500, 502, 503, 504} and attempt < OPENMETEO_MAX_ATTEMPTS:
+                    delay = _retry_delay(exc.response, attempt)
+                    print(
+                        f"    ⚠️  Open-Meteo transient error for {rate_limit_label}; "
+                        f"retrying in {delay:.1f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                break
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                if attempt < OPENMETEO_MAX_ATTEMPTS:
+                    delay = _retry_delay(None, attempt)
+                    print(
+                        f"    ⚠️  Open-Meteo transient error for {rate_limit_label}; "
+                        f"retrying in {delay:.1f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                break
+            except Exception as exc:
+                last_error = exc
+                break
+    if last_error is not None:
+        print(f"    ⚠️  Open-Meteo {failure_label}: {_format_request_error(last_error)}")
+    return None
+
 
 # -------------------------------------------------------------
 # CITY → WU STATION + COORDINATES + UNIT
@@ -272,22 +390,25 @@ def get_openmeteo_forecast_max_temp(city_slug: str, target_date: date) -> Option
     lon  = coords["lon"]
     unit = coords["unit"]  # "fahrenheit" or "celsius"
 
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "temperature_2m_max",
+        "temperature_unit": unit,
+        "timezone": "auto",
+        "start_date": target_date.isoformat(),
+        "end_date": target_date.isoformat(),
+    }
     try:
-        r = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude":           lat,
-                "longitude":          lon,
-                "daily":              "temperature_2m_max",
-                "temperature_unit":   unit,
-                "timezone":           "auto",
-                "start_date":         target_date.isoformat(),
-                "end_date":           target_date.isoformat(),
-            },
+        data = get_openmeteo_json(
+            url="https://api.open-meteo.com/v1/forecast",
+            params=params,
             timeout=10,
+            rate_limit_label=city_slug,
+            failure_label=f"failed for {city_slug}",
         )
-        r.raise_for_status()
-        data  = r.json()
+        if not data:
+            return None
         temps = data.get("daily", {}).get("temperature_2m_max", [])
 
         if not temps or temps[0] is None:
@@ -296,7 +417,7 @@ def get_openmeteo_forecast_max_temp(city_slug: str, target_date: date) -> Option
         return float(temps[0])
 
     except Exception as e:
-        print(f"    ⚠️  Open-Meteo failed for {city_slug}: {e}")
+        print(f"    ⚠️  Open-Meteo failed for {city_slug}: {_format_request_error(e)}")
         return None
 
 
@@ -318,7 +439,7 @@ def get_visual_crossing_forecast_max_temp(city_slug: str, target_date: date) -> 
         None  — if API key missing or call fails
     """
 
-    if not VISUAL_CROSSING_API_KEY:
+    if not VISUAL_CROSSING_API_KEY or _visual_crossing_disabled():
         return None
 
     coords = CITY_COORDS.get(city_slug)
@@ -431,19 +552,30 @@ def get_visual_crossing_timeline_json(
     rate_limit_label: str,
     failure_label: str,
 ) -> Optional[dict]:
+    if _visual_crossing_disabled():
+        return None
     url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{path}"
     last_error: Exception | None = None
     with _visual_crossing_gate:
+        if _visual_crossing_disabled():
+            return None
         for attempt in range(1, VISUAL_CROSSING_MAX_ATTEMPTS + 1):
             try:
                 response = requests.get(url, params=params, timeout=timeout)
+                if response.status_code in {401, 403}:
+                    _disable_visual_crossing_for_run()
+                    last_error = requests.HTTPError(
+                        f"{response.status_code} Client Error: invalid API credentials",
+                        response=response,
+                    )
+                    break
                 if response.status_code == 429:
                     last_error = requests.HTTPError(
                         f"429 Client Error: rate limited for url: {response.url}",
                         response=response,
                     )
                     if attempt < VISUAL_CROSSING_MAX_ATTEMPTS:
-                        delay = _visual_crossing_retry_delay(response, attempt)
+                        delay = _retry_delay(response, attempt)
                         print(
                             f"    ⚠️  Visual Crossing rate limited for {rate_limit_label}; "
                             f"retrying in {delay:.1f}s"
@@ -456,7 +588,7 @@ def get_visual_crossing_timeline_json(
             except requests.HTTPError as exc:
                 if exc.response is not None and exc.response.status_code == 429 and attempt < VISUAL_CROSSING_MAX_ATTEMPTS:
                     last_error = exc
-                    delay = _visual_crossing_retry_delay(exc.response, attempt)
+                    delay = _retry_delay(exc.response, attempt)
                     print(
                         f"    ⚠️  Visual Crossing rate limited for {rate_limit_label}; "
                         f"retrying in {delay:.1f}s"
@@ -469,19 +601,18 @@ def get_visual_crossing_timeline_json(
                 last_error = exc
                 break
     if last_error is not None:
-        print(f"    ⚠️  Visual Crossing {failure_label}: {last_error}")
+        if isinstance(last_error, requests.HTTPError) and last_error.response is not None and last_error.response.status_code in {401, 403}:
+            print(
+                "    ⚠️  Visual Crossing auth failed; disabling VC for this run. "
+                "Check VISUAL_CROSSING_API_KEY or HA visual_crossing_api_key."
+            )
+        else:
+            print(f"    ⚠️  Visual Crossing {failure_label}: {_format_request_error(last_error)}")
     return None
 
 
 def _visual_crossing_retry_delay(response: requests.Response | None, attempt: int) -> float:
-    if response is not None:
-        retry_after = str(response.headers.get("Retry-After", "") or "").strip()
-        if retry_after:
-            try:
-                return max(1.0, float(retry_after))
-            except ValueError:
-                pass
-    return min(8.0, float(2 ** max(0, attempt - 1)))
+    return _retry_delay(response, attempt)
 
 
 # =============================================================
