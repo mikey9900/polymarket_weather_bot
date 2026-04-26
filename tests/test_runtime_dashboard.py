@@ -193,6 +193,13 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "trade-summary-pills" in html
     assert "trade-expanded-body" in html
     assert "aria-expanded=" in html
+    assert 'tradeSummaryPill("Mark P/L"' in html
+    assert 'tradeSummaryPill("Model P/L"' in html
+    assert 'tradeSummaryPill("Edge"' in html
+    assert 'tradeSummaryPill("Direction"' not in html
+    assert 'tradeSummaryPill("Target"' not in html
+    assert 'tradeSummaryPill("Confidence"' not in html
+    assert 'tradeSummaryPill("Model Odds"' not in html
     assert "buildControlRequestSpec" in html
     assert "buildControlRoutePlans" in html
     assert "appendQuery" in html
