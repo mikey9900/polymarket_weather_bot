@@ -36,6 +36,7 @@ class WeatherStrategyEngine:
         self.tracker = tracker
         self.research_provider = research_provider
         self._paper_max_open_positions = max(1, int(self.config.paper.max_open_positions))
+        self._paper_entry_min_edge_abs_override: float | None = None
 
     def process_signals(
         self,
@@ -83,6 +84,21 @@ class WeatherStrategyEngine:
         self._paper_max_open_positions = max(1, int(value))
         return int(self._paper_max_open_positions)
 
+    @property
+    def paper_entry_min_edge_abs_override(self) -> float | None:
+        return None if self._paper_entry_min_edge_abs_override is None else float(self._paper_entry_min_edge_abs_override)
+
+    @property
+    def paper_entry_min_edge_abs(self) -> float:
+        if self._paper_entry_min_edge_abs_override is not None:
+            return float(self._paper_entry_min_edge_abs_override)
+        return float(self.config.strategy.temperature.min_edge_abs)
+
+    def set_paper_entry_min_edge_abs(self, value: float) -> float:
+        normalized = max(0.05, min(0.40, float(value)))
+        self._paper_entry_min_edge_abs_override = normalized
+        return float(normalized)
+
     def evaluate_signal(self, signal: WeatherSignal, *, auto_trade_enabled: bool) -> WeatherDecision:
         thresholds = self._thresholds(signal.market_type)
         profile = self._signal_profile(signal, thresholds)
@@ -96,7 +112,15 @@ class WeatherStrategyEngine:
             reasons.append("Automatic paper trading is disabled.")
         if not self.config.paper.enabled:
             reasons.append("Paper trading is disabled in config.")
-        reasons.extend(self._entry_gate_reasons(signal, thresholds, final_score, profile["signal_age_hours"]))
+        reasons.extend(
+            self._entry_gate_reasons(
+                signal,
+                thresholds,
+                final_score,
+                profile["signal_age_hours"],
+                entry_edge_floor=self._entry_edge_floor(signal.market_type, thresholds),
+            )
+        )
         if self.tracker.count_open_positions() >= self.paper_max_open_positions:
             reasons.append("Maximum open paper positions reached.")
         if self.tracker.count_open_positions_for_market(signal.market_slug) >= self.config.paper.max_positions_per_market:
@@ -289,12 +313,26 @@ class WeatherStrategyEngine:
             "signal_age_hours": signal_age_hours,
         }
 
-    def _entry_gate_reasons(self, signal: WeatherSignal, thresholds, final_score: float, signal_age_hours: float | None) -> list[str]:
+    def _entry_edge_floor(self, market_type: str, thresholds) -> float:
+        if self._paper_entry_min_edge_abs_override is None:
+            return float(thresholds.min_edge_abs)
+        return float(self._paper_entry_min_edge_abs_override)
+
+    def _entry_gate_reasons(
+        self,
+        signal: WeatherSignal,
+        thresholds,
+        final_score: float,
+        signal_age_hours: float | None,
+        *,
+        entry_edge_floor: float | None = None,
+    ) -> list[str]:
         reasons: list[str] = []
+        edge_floor = float(thresholds.min_edge_abs if entry_edge_floor is None else entry_edge_floor)
         if final_score < thresholds.min_score:
             reasons.append(f"Final score {final_score:.2f} below minimum {thresholds.min_score:.2f}.")
-        if signal.edge_abs < thresholds.min_edge_abs:
-            reasons.append(f"Edge {signal.edge_abs:.2%} below minimum {thresholds.min_edge_abs:.2%}.")
+        if signal.edge_abs < edge_floor:
+            reasons.append(f"Edge {signal.edge_abs:.2%} below minimum {edge_floor:.2%}.")
         if signal.source_count < thresholds.min_source_count:
             reasons.append(f"Only {signal.source_count} sources agree.")
         if signal.liquidity < thresholds.min_liquidity:

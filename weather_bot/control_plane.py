@@ -18,6 +18,17 @@ OPEN_POSITION_CAP_KEYS = (
     "maxOpenPositions",
 )
 OPEN_POSITION_CAP_VALUE_KEYS = ("value", *OPEN_POSITION_CAP_KEYS)
+ENTRY_EDGE_LIMIT_KEYS = (
+    "edge_pct",
+    "min_edge_abs_pct",
+    "paper_entry_min_edge_abs_pct",
+    "edge_limit",
+    "entry_edge_limit",
+    "paper_entry_min_edge_abs",
+    "entryEdgeLimit",
+    "paperEntryMinEdgeAbs",
+)
+ENTRY_EDGE_LIMIT_VALUE_KEYS = ("value", *ENTRY_EDGE_LIMIT_KEYS)
 
 
 @dataclass(frozen=True)
@@ -94,6 +105,10 @@ class ControlPlane:
             "paper_equity": paper.get("current_equity", 0.0),
             "paper_initial_capital": paper.get("initial_capital", 0.0),
             "paper_max_open_positions": runtime_status.get("paper_max_open_positions", getattr(self.runtime.strategy_engine, "paper_max_open_positions", 0)),
+            "paper_entry_min_edge_abs": runtime_status.get(
+                "paper_entry_min_edge_abs",
+                getattr(self.runtime.strategy_engine, "paper_entry_min_edge_abs", 0.0),
+            ),
             "paper_open_positions": paper.get("open_positions", 0),
             "available_actions": {
                 "start": True,
@@ -102,6 +117,7 @@ class ControlPlane:
                 "scan_precipitation": True,
                 "set_paper_capital": True,
                 "set_paper_max_open_positions": True,
+                "set_paper_entry_min_edge_abs": True,
                 "close_position": True,
                 "toggle_temperature": True,
                 "toggle_precipitation": True,
@@ -174,7 +190,33 @@ class ControlPlane:
             except (TypeError, ValueError):
                 return self._record(ControlResult(False, 400, "Open-position cap must be numeric.", action))
             limit = self.runtime.set_paper_max_open_positions(amount)
-            return self._record(ControlResult(True, 200, f"Global open-position cap set to {limit}.", action))
+            return self._record(
+                ControlResult(
+                    True,
+                    200,
+                    f"Global open-position cap set to {limit}. Existing open positions stay open; this only gates future entries.",
+                    action,
+                )
+            )
+        if action == "set_paper_entry_min_edge_abs":
+            try:
+                value = _coerce_mapping(
+                    request.value,
+                    fallback_key="edge_pct",
+                    nested_keys=("value", "payload", "data"),
+                )
+                floor = _coerce_percent_as_probability(value, keys=ENTRY_EDGE_LIMIT_VALUE_KEYS)
+            except (TypeError, ValueError):
+                return self._record(ControlResult(False, 400, "Entry edge floor must be numeric.", action))
+            edge_floor = self.runtime.set_paper_entry_min_edge_abs(floor)
+            return self._record(
+                ControlResult(
+                    True,
+                    200,
+                    f"Entry edge floor set to {edge_floor:.0%} for future entries only. Current open positions keep their existing exit rules.",
+                    action,
+                )
+            )
         if action == "close_position":
             value = _coerce_mapping(
                 request.value,
@@ -321,6 +363,8 @@ def _infer_action_from_payload(payload: dict[str, Any]) -> str:
                 if nested is not None:
                     sources.append(nested)
     for source in sources:
+        if any(key in source for key in ENTRY_EDGE_LIMIT_KEYS):
+            return "set_paper_entry_min_edge_abs"
         if any(key in source for key in OPEN_POSITION_CAP_KEYS):
             return "set_paper_max_open_positions"
         if any(key in source for key in ("position_id", "positionId", "paper_position_id", "open_position_id")):
@@ -330,3 +374,29 @@ def _infer_action_from_payload(payload: dict[str, Any]) -> str:
         if any(key in source for key in ("capital", "paper_capital", "paper_initial_capital")):
             return "set_paper_capital"
     return ""
+
+
+def _coerce_percent_as_probability(value: Any, *, keys: tuple[str, ...] = ()) -> float:
+    raw = value
+    if isinstance(raw, dict):
+        for key in keys:
+            if key in raw:
+                raw = raw.get(key)
+                break
+        else:
+            raise ValueError("missing percent value")
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if raw == "":
+            raise ValueError("empty percent value")
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                return _coerce_percent_as_probability(json.loads(raw), keys=keys)
+            except Exception as exc:  # pragma: no cover - defensive parsing fallback
+                raise ValueError("invalid percent value") from exc
+        if raw.endswith("%"):
+            raw = raw[:-1].strip()
+    amount = float(raw)
+    if amount > 1.0:
+        amount = amount / 100.0
+    return float(amount)

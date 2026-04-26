@@ -68,6 +68,10 @@ class WeatherRuntime:
             "precipitation_enabled": bool(self.config.precipitation.enabled),
             "paper_auto_trade": True,
             "paper_max_open_positions": int(getattr(self.strategy_engine, "paper_max_open_positions", self.config.paper.max_open_positions)),
+            "paper_entry_min_edge_abs": float(
+                getattr(self.strategy_engine, "paper_entry_min_edge_abs", self.config.strategy.temperature.min_edge_abs)
+            ),
+            "paper_entry_min_edge_abs_override": getattr(self.strategy_engine, "paper_entry_min_edge_abs_override", None),
             "scan_in_progress": False,
             "scan_queue_depth": 0,
             "pending_scan_types": [],
@@ -107,6 +111,16 @@ class WeatherRuntime:
         if hasattr(self.strategy_engine, "set_paper_max_open_positions"):
             limit = self.strategy_engine.set_paper_max_open_positions(int(self._state.get("paper_max_open_positions") or self.config.paper.max_open_positions))
             self._state["paper_max_open_positions"] = int(limit)
+        edge_override = self._state.get("paper_entry_min_edge_abs_override")
+        if edge_override is not None and hasattr(self.strategy_engine, "set_paper_entry_min_edge_abs"):
+            edge_floor = self.strategy_engine.set_paper_entry_min_edge_abs(float(edge_override))
+            self._state["paper_entry_min_edge_abs"] = float(edge_floor)
+            self._state["paper_entry_min_edge_abs_override"] = float(edge_floor)
+        else:
+            self._state["paper_entry_min_edge_abs"] = float(
+                getattr(self.strategy_engine, "paper_entry_min_edge_abs", self.config.strategy.temperature.min_edge_abs)
+            )
+            self._state["paper_entry_min_edge_abs_override"] = None
 
     def start_background_loops(self) -> None:
         if self._threads:
@@ -160,6 +174,16 @@ class WeatherRuntime:
             limit = int(self.strategy_engine.set_paper_max_open_positions(limit))
         self._update_state(paper_max_open_positions=limit)
         return limit
+
+    def set_paper_entry_min_edge_abs(self, value: float) -> float:
+        floor = max(0.05, min(0.40, float(value)))
+        if hasattr(self.strategy_engine, "set_paper_entry_min_edge_abs"):
+            floor = float(self.strategy_engine.set_paper_entry_min_edge_abs(floor))
+        self._update_state(
+            paper_entry_min_edge_abs=float(floor),
+            paper_entry_min_edge_abs_override=float(floor),
+        )
+        return float(floor)
 
     def get_status_snapshot(self) -> dict:
         with self._state_lock:

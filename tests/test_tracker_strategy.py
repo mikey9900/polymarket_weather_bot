@@ -190,3 +190,39 @@ def test_strategy_prices_no_contract_using_complement_price(tmp_path: Path):
     assert result.position is not None
     expected_entry_price = round(0.2 * (1.0 + config.paper.entry_slippage_bps / 10000.0), 6)
     assert result.position.entry_price == expected_entry_price
+
+
+def test_strategy_edge_floor_override_only_affects_future_entries(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    first = strategy.process_signals([_make_signal(key="edge-live-1", edge=0.15, edge_abs=0.15)], auto_trade_enabled=True)[0]
+    strategy.set_paper_entry_min_edge_abs(0.20)
+    second = strategy.process_signals([_make_signal(key="edge-live-2", edge=0.15, edge_abs=0.15)], auto_trade_enabled=True)[0]
+
+    assert first.position is not None
+    assert tracker.get_paper_stats()["open_positions"] == 1
+    assert second.position is None
+    assert second.decision.accepted is False
+    assert "Edge 15.00% below minimum 20.00%." in second.decision.reason
+
+
+def test_strategy_lowered_open_cap_does_not_close_existing_positions(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    first = strategy.process_signals([_make_signal(key="open-cap-live-1")], auto_trade_enabled=True)[0]
+    second = strategy.process_signals([_make_signal(key="open-cap-live-2")], auto_trade_enabled=True)[0]
+    strategy.set_paper_max_open_positions(1)
+    third = strategy.process_signals([_make_signal(key="open-cap-live-3")], auto_trade_enabled=True)[0]
+
+    assert first.position is not None
+    assert second.position is not None
+    assert tracker.get_paper_stats()["open_positions"] == 2
+    assert third.position is None
+    assert third.decision.accepted is False
+    assert "Maximum open paper positions reached." in third.decision.reason
