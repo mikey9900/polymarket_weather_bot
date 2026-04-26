@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .models import iso_now
+
 
 @dataclass(frozen=True)
 class ControlRequest:
@@ -48,7 +50,7 @@ class ControlPlane:
         self.runtime = runtime
         self.tracker = tracker
         self.codex_manager = codex_manager
-        self._last_control = {"action": None, "ok": None, "message": "Operator link ready."}
+        self._last_control = {"action": None, "ok": None, "message": "Operator link ready.", "created_at": None}
 
     def last_control(self) -> dict[str, Any]:
         return dict(self._last_control)
@@ -99,6 +101,7 @@ class ControlPlane:
             "last_action": self._last_control.get("action"),
             "last_message": self._last_control.get("message"),
             "last_ok": self._last_control.get("ok"),
+            "last_action_at": self._last_control.get("created_at"),
         }
 
     def apply_sync(self, request: ControlRequest) -> ControlResult:
@@ -200,7 +203,8 @@ class ControlPlane:
         return self._record(ControlResult(False, 400, f"Unknown action: {action or 'empty'}", action))
 
     def _record(self, result: ControlResult) -> ControlResult:
-        self._last_control = {"action": result.action, "ok": result.ok, "message": result.message}
+        created_at = iso_now()
+        self._last_control = {"action": result.action, "ok": result.ok, "message": result.message, "created_at": created_at}
         self.tracker.record_operator_action(result.action, result.to_dict())
         return result
 

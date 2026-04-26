@@ -714,7 +714,7 @@ class WeatherTracker:
 
     def get_recent_operator_actions(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(
-            "SELECT * FROM operator_events ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM operator_events ORDER BY created_at DESC, id DESC LIMIT ?",
             (int(limit),),
         ).fetchall()
         items: list[dict[str, Any]] = []

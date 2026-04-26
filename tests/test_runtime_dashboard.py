@@ -121,6 +121,7 @@ def test_dashboard_control_updates_state(tmp_path: Path):
     assert response["ok"] is True
     assert response["state"]["controls"]["state"] == "paused"
     assert response["state"]["controls"]["last_action"] == "stop"
+    assert response["state"]["controls"]["last_action_at"]
     assert response["state"]["recent_operator_actions"][0]["action"] == "stop"
 
 
@@ -164,6 +165,27 @@ def test_dashboard_exposes_recent_resolutions(tmp_path: Path):
     assert state["recent_resolutions"][0]["status"] == "resolved"
     assert state["recent_resolutions"][0]["resolution"] == "YES"
     assert state["recent_resolutions"][0]["outcome_label"] == "Resolved YES"
+
+
+def test_recent_operator_actions_order_by_id_when_timestamps_match(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    same_stamp = "2026-04-25T20:39:51+00:00"
+    tracker.conn.execute(
+        "INSERT INTO operator_events(action, payload_json, created_at) VALUES (?, ?, ?)",
+        ("older_action", json.dumps({"message": "older"}), same_stamp),
+    )
+    tracker.conn.execute(
+        "INSERT INTO operator_events(action, payload_json, created_at) VALUES (?, ?, ?)",
+        ("newer_action", json.dumps({"message": "newer"}), same_stamp),
+    )
+    tracker.conn.commit()
+
+    actions = tracker.get_recent_operator_actions(limit=2)
+
+    assert actions[0]["action"] == "newer_action"
+    assert actions[1]["action"] == "older_action"
 
 
 def test_dashboard_exposes_recent_outcomes_with_trade_details_and_limit(tmp_path: Path):
