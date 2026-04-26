@@ -8,6 +8,7 @@ app:
   auto_precipitation_scan_seconds: 0
   resolution_check_minutes: 15
   open_position_review_seconds: 15
+  open_position_weather_refresh_minutes: 15
 temperature:
   enabled: true
   scan_limit: 300

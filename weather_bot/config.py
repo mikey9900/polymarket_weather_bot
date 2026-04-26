@@ -23,6 +23,7 @@ class AppSettings:
     auto_temperature_scan_seconds: int = 0
     auto_precipitation_scan_seconds: int = 0
     open_position_review_seconds: int = 15
+    open_position_weather_refresh_minutes: int = 15
 
 
 @dataclass(frozen=True)
@@ -168,6 +169,10 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("app", {})["resolution_check_minutes"] = int(payload["resolution_check_minutes"])
     if "open_position_review_seconds" in payload:
         mapped.setdefault("app", {})["open_position_review_seconds"] = int(payload["open_position_review_seconds"])
+    if "open_position_weather_refresh_minutes" in payload:
+        mapped.setdefault("app", {})["open_position_weather_refresh_minutes"] = int(
+            payload["open_position_weather_refresh_minutes"]
+        )
     if "paper_stake_usd" in payload:
         mapped.setdefault("paper", {})["stake_usd"] = float(payload["paper_stake_usd"])
     if "paper_initial_capital" in payload:
@@ -193,6 +198,10 @@ def _load_env_overrides() -> dict[str, Any]:
         payload.setdefault("app", {})["resolution_check_minutes"] = int(os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES", "15"))
     if os.getenv("WEATHER_OPEN_POSITION_REVIEW_SECONDS"):
         payload.setdefault("app", {})["open_position_review_seconds"] = int(os.getenv("WEATHER_OPEN_POSITION_REVIEW_SECONDS", "15"))
+    if os.getenv("WEATHER_OPEN_POSITION_WEATHER_REFRESH_MINUTES"):
+        payload.setdefault("app", {})["open_position_weather_refresh_minutes"] = int(
+            os.getenv("WEATHER_OPEN_POSITION_WEATHER_REFRESH_MINUTES", "15")
+        )
     return payload
 
 

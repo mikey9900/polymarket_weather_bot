@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,7 @@ class WeatherRuntime:
         self._scan_queue: deque[dict[str, Any]] = deque()
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._open_position_weather_cache: dict[str, dict[str, Any]] = {}
         default_state = {
             "state": "running",
             "temperature_enabled": bool(self.config.temperature.enabled),
@@ -95,11 +97,13 @@ class WeatherRuntime:
             "last_open_position_review_reason": None,
             "last_open_position_review_count": 0,
             "last_open_position_close_count": 0,
+            "open_position_weather_refresh_interval_seconds": self._open_position_weather_refresh_interval_seconds(),
             "last_resolution_check_at": None,
             "last_resolution_error": None,
         }
         saved_state = self.tracker.get_runtime_state("runtime_status", default=default_state)
         self._state = {**default_state, **saved_state}
+        self._state["open_position_weather_refresh_interval_seconds"] = self._open_position_weather_refresh_interval_seconds()
         if hasattr(self.strategy_engine, "set_paper_max_open_positions"):
             limit = self.strategy_engine.set_paper_max_open_positions(int(self._state.get("paper_max_open_positions") or self.config.paper.max_open_positions))
             self._state["paper_max_open_positions"] = int(limit)
@@ -332,12 +336,7 @@ class WeatherRuntime:
             try:
                 self.settle_due_positions(send_alerts=False)
                 for market_type in market_groups:
-                    if market_type == "temperature":
-                        batch = self.temperature_scanner(limit=self.config.temperature.scan_limit)
-                    elif market_type == "precipitation":
-                        batch = self.precipitation_scanner()
-                    else:
-                        continue
+                    batch = self._get_review_weather_batch(market_type)
                     allow_missing_signal_close = int(batch.error_count or 0) == 0
                     summary = self._review_positions_for_signals(
                         scan_type=market_type,
@@ -443,6 +442,7 @@ class WeatherRuntime:
             try:
                 settled = self.settle_due_positions(send_alerts=send_alerts)
                 batch = scanner()
+                self._store_open_position_weather_batch(scan_type, batch)
                 results = self.strategy_engine.process_signals(
                     batch.signals,
                     auto_trade_enabled=bool(self.get_status_snapshot().get("paper_auto_trade", True) and auto_trade),
@@ -545,10 +545,7 @@ class WeatherRuntime:
         if not positions:
             return {"reviewed": 0, "closed": 0}
 
-        signal_map = {
-            (str(signal.market_slug or ""), str(signal.direction or "").upper()): signal
-            for signal in signals
-        }
+        signal_map = self._build_review_signal_map(signals=signals, positions=positions)
         reviewed = 0
         closed = 0
         reviewed_at = datetime.now(timezone.utc).isoformat()
@@ -594,6 +591,92 @@ class WeatherRuntime:
                 closed += 1
 
         return {"reviewed": reviewed, "closed": closed}
+
+    def _open_position_weather_refresh_interval_seconds(self) -> int:
+        minutes = int(getattr(self.config.app, "open_position_weather_refresh_minutes", 15) or 0)
+        if minutes <= 0:
+            return 0
+        return max(60, minutes * 60)
+
+    def _store_open_position_weather_batch(self, market_type: str, batch: ScanBatch) -> None:
+        self._open_position_weather_cache[str(market_type or "")] = {
+            "batch": batch,
+            "refreshed_at_monotonic": time.monotonic(),
+        }
+
+    def _get_review_weather_batch(self, market_type: str) -> ScanBatch:
+        cache_key = str(market_type or "")
+        cache_entry = self._open_position_weather_cache.get(cache_key)
+        refresh_interval_s = self._open_position_weather_refresh_interval_seconds()
+        now = time.monotonic()
+        if cache_entry is not None and refresh_interval_s > 0:
+            age_s = now - float(cache_entry.get("refreshed_at_monotonic") or 0.0)
+            if age_s < refresh_interval_s:
+                return cache_entry["batch"]
+        try:
+            if cache_key == "temperature":
+                batch = self.temperature_scanner(limit=self.config.temperature.scan_limit)
+            elif cache_key == "precipitation":
+                batch = self.precipitation_scanner()
+            else:
+                return self._empty_batch(cache_key)
+        except Exception as exc:
+            if cache_entry is not None:
+                logger.warning("open position weather refresh failed for %s; reusing cached batch: %s", cache_key, exc)
+                return cache_entry["batch"]
+            raise
+        self._store_open_position_weather_batch(cache_key, batch)
+        return batch
+
+    def _build_review_signal_map(
+        self,
+        *,
+        signals: list[WeatherSignal],
+        positions: list[dict[str, Any]],
+    ) -> dict[tuple[str, str], WeatherSignal]:
+        active_markets = {
+            str(position.get("market_slug") or "").strip()
+            for position in positions
+            if str(position.get("market_slug") or "").strip()
+        }
+        if not active_markets or not signals:
+            return {}
+
+        base_signals: dict[str, WeatherSignal] = {}
+        for signal in signals:
+            market_slug = str(signal.market_slug or "").strip()
+            if not market_slug or market_slug not in active_markets:
+                continue
+            current = base_signals.get(market_slug)
+            if current is None or float(signal.edge_abs or 0.0) > float(current.edge_abs or 0.0):
+                base_signals[market_slug] = signal
+        if not base_signals:
+            return {}
+
+        market_probs = self._fetch_review_market_probs(base_signals.keys())
+        signal_map: dict[tuple[str, str], WeatherSignal] = {}
+        for market_slug, base_signal in base_signals.items():
+            market_prob = market_probs.get(market_slug)
+            if market_prob is None:
+                market_prob = _as_probability(base_signal.market_prob)
+            if market_prob is None:
+                continue
+            review_signal = _build_review_signal(base_signal, market_prob)
+            signal_map[(market_slug, str(review_signal.direction or "").upper())] = review_signal
+        return signal_map
+
+    def _fetch_review_market_probs(self, market_slugs) -> dict[str, float | None]:
+        market_probs: dict[str, float | None] = {}
+        for market_slug in market_slugs:
+            slug = str(market_slug or "").strip()
+            if not slug:
+                continue
+            try:
+                market_probs[slug] = _as_probability(self.price_fetcher(slug))
+            except Exception as exc:
+                logger.warning("open position review price refresh failed for %s: %s", slug, exc)
+                market_probs[slug] = None
+        return market_probs
 
     def _temperature_loop(self) -> None:
         self._loop_runner(
@@ -747,6 +830,63 @@ def _scheduled_interval_seconds(seconds_value: Any, minutes_value: Any, *, minim
     if minutes > 0:
         return max(int(minimum_seconds), minutes * 60)
     return int(minimum_seconds)
+
+
+def _build_review_signal(signal: WeatherSignal, market_prob: float) -> WeatherSignal:
+    bounded_market_prob = max(0.0, min(1.0, float(market_prob)))
+    yes_edge = float(signal.forecast_prob or 0.0) - bounded_market_prob
+    direction = "YES" if yes_edge >= 0 else "NO"
+    edge_abs = abs(yes_edge)
+    raw_payload = dict(signal.raw_payload)
+    raw_payload["market_prob"] = bounded_market_prob
+    raw_payload["direction"] = direction
+    raw_payload["discrepancy"] = edge_abs
+    return replace(
+        signal,
+        direction=direction,
+        market_prob=bounded_market_prob,
+        edge=edge_abs,
+        edge_abs=edge_abs,
+        edge_size=_edge_size_label(edge_abs),
+        score=_review_signal_score(signal, edge_abs=edge_abs),
+        raw_payload=raw_payload,
+    )
+
+
+def _review_signal_score(signal: WeatherSignal, *, edge_abs: float) -> float:
+    source_count = max(1, int(signal.source_count or 1))
+    liquidity = max(0.0, float(signal.liquidity or 0.0))
+    dispersion = max(0.0, float(signal.source_dispersion_pct or 0.0))
+    if signal.market_type == "precipitation":
+        score = (
+            0.45 * min(1.0, edge_abs / 0.25)
+            + 0.25 * min(1.0, source_count / 2.0)
+            + 0.2 * min(1.0, liquidity / 500.0)
+            - min(0.2, dispersion)
+        )
+        return round(max(0.0, min(0.99, score)), 4)
+
+    if signal.time_to_resolution_s is None:
+        timing_score = 0.5
+    else:
+        hours = max(0.0, float(signal.time_to_resolution_s) / 3600.0)
+        timing_score = 0.1 if hours < 1 else 1.0 if hours <= 24 else max(0.35, 1.0 - min(hours, 240.0) / 400.0)
+    score = (
+        0.4 * min(1.0, edge_abs / 0.25)
+        + 0.25 * min(1.0, source_count / 4.0)
+        + 0.2 * min(1.0, liquidity / 500.0)
+        + 0.15 * timing_score
+        - min(0.25, dispersion)
+    )
+    return round(max(0.0, min(0.99, score)), 4)
+
+
+def _edge_size_label(edge_abs: float) -> str:
+    if edge_abs >= 0.2:
+        return "large"
+    if edge_abs >= 0.1:
+        return "medium"
+    return "small"
 
 
 def _as_float(value: Any) -> float | None:

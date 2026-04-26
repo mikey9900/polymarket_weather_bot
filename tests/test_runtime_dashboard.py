@@ -420,6 +420,7 @@ def test_load_config_reads_second_level_scan_overrides(tmp_path: Path):
                 "precipitation_scan_seconds": 12,
                 "resolution_check_minutes": 5,
                 "open_position_review_seconds": 30,
+                "open_position_weather_refresh_minutes": 45,
             }
         ),
         encoding="utf-8",
@@ -431,6 +432,7 @@ def test_load_config_reads_second_level_scan_overrides(tmp_path: Path):
     assert config.app.auto_precipitation_scan_seconds == 12
     assert config.app.resolution_check_minutes == 5
     assert config.app.open_position_review_seconds == 30
+    assert config.app.open_position_weather_refresh_minutes == 45
 
 
 def test_scheduled_interval_seconds_prefers_fast_second_overrides():
@@ -737,6 +739,71 @@ def test_runtime_review_closes_position_when_clean_scan_loses_edge(tmp_path: Pat
     assert summary["closed"] == 1
     assert positions[0]["status"] == "closed"
     assert "No fresh qualifying signal" in positions[0]["exit_reason"]
+
+
+def test_runtime_review_reuses_cached_weather_scan_but_refreshes_market_price(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("cached-review-1")], auto_trade_enabled=True)
+    scan_calls: list[int] = []
+    market_probs = iter([0.50, 0.79])
+
+    def temperature_scanner(*, limit=300) -> ScanBatch:
+        scan_calls.append(limit)
+        return _batch(_signal("cached-review-1"))
+
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        temperature_scanner=temperature_scanner,
+        price_fetcher=lambda slug: next(market_probs),
+    )
+
+    first = runtime.review_open_positions(reason="test_cached_review_first")
+    second = runtime.review_open_positions(reason="test_cached_review_second")
+    latest_trade = tracker.get_dashboard_paper_positions(limit=12)[0]
+
+    assert first["reviewed"] == 1
+    assert first["closed"] == 0
+    assert second["reviewed"] == 1
+    assert second["closed"] == 1
+    assert latest_trade["status"] == "closed"
+    assert scan_calls == [300]
+
+
+def test_runtime_review_refreshes_weather_scan_after_cache_interval(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("stale-review-1")], auto_trade_enabled=True)
+    scan_calls: list[int] = []
+
+    def temperature_scanner(*, limit=300) -> ScanBatch:
+        scan_calls.append(limit)
+        return _batch(_signal("stale-review-1"))
+
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        temperature_scanner=temperature_scanner,
+        price_fetcher=lambda slug: 0.5,
+    )
+
+    first = runtime.review_open_positions(reason="test_stale_review_first")
+    refresh_interval_s = runtime._open_position_weather_refresh_interval_seconds()
+    runtime._open_position_weather_cache["temperature"]["refreshed_at_monotonic"] -= refresh_interval_s + 1
+    second = runtime.review_open_positions(reason="test_stale_review_second")
+
+    assert first["reviewed"] == 1
+    assert second["reviewed"] == 1
+    assert scan_calls == [300, 300]
 
 
 def test_dashboard_manual_close_action_closes_open_trade(tmp_path: Path):
