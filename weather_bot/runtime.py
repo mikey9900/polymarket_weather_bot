@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections import deque
@@ -12,10 +13,15 @@ from typing import Any
 
 import requests
 
+from polymarket.polymarket_prices import get_yes_price
+
 from .messages import format_resolution_message, format_scan_summary, format_signal_message
 from .models import ResolutionOutcome, ScanBatch, WeatherSignal
 from .precipitation_signals import scan_precipitation_signals
 from .temperature import scan_temperature_signals
+
+
+logger = logging.getLogger(__name__)
 
 
 class WeatherRuntime:
@@ -29,6 +35,7 @@ class WeatherRuntime:
         temperature_scanner=scan_temperature_signals,
         precipitation_scanner=scan_precipitation_signals,
         resolution_fetcher=None,
+        price_fetcher=None,
         scan_export_root: str | Path | None = None,
     ):
         self.config = config
@@ -38,6 +45,7 @@ class WeatherRuntime:
         self.temperature_scanner = temperature_scanner
         self.precipitation_scanner = precipitation_scanner
         self.resolution_fetcher = resolution_fetcher or get_market_resolution
+        self.price_fetcher = price_fetcher or get_yes_price
         self.scan_export_root = Path(scan_export_root) if scan_export_root else None
         scan_export_error = None
         if self.scan_export_root is not None:
@@ -257,30 +265,22 @@ class WeatherRuntime:
         if position is None:
             return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
         mark_age_seconds = _as_float(position.get("mark_age_seconds"))
+        fresh_mark: float | None = None
         if (
             position.get("mark_updated_at") in {None, ""}
             or (mark_age_seconds is not None and mark_age_seconds > float(self.config.paper.mark_stale_after_seconds))
         ):
-            try:
-                self.review_open_positions(
-                    reason="manual_close_refresh",
-                    market_types={str(position.get("market_type") or "")},
-                )
-            except Exception:
-                pass
-            positions = {
-                int(item["id"]): item
-                for item in self.tracker.get_dashboard_paper_positions(
-                    limit=500,
-                    status="open",
-                    mark_stale_after_seconds=self.config.paper.mark_stale_after_seconds,
-                )
-            }
-            position = positions.get(int(position_id))
-            if position is None:
-                return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
+            market_slug = str(position.get("market_slug") or "").strip()
+            if market_slug:
+                try:
+                    fresh_mark = self.price_fetcher(market_slug)
+                except Exception as exc:
+                    logger.warning("manual close price refresh failed for %s: %s", market_slug, exc)
+                    fresh_mark = None
         exit_price = _as_probability(
-            position.get("mark_price") or position.get("market_probability") or position.get("entry_price")
+            fresh_mark
+            if fresh_mark is not None
+            else (position.get("mark_price") or position.get("market_probability") or position.get("entry_price"))
         )
         result = self.tracker.close_paper_position(
             int(position_id),

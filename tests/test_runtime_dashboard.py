@@ -123,7 +123,7 @@ def test_dashboard_control_updates_state(tmp_path: Path):
     response = dashboard.apply_control_threadsafe({"action": "stop"})
 
     assert response["ok"] is True
-    assert response["state"]["controls"]["state"] == "running"
+    assert response["state"]["controls"]["state"] == "paused"
     assert response["state"]["controls"]["last_action"] == "stop"
     assert response["state"]["controls"]["last_action_at"]
     assert response["state"]["recent_operator_actions"][0]["action"] == "stop"
@@ -145,11 +145,10 @@ def test_dashboard_rejects_empty_control_action(tmp_path: Path):
     assert "empty" in response["message"].lower()
 
 
-def test_dashboard_posts_controls_with_generic_and_path_fallbacks():
+def test_dashboard_posts_controls_through_generic_endpoint():
     html = render_dashboard_html()
 
-    assert 'apiCandidates(`./api/control?action=${encoded}`)' in html
-    assert 'apiCandidates(`./api/control/${encoded}`)' in html
+    assert 'apiCandidates("./api/control")' in html
     assert 'JSON.stringify({action,value})' in html
     assert "dashboardBaseCandidates" in html
 
@@ -783,7 +782,7 @@ def test_dashboard_manual_close_action_accepts_nested_id_alias_payload(tmp_path:
     assert latest_trade["exit_reason"] == "manual_test_close_nested_alias"
 
 
-def test_manual_close_refreshes_stale_mark_before_closing(tmp_path: Path):
+def _stale_open_position(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     tracker.ensure_paper_capital(1000.0)
@@ -801,21 +800,18 @@ def test_manual_close_refreshes_stale_mark_before_closing(tmp_path: Path):
         reviewed_at=stale_reviewed_at,
         reason="stale seed",
     )
-    refreshed_signal = _signal(
-        "stale-close-1-refresh",
-        market_slug=signal.market_slug,
-        direction=signal.direction,
-        market_prob=0.60,
-        forecast_prob=0.8,
-        edge=0.20,
-        edge_abs=0.20,
-    )
+    return config, tracker, strategy, open_position
+
+
+def test_manual_close_uses_fresh_single_market_price_when_stale(tmp_path: Path):
+    config, tracker, strategy, open_position = _stale_open_position(tmp_path)
     runtime = WeatherRuntime(
         config=config,
         tracker=tracker,
         strategy_engine=strategy,
         telegram=TelegramClient(),
-        temperature_scanner=lambda *, limit=300: _batch(refreshed_signal),
+        price_fetcher=lambda slug: 0.6,
+        temperature_scanner=lambda *, limit=300: (_ for _ in ()).throw(AssertionError("scanner must not run on manual close")),
     )
 
     result = runtime.close_position(int(open_position["id"]), reason="manual_test_close")
@@ -824,4 +820,46 @@ def test_manual_close_refreshes_stale_mark_before_closing(tmp_path: Path):
     assert result["ok"] is True
     assert latest_trade["status"] == "closed"
     assert latest_trade["exit_reference_price"] == 0.6
-    assert latest_trade["mark_reason"].startswith("manual_close_refresh:")
+
+
+def test_manual_close_falls_back_to_stale_price_when_fetch_returns_none(tmp_path: Path):
+    config, tracker, strategy, open_position = _stale_open_position(tmp_path)
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        price_fetcher=lambda slug: None,
+    )
+
+    result = runtime.close_position(int(open_position["id"]), reason="manual_test_close")
+    latest_trade = tracker.get_dashboard_paper_positions(limit=12)[0]
+
+    assert result["ok"] is True
+    assert latest_trade["status"] == "closed"
+    assert latest_trade["exit_reference_price"] == 0.25
+
+
+def test_manual_close_falls_back_when_fetcher_raises(tmp_path: Path, caplog):
+    config, tracker, strategy, open_position = _stale_open_position(tmp_path)
+
+    def _boom(slug):
+        raise RuntimeError("gamma down")
+
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        price_fetcher=_boom,
+    )
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="weather_bot.runtime"):
+        result = runtime.close_position(int(open_position["id"]), reason="manual_test_close")
+    latest_trade = tracker.get_dashboard_paper_positions(limit=12)[0]
+
+    assert result["ok"] is True
+    assert latest_trade["status"] == "closed"
+    assert latest_trade["exit_reference_price"] == 0.25
+    assert any("manual close price refresh failed" in record.message for record in caplog.records)

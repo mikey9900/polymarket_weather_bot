@@ -18,7 +18,10 @@
       "Bash(curl -s \"https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature\")",
       "Bash(curl -s \"https://gamma-api.polymarket.com/tags\")",
       "Bash(dir \"C:\\\\Users\\\\micha\\\\polymarket_weather_bot\\\\scanner\")",
-      "Bash(dir \"C:\\\\Users\\\\micha\\\\polymarket_weather_bot\\\\forecast\")"
+      "Bash(dir \"C:\\\\Users\\\\micha\\\\polymarket_weather_bot\\\\forecast\")",
+      "Bash(python -m pytest tests/test_runtime_dashboard.py -x --tb=short)",
+      "Bash(python -m pytest tests/test_runtime_dashboard.py --tb=short)",
+      "Bash(python -m pytest tests/ --tb=short)"
     ]
   }
 }
