@@ -18,6 +18,8 @@ class ControlRequest:
     def from_payload(cls, payload: dict[str, Any] | None) -> "ControlRequest":
         payload = payload or {}
         action = str(payload.get("action") or "").strip().lower()
+        if not action:
+            action = _infer_action_from_payload(payload)
         if "value" in payload:
             value = payload.get("value")
         else:
@@ -281,3 +283,39 @@ def _coerce_mapping(
                     continue
             return {fallback_key: raw}
         return {fallback_key: raw}
+
+
+def _jsonish_mapping(value: Any) -> dict[str, Any] | None:
+    raw = value
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                raw = json.loads(text)
+            except json.JSONDecodeError:
+                return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _infer_action_from_payload(payload: dict[str, Any]) -> str:
+    sources: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        sources.append(payload)
+    for key in ("value", "payload", "data"):
+        mapping = _jsonish_mapping(payload.get(key)) if isinstance(payload, dict) else None
+        if mapping is not None:
+            sources.append(mapping)
+            for nested_key in ("value", "payload", "data"):
+                nested = _jsonish_mapping(mapping.get(nested_key))
+                if nested is not None:
+                    sources.append(nested)
+    for source in sources:
+        if any(key in source for key in ("limit", "paper_max_open_positions", "max_open_positions", "open_position_cap")):
+            return "set_paper_max_open_positions"
+        if any(key in source for key in ("position_id", "positionId", "paper_position_id", "open_position_id")):
+            return "close_position"
+        if "id" in source and any(key in source for key in ("reason", "position", "position_ref")):
+            return "close_position"
+        if any(key in source for key in ("capital", "paper_capital", "paper_initial_capital")):
+            return "set_paper_capital"
+    return ""

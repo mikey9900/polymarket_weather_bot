@@ -145,12 +145,13 @@ def test_dashboard_rejects_empty_control_action(tmp_path: Path):
     assert "empty" in response["message"].lower()
 
 
-def test_dashboard_posts_controls_through_generic_control_endpoint():
+def test_dashboard_posts_controls_with_generic_and_path_fallbacks():
     html = render_dashboard_html()
 
-    assert 'fetch(api("./api/control")' in html
+    assert 'apiCandidates(`./api/control?action=${encoded}`)' in html
+    assert 'apiCandidates(`./api/control/${encoded}`)' in html
     assert 'JSON.stringify({action,value})' in html
-    assert '/api/control/${encodeURIComponent(action)}' not in html
+    assert "dashboardBaseCandidates" in html
 
 
 def test_dashboard_apply_control_returns_json_when_refresh_fails(tmp_path: Path, monkeypatch):
@@ -174,7 +175,7 @@ def test_dashboard_apply_control_returns_json_when_refresh_fails(tmp_path: Path,
     assert response["status"] == 200
     assert "State refresh warning" in response["message"]
     assert response["refresh_error"] == "RuntimeError: refresh failed"
-    assert response["state"]["controls"]["state"] == "paused"
+    assert response["state"]["controls"]["state"] == "running"
 
 
 def test_live_api_control_returns_json_when_handler_raises(tmp_path: Path):
@@ -209,6 +210,42 @@ def test_live_api_control_returns_json_when_handler_raises(tmp_path: Path):
     assert payload["ok"] is False
     assert payload["status"] == 500
     assert "Control handler crashed: RuntimeError: boom" in payload["message"]
+
+
+def test_control_infers_open_cap_action_from_actionless_payload(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe({"value": {"limit": "80"}})
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["paper_max_open_positions"] == 80
+
+
+def test_control_infers_manual_close_action_from_actionless_payload(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("manual-close-infer-1")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+    open_positions = tracker.get_dashboard_paper_positions(limit=12, status="open")
+
+    response = dashboard.apply_control_threadsafe(
+        {"value": {"position_id": str(open_positions[0]["id"]), "reason": "manual_test_close_inferred"}}
+    )
+    latest_trade = tracker.get_dashboard_paper_positions(limit=12)[0]
+
+    assert response["ok"] is True
+    assert latest_trade["status"] == "closed"
+    assert latest_trade["exit_reason"] == "manual_test_close_inferred"
 
 
 def test_dashboard_exposes_recent_resolutions(tmp_path: Path):
