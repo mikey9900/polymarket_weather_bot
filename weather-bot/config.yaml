@@ -1,6 +1,6 @@
 name: "Polymarket Weather Bot"
 description: "Weather-market paper trader with HA ingress, research artifacts, and Telegram backup controls"
-version: "3.2.44"
+version: "3.2.45"
 slug: "polymarket_weather_bot"
 startup: application
 boot: auto
@@ -28,6 +28,7 @@ options:
   weatherapi_key: ""
   visual_crossing_free_plan_mode: true
   visual_crossing_enable_review_temperature: false
+  precipitation_enabled: false
   temperature_scan_minutes: 120
   temperature_scan_seconds: 0
   precipitation_scan_minutes: 360
@@ -46,6 +47,7 @@ schema:
   weatherapi_key: password
   visual_crossing_free_plan_mode: bool
   visual_crossing_enable_review_temperature: bool
+  precipitation_enabled: bool
   temperature_scan_minutes: int(15,720)
   temperature_scan_seconds: int(0,3600)
   precipitation_scan_minutes: int(30,1440)

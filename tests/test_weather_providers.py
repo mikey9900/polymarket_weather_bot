@@ -198,6 +198,51 @@ def test_openmeteo_temperature_forecast_reuses_cached_window_for_neighboring_dat
     assert calls[0][1]["end_date"] == "2026-04-28"
 
 
+def test_openmeteo_temperature_forecast_reuses_persistent_cache_after_memory_reset(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_get(url: str, *, params: dict, timeout: int):
+        calls.append((url, dict(params)))
+        return _FakeResponse(
+            payload={
+                "daily": {
+                    "time": ["2026-04-27", "2026-04-28"],
+                    "temperature_2m_max": [31.4, 32.1],
+                }
+            }
+        )
+
+    monkeypatch.setattr(forecast_engine, "OPENMETEO_MIN_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(forecast_engine, "OPENMETEO_CACHE_TTL_SECONDS", 900.0)
+    monkeypatch.setattr(forecast_engine, "_openmeteo_gate", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(forecast_engine, "_openmeteo_disabled_until_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_openmeteo_last_request_monotonic", 0.0)
+    monkeypatch.setattr(forecast_engine, "_openmeteo_cooldown_notice_sent", False)
+    monkeypatch.setattr(forecast_engine, "_openmeteo_daily_cache", {})
+    monkeypatch.setattr(
+        forecast_engine,
+        "_openmeteo_window",
+        lambda target_date: (date(2026, 4, 27), date(2026, 4, 28)),
+    )
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    first = forecast_engine.get_openmeteo_forecast_max_temp("lagos", date(2026, 4, 27))
+
+    assert first == 31.4
+    assert len(calls) == 1
+
+    monkeypatch.setattr(forecast_engine, "_openmeteo_daily_cache", {})
+    monkeypatch.setattr(
+        forecast_engine.requests,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Open-Meteo should have used persistent cache")),
+    )
+
+    second = forecast_engine.get_openmeteo_forecast_max_temp("lagos", date(2026, 4, 28))
+
+    assert second == 32.1
+
+
 def test_openmeteo_temperature_forecast_enters_global_cooldown_after_rate_limit(monkeypatch, capsys):
     calls: list[tuple[str, dict]] = []
 
@@ -426,6 +471,54 @@ def test_weatherapi_temperature_forecast_reuses_cached_window_for_neighboring_da
     assert first == 85.0
     assert second == 86.0
     assert len(calls) == 1
+
+
+def test_noaa_temperature_forecast_reuses_persistent_cache_after_memory_reset(monkeypatch):
+    calls: list[str] = []
+
+    def fake_get(url: str, *, headers: dict, timeout: int):
+        calls.append(url)
+        if "/points/" in url:
+            return _FakeResponse(payload={"properties": {"forecast": "https://api.weather.gov/gridpoints/TEST/1,1/forecast"}})
+        return _FakeResponse(
+            payload={
+                "properties": {
+                    "periods": [
+                        {
+                            "isDaytime": True,
+                            "startTime": "2026-04-27T06:00:00-04:00",
+                            "temperature": 85,
+                        },
+                        {
+                            "isDaytime": True,
+                            "startTime": "2026-04-28T06:00:00-04:00",
+                            "temperature": 86,
+                        },
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr(forecast_engine, "NOAA_CACHE_TTL_SECONDS", 900.0)
+    monkeypatch.setattr(forecast_engine, "_noaa_daily_cache", {})
+    monkeypatch.setattr(forecast_engine, "_noaa_grid_cache", {})
+    monkeypatch.setattr(forecast_engine.requests, "get", fake_get)
+
+    first = forecast_engine.get_noaa_forecast_max_temp("miami", date(2026, 4, 27))
+
+    assert first == 85.0
+    assert len(calls) == 2
+
+    monkeypatch.setattr(forecast_engine, "_noaa_daily_cache", {})
+    monkeypatch.setattr(
+        forecast_engine.requests,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("NOAA should have used persistent cache")),
+    )
+
+    second = forecast_engine.get_noaa_forecast_max_temp("miami", date(2026, 4, 28))
+
+    assert second == 86.0
 
 
 def test_visual_crossing_review_temperature_disabled_by_default(monkeypatch):

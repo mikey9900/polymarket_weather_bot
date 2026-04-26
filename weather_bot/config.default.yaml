@@ -15,7 +15,7 @@ temperature:
   auto_alerts: true
   auto_paper_trade: true
 precipitation:
-  enabled: true
+  enabled: false
   scan_limit: 300
   auto_alerts: true
   auto_paper_trade: false

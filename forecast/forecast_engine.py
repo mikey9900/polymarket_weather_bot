@@ -35,6 +35,7 @@ from datetime import date, timedelta
 from typing import Optional, Dict, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dotenv import load_dotenv
+from weather_bot.persistent_weather_cache import load_cached_payload, store_cached_payload
 
 load_dotenv()
 
@@ -114,6 +115,7 @@ OPENMETEO_CACHE_TTL_SECONDS = _float_env("OPENMETEO_CACHE_TTL_SECONDS", 900.0)
 WU_MAX_CONCURRENT = _int_env("WU_MAX_CONCURRENT", 1)
 WU_CACHE_TTL_SECONDS = _float_env("WU_CACHE_TTL_SECONDS", 900.0)
 WEATHERAPI_CACHE_TTL_SECONDS = _float_env("WEATHERAPI_CACHE_TTL_SECONDS", 3600.0)
+NOAA_CACHE_TTL_SECONDS = _float_env("NOAA_CACHE_TTL_SECONDS", 900.0)
 VISUAL_CROSSING_MAX_CONCURRENT = _int_env("VISUAL_CROSSING_MAX_CONCURRENT", 1)
 VISUAL_CROSSING_MAX_ATTEMPTS = _int_env("VISUAL_CROSSING_MAX_ATTEMPTS", 3)
 VISUAL_CROSSING_RATE_LIMIT_COOLDOWN_SECONDS = _float_env(
@@ -132,6 +134,7 @@ _openmeteo_rate_limit_lock = threading.Lock()
 _openmeteo_cache_lock = threading.Lock()
 _wu_cache_lock = threading.Lock()
 _weatherapi_cache_lock = threading.Lock()
+_noaa_cache_lock = threading.Lock()
 _visual_crossing_rate_limit_lock = threading.Lock()
 _visual_crossing_cache_lock = threading.Lock()
 _openmeteo_disabled_until_monotonic = 0.0
@@ -140,6 +143,7 @@ _openmeteo_cooldown_notice_sent = False
 _openmeteo_daily_cache: Dict[str, Dict[str, object]] = {}
 _wu_daily_cache: Dict[str, Dict[str, object]] = {}
 _weatherapi_daily_cache: Dict[str, Dict[str, object]] = {}
+_noaa_daily_cache: Dict[str, Dict[str, object]] = {}
 _visual_crossing_disabled_until_monotonic = 0.0
 _visual_crossing_cooldown_notice_sent = False
 _visual_crossing_daily_cache: Dict[str, Dict[str, object]] = {}
@@ -242,25 +246,40 @@ def _openmeteo_cached_temp(city_slug: str, target_date: date) -> Optional[float]
     now = time.monotonic()
     with _openmeteo_cache_lock:
         entry = _openmeteo_daily_cache.get(city_slug)
-        if not entry:
-            return None
-        expires_at = float(entry.get("expires_at", 0.0) or 0.0)
-        if expires_at <= now:
-            _openmeteo_daily_cache.pop(city_slug, None)
-            return None
-        temps = entry.get("temps", {})
-        if not isinstance(temps, dict) or key not in temps:
-            return None
-        value = temps.get(key)
-        return None if value is None else float(value)
+        if entry:
+            expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+            if expires_at <= now:
+                _openmeteo_daily_cache.pop(city_slug, None)
+            else:
+                temps = entry.get("temps", {})
+                if isinstance(temps, dict) and key in temps:
+                    value = temps.get(key)
+                    return None if value is None else float(value)
+    loaded = _load_persisted_daily_temps("openmeteo", city_slug)
+    if loaded is None:
+        return None
+    temps, ttl_seconds = loaded
+    _store_openmeteo_daily_cache(city_slug, temps, persist=False, ttl_seconds=ttl_seconds)
+    value = temps.get(key)
+    return None if value is None else float(value)
 
 
-def _store_openmeteo_daily_cache(city_slug: str, temps: Dict[str, Optional[float]]) -> None:
+def _store_openmeteo_daily_cache(
+    city_slug: str,
+    temps: Dict[str, Optional[float]],
+    *,
+    persist: bool = True,
+    ttl_seconds: Optional[float] = None,
+) -> None:
+    ttl = max(1.0, float(ttl_seconds if ttl_seconds is not None else OPENMETEO_CACHE_TTL_SECONDS))
+    payload = dict(temps)
     with _openmeteo_cache_lock:
         _openmeteo_daily_cache[city_slug] = {
-            "temps": dict(temps),
-            "expires_at": time.monotonic() + OPENMETEO_CACHE_TTL_SECONDS,
+            "temps": payload,
+            "expires_at": time.monotonic() + ttl,
         }
+    if persist:
+        _store_persisted_daily_temps("openmeteo", city_slug, payload, ttl)
 
 
 def _wu_cached_temp(city_slug: str, target_date: date) -> Optional[float]:
@@ -268,25 +287,40 @@ def _wu_cached_temp(city_slug: str, target_date: date) -> Optional[float]:
     now = time.monotonic()
     with _wu_cache_lock:
         entry = _wu_daily_cache.get(city_slug)
-        if not entry:
-            return None
-        expires_at = float(entry.get("expires_at", 0.0) or 0.0)
-        if expires_at <= now:
-            _wu_daily_cache.pop(city_slug, None)
-            return None
-        temps = entry.get("temps", {})
-        if not isinstance(temps, dict) or key not in temps:
-            return None
-        value = temps.get(key)
-        return None if value is None else float(value)
+        if entry:
+            expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+            if expires_at <= now:
+                _wu_daily_cache.pop(city_slug, None)
+            else:
+                temps = entry.get("temps", {})
+                if isinstance(temps, dict) and key in temps:
+                    value = temps.get(key)
+                    return None if value is None else float(value)
+    loaded = _load_persisted_daily_temps("wu", city_slug)
+    if loaded is None:
+        return None
+    temps, ttl_seconds = loaded
+    _store_wu_daily_cache(city_slug, temps, persist=False, ttl_seconds=ttl_seconds)
+    value = temps.get(key)
+    return None if value is None else float(value)
 
 
-def _store_wu_daily_cache(city_slug: str, temps: Dict[str, Optional[float]]) -> None:
+def _store_wu_daily_cache(
+    city_slug: str,
+    temps: Dict[str, Optional[float]],
+    *,
+    persist: bool = True,
+    ttl_seconds: Optional[float] = None,
+) -> None:
+    ttl = max(1.0, float(ttl_seconds if ttl_seconds is not None else WU_CACHE_TTL_SECONDS))
+    payload = dict(temps)
     with _wu_cache_lock:
         _wu_daily_cache[city_slug] = {
-            "temps": dict(temps),
-            "expires_at": time.monotonic() + WU_CACHE_TTL_SECONDS,
+            "temps": payload,
+            "expires_at": time.monotonic() + ttl,
         }
+    if persist:
+        _store_persisted_daily_temps("wu", city_slug, payload, ttl)
 
 
 def _weatherapi_cached_temp(city_slug: str, target_date: date) -> Optional[float]:
@@ -294,25 +328,81 @@ def _weatherapi_cached_temp(city_slug: str, target_date: date) -> Optional[float
     now = time.monotonic()
     with _weatherapi_cache_lock:
         entry = _weatherapi_daily_cache.get(city_slug)
-        if not entry:
-            return None
-        expires_at = float(entry.get("expires_at", 0.0) or 0.0)
-        if expires_at <= now:
-            _weatherapi_daily_cache.pop(city_slug, None)
-            return None
-        temps = entry.get("temps", {})
-        if not isinstance(temps, dict) or key not in temps:
-            return None
-        value = temps.get(key)
-        return None if value is None else float(value)
+        if entry:
+            expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+            if expires_at <= now:
+                _weatherapi_daily_cache.pop(city_slug, None)
+            else:
+                temps = entry.get("temps", {})
+                if isinstance(temps, dict) and key in temps:
+                    value = temps.get(key)
+                    return None if value is None else float(value)
+    loaded = _load_persisted_daily_temps("weatherapi", city_slug)
+    if loaded is None:
+        return None
+    temps, ttl_seconds = loaded
+    _store_weatherapi_daily_cache(city_slug, temps, persist=False, ttl_seconds=ttl_seconds)
+    value = temps.get(key)
+    return None if value is None else float(value)
 
 
-def _store_weatherapi_daily_cache(city_slug: str, temps: Dict[str, Optional[float]]) -> None:
+def _store_weatherapi_daily_cache(
+    city_slug: str,
+    temps: Dict[str, Optional[float]],
+    *,
+    persist: bool = True,
+    ttl_seconds: Optional[float] = None,
+) -> None:
+    ttl = max(1.0, float(ttl_seconds if ttl_seconds is not None else WEATHERAPI_CACHE_TTL_SECONDS))
+    payload = dict(temps)
     with _weatherapi_cache_lock:
         _weatherapi_daily_cache[city_slug] = {
-            "temps": dict(temps),
-            "expires_at": time.monotonic() + WEATHERAPI_CACHE_TTL_SECONDS,
+            "temps": payload,
+            "expires_at": time.monotonic() + ttl,
         }
+    if persist:
+        _store_persisted_daily_temps("weatherapi", city_slug, payload, ttl)
+
+
+def _noaa_cached_temp(city_slug: str, target_date: date) -> Optional[float]:
+    key = target_date.isoformat()
+    now = time.monotonic()
+    with _noaa_cache_lock:
+        entry = _noaa_daily_cache.get(city_slug)
+        if entry:
+            expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+            if expires_at <= now:
+                _noaa_daily_cache.pop(city_slug, None)
+            else:
+                temps = entry.get("temps", {})
+                if isinstance(temps, dict) and key in temps:
+                    value = temps.get(key)
+                    return None if value is None else float(value)
+    loaded = _load_persisted_daily_temps("noaa", city_slug)
+    if loaded is None:
+        return None
+    temps, ttl_seconds = loaded
+    _store_noaa_daily_cache(city_slug, temps, persist=False, ttl_seconds=ttl_seconds)
+    value = temps.get(key)
+    return None if value is None else float(value)
+
+
+def _store_noaa_daily_cache(
+    city_slug: str,
+    temps: Dict[str, Optional[float]],
+    *,
+    persist: bool = True,
+    ttl_seconds: Optional[float] = None,
+) -> None:
+    ttl = max(1.0, float(ttl_seconds if ttl_seconds is not None else NOAA_CACHE_TTL_SECONDS))
+    payload = dict(temps)
+    with _noaa_cache_lock:
+        _noaa_daily_cache[city_slug] = {
+            "temps": payload,
+            "expires_at": time.monotonic() + ttl,
+        }
+    if persist:
+        _store_persisted_daily_temps("noaa", city_slug, payload, ttl)
 
 
 def _visual_crossing_cooldown_remaining() -> float:
@@ -354,25 +444,85 @@ def _visual_crossing_cached_temp(city_slug: str, target_date: date) -> Optional[
     now = time.monotonic()
     with _visual_crossing_cache_lock:
         entry = _visual_crossing_daily_cache.get(city_slug)
-        if not entry:
-            return None
-        expires_at = float(entry.get("expires_at", 0.0) or 0.0)
-        if expires_at <= now:
-            _visual_crossing_daily_cache.pop(city_slug, None)
-            return None
-        temps = entry.get("temps", {})
-        if not isinstance(temps, dict) or key not in temps:
-            return None
-        value = temps.get(key)
-        return None if value is None else float(value)
+        if entry:
+            expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+            if expires_at <= now:
+                _visual_crossing_daily_cache.pop(city_slug, None)
+            else:
+                temps = entry.get("temps", {})
+                if isinstance(temps, dict) and key in temps:
+                    value = temps.get(key)
+                    return None if value is None else float(value)
+    loaded = _load_persisted_daily_temps("visual_crossing", city_slug)
+    if loaded is None:
+        return None
+    temps, ttl_seconds = loaded
+    _store_visual_crossing_daily_cache(city_slug, temps, persist=False, ttl_seconds=ttl_seconds)
+    value = temps.get(key)
+    return None if value is None else float(value)
 
 
-def _store_visual_crossing_daily_cache(city_slug: str, temps: Dict[str, Optional[float]]) -> None:
+def _store_visual_crossing_daily_cache(
+    city_slug: str,
+    temps: Dict[str, Optional[float]],
+    *,
+    persist: bool = True,
+    ttl_seconds: Optional[float] = None,
+) -> None:
+    ttl = max(1.0, float(ttl_seconds if ttl_seconds is not None else VISUAL_CROSSING_CACHE_TTL_SECONDS))
+    payload = dict(temps)
     with _visual_crossing_cache_lock:
         _visual_crossing_daily_cache[city_slug] = {
-            "temps": dict(temps),
-            "expires_at": time.monotonic() + VISUAL_CROSSING_CACHE_TTL_SECONDS,
+            "temps": payload,
+            "expires_at": time.monotonic() + ttl,
         }
+    if persist:
+        _store_persisted_daily_temps("visual_crossing", city_slug, payload, ttl)
+
+
+def _coerce_persisted_daily_temps(payload: dict) -> Dict[str, Optional[float]]:
+    raw_temps = payload.get("temps")
+    if not isinstance(raw_temps, dict):
+        return {}
+    temps: Dict[str, Optional[float]] = {}
+    for raw_key, raw_value in raw_temps.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        if raw_value is None:
+            temps[key] = None
+            continue
+        try:
+            temps[key] = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+    return temps
+
+
+def _load_persisted_daily_temps(provider: str, city_slug: str) -> Optional[Tuple[Dict[str, Optional[float]], float]]:
+    loaded = load_cached_payload("temperature", provider, city_slug)
+    if loaded is None:
+        return None
+    payload, ttl_seconds = loaded
+    temps = _coerce_persisted_daily_temps(payload)
+    if not temps:
+        return None
+    return temps, ttl_seconds
+
+
+def _store_persisted_daily_temps(
+    provider: str,
+    city_slug: str,
+    temps: Dict[str, Optional[float]],
+    ttl_seconds: float,
+) -> None:
+    store_cached_payload(
+        "temperature",
+        provider,
+        city_slug,
+        {"temps": dict(temps)},
+        ttl_seconds,
+    )
 
 
 def _wu_daily_forecast_temps(data: dict) -> Dict[str, Optional[float]]:
@@ -451,6 +601,19 @@ def _weatherapi_daily_temps(data: dict) -> Dict[str, Optional[float]]:
         value = day_payload.get("maxtemp_f")
         if value is None:
             value = day_payload.get("maxtemp_c")
+        temps[key] = None if value is None else float(value)
+    return temps
+
+
+def _noaa_daily_temps(periods: list[dict]) -> Dict[str, Optional[float]]:
+    temps: Dict[str, Optional[float]] = {}
+    for period in periods:
+        if not isinstance(period, dict) or not period.get("isDaytime"):
+            continue
+        key = str(period.get("startTime", "") or "")[:10]
+        if not key:
+            continue
+        value = period.get("temperature")
         temps[key] = None if value is None else float(value)
     return temps
 
@@ -964,6 +1127,10 @@ def get_noaa_forecast_max_temp(
     if coords.get("unit") != "fahrenheit":
         return None
 
+    cached = _noaa_cached_temp(city_slug, target_date)
+    if cached is not None:
+        return cached
+
     lat = coords["lat"]
     lon = coords["lon"]
 
@@ -985,6 +1152,11 @@ def get_noaa_forecast_max_temp(
         r = requests.get(forecast_url, headers=NOAA_HEADERS, timeout=10)
         r.raise_for_status()
         periods = r.json()["properties"]["periods"]
+        temps = _noaa_daily_temps(periods)
+        if temps:
+            _store_noaa_daily_cache(city_slug, temps)
+            value = temps.get(target_date.isoformat())
+            return None if value is None else float(value)
 
         # Find the daytime period for our target date — that's the daily high
         target_str = target_date.isoformat()

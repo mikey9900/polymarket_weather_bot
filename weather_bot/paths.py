@@ -17,6 +17,7 @@ CONFIG_ROOT = SHARED_DATA_ROOT / "config"
 ACTIVE_CONFIG_PATH = CONFIG_ROOT / "active_config.yaml"
 DEFAULT_CONFIG_TEMPLATE_PATH = REPO_ROOT / "weather_bot" / "config.default.yaml"
 TRACKER_DB_PATH = SHARED_DATA_ROOT / "weatherbot.db"
+WEATHER_CACHE_DB_PATH = SHARED_DATA_ROOT / "weather_cache.db"
 PID_LOCK_PATH = SHARED_DATA_ROOT / "weatherbot.pid.lock"
 LEGACY_TRACKING_PATH = Path(os.getenv("WEATHER_LEGACY_TRACKING_FILE", "/config/weather_bot_edges.json"))
 LEGACY_TRACKING_FALLBACK_PATH = REPO_ROOT / "tracking" / "weather_bot_edges.json"

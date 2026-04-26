@@ -28,6 +28,39 @@ def _write_config(tmp_path: Path) -> Path:
     return config_path
 
 
+def test_default_config_disables_precipitation_scans(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+
+    assert config.precipitation.enabled is False
+    assert runtime.get_status_snapshot()["precipitation_enabled"] is False
+
+
+def test_load_config_accepts_precipitation_enabled_ha_override(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(json.dumps({"precipitation_enabled": True}), encoding="utf-8")
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.precipitation.enabled is True
+
+
+def test_runtime_startup_respects_precipitation_config_over_saved_runtime_state(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.set_runtime_state("runtime_status", {"precipitation_enabled": True})
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+
+    assert runtime.get_status_snapshot()["precipitation_enabled"] is False
+
+
 def _signal(
     key: str = "rt-1",
     *,

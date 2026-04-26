@@ -114,6 +114,7 @@ class WeatherRuntime:
         }
         saved_state = self.tracker.get_runtime_state("runtime_status", default=default_state)
         self._state = {**default_state, **saved_state}
+        self._state["precipitation_enabled"] = bool(self.config.precipitation.enabled)
         self._state["open_position_weather_refresh_interval_seconds"] = self._open_position_weather_refresh_interval_seconds()
         self._state["auto_temperature_scan_interval_seconds"] = _normalize_scan_interval_seconds(
             self._state.get("auto_temperature_scan_interval_seconds"),

@@ -13,6 +13,10 @@ import yaml
 from .paths import ensure_runtime_config
 
 
+def _is_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class AppSettings:
     timezone: str
@@ -165,6 +169,8 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("app", {})["auto_precipitation_scan_minutes"] = int(payload["precipitation_scan_minutes"])
     if "precipitation_scan_seconds" in payload:
         mapped.setdefault("app", {})["auto_precipitation_scan_seconds"] = int(payload["precipitation_scan_seconds"])
+    if "precipitation_enabled" in payload:
+        mapped.setdefault("precipitation", {})["enabled"] = bool(payload["precipitation_enabled"])
     if "resolution_check_minutes" in payload:
         mapped.setdefault("app", {})["resolution_check_minutes"] = int(payload["resolution_check_minutes"])
     if "open_position_review_seconds" in payload:
@@ -194,6 +200,8 @@ def _load_env_overrides() -> dict[str, Any]:
         payload.setdefault("app", {})["auto_precipitation_scan_minutes"] = int(os.getenv("WEATHER_PRECIP_SCAN_MINUTES", "360"))
     if os.getenv("WEATHER_PRECIP_SCAN_SECONDS"):
         payload.setdefault("app", {})["auto_precipitation_scan_seconds"] = int(os.getenv("WEATHER_PRECIP_SCAN_SECONDS", "0"))
+    if os.getenv("WEATHER_PRECIPITATION_ENABLED"):
+        payload.setdefault("precipitation", {})["enabled"] = _is_truthy(os.getenv("WEATHER_PRECIPITATION_ENABLED"))
     if os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES"):
         payload.setdefault("app", {})["resolution_check_minutes"] = int(os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES", "15"))
     if os.getenv("WEATHER_OPEN_POSITION_REVIEW_SECONDS"):
