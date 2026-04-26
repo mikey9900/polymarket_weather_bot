@@ -628,6 +628,54 @@ def test_dashboard_manual_close_action_accepts_stringified_json_payload(tmp_path
     assert latest_trade["exit_fee_paid"] > 0
 
 
+def test_dashboard_manual_close_action_accepts_id_alias_payload(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("manual-close-id-alias-1")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+    open_positions = tracker.get_dashboard_paper_positions(limit=12, status="open")
+
+    response = dashboard.apply_control_threadsafe(
+        {
+            "action": "close_position",
+            "value": {"id": str(open_positions[0]["id"]), "reason": "manual_test_close_id_alias"},
+        }
+    )
+    latest_trade = tracker.get_dashboard_paper_positions(limit=12)[0]
+
+    assert response["ok"] is True
+    assert latest_trade["status"] == "closed"
+    assert latest_trade["exit_reason"] == "manual_test_close_id_alias"
+
+
+def test_dashboard_manual_close_action_accepts_nested_id_alias_payload(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("manual-close-nested-id-alias-1")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+    open_positions = tracker.get_dashboard_paper_positions(limit=12, status="open")
+
+    response = dashboard.apply_control_threadsafe(
+        {
+            "action": "close_position",
+            "value": {"payload": {"positionId": str(open_positions[0]["id"]), "reason": "manual_test_close_nested_alias"}},
+        }
+    )
+    latest_trade = tracker.get_dashboard_paper_positions(limit=12)[0]
+
+    assert response["ok"] is True
+    assert latest_trade["status"] == "closed"
+    assert latest_trade["exit_reason"] == "manual_test_close_nested_alias"
+
+
 def test_manual_close_refreshes_stale_mark_before_closing(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")

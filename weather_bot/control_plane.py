@@ -169,7 +169,17 @@ class ControlPlane:
                 nested_keys=("value", "payload", "data"),
             )
             try:
-                position_id = int(value.get("position_id"))
+                position_id = _coerce_int(
+                    value,
+                    keys=(
+                        "position_id",
+                        "id",
+                        "positionId",
+                        "paper_position_id",
+                        "open_position_id",
+                        "value",
+                    ),
+                )
             except (TypeError, ValueError, AttributeError):
                 return self._record(ControlResult(False, 400, "A numeric paper position id is required.", action))
             reason = str(value.get("reason") or "manual_dashboard_sell")
