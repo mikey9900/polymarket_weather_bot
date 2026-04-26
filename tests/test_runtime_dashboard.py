@@ -9,6 +9,7 @@ import yaml
 from weather_bot.config import load_config
 from weather_bot.control_plane import ControlPlane, ControlRequest
 from weather_bot.dashboard_state import DashboardStateService
+from weather_bot.live_api import render_dashboard_html
 from weather_bot.models import ForecastSnapshot, ScanBatch, WeatherSignal
 from weather_bot.paths import DEFAULT_CONFIG_TEMPLATE_PATH
 from weather_bot.runtime import WeatherRuntime, _scheduled_interval_seconds
@@ -139,6 +140,14 @@ def test_dashboard_rejects_empty_control_action(tmp_path: Path):
     assert response["ok"] is False
     assert response["status"] == 400
     assert "empty" in response["message"].lower()
+
+
+def test_dashboard_posts_controls_through_generic_control_endpoint():
+    html = render_dashboard_html()
+
+    assert 'fetch(api("./api/control")' in html
+    assert 'JSON.stringify({action,value})' in html
+    assert '/api/control/${encodeURIComponent(action)}' not in html
 
 
 def test_dashboard_exposes_recent_resolutions(tmp_path: Path):
