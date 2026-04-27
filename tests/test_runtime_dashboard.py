@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
 
+from weather_bot.analysis_bundle import AnalysisBundleExporter
+from weather_bot.dropbox_exports import sync_dropbox_latest_bundle_to_local
 from scanner.weather_event_scanner import cities_for_temperature_market_scope
 from weather_bot.config import load_config
 from weather_bot.control_plane import ControlPlane, ControlRequest
@@ -191,6 +194,150 @@ def test_dashboard_control_updates_state(tmp_path: Path):
     assert response["state"]["recent_operator_actions"][0]["action"] == "stop"
 
 
+def test_dashboard_exports_analysis_bundle(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    scan_export_root = tmp_path / "scan_runs"
+    scan_export_root.mkdir(parents=True, exist_ok=True)
+    (scan_export_root / "20260427T120000_temperature_completed.json").write_text(
+        json.dumps({"scan_type": "temperature", "status": "completed"}),
+        encoding="utf-8",
+    )
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        scan_export_root=scan_export_root,
+    )
+    analysis_exporter = AnalysisBundleExporter(
+        tracker=tracker,
+        runtime=runtime,
+        bundle_root=tmp_path / "analysis_bundle",
+    )
+    control_plane = ControlPlane(runtime, tracker, analysis_exporter=analysis_exporter)
+    dashboard = DashboardStateService(
+        tracker=tracker,
+        runtime=runtime,
+        control_plane=control_plane,
+        state_export_path=tmp_path / "dashboard_state.json",
+        analysis_exporter=analysis_exporter,
+    )
+    analysis_exporter.bind_dashboard_state(
+        snapshot_refresher=dashboard.refresh_once,
+        snapshot_getter=dashboard.get_state_threadsafe,
+    )
+
+    response = dashboard.apply_control_threadsafe({"action": "export_analysis_bundle"})
+
+    assert response["ok"] is True
+    bundle_path = Path(response["state"]["exports"]["last_analysis_bundle_path"])
+    latest_bundle_path = Path(response["state"]["exports"]["latest_analysis_bundle_path"])
+    latest_index_path = Path(response["state"]["exports"]["latest_analysis_index_path"])
+    assert bundle_path.exists()
+    assert latest_bundle_path.exists()
+    assert latest_index_path.exists()
+    with zipfile.ZipFile(bundle_path) as archive:
+        names = set(archive.namelist())
+    assert "dashboard_state.json" in names
+    assert "runtime_status.json" in names
+    assert "weatherbot.db" in names
+    assert "weather_cache.db" in names
+    assert "manifest.json" in names
+    assert "scan_runs/20260427T120000_temperature_completed.json" in names
+    latest_index = json.loads(latest_index_path.read_text(encoding="utf-8"))
+    assert latest_index["label"] == "WEATHER-BOT"
+    assert latest_index["latest_bundle"]["local_path"] == str(latest_bundle_path)
+    assert latest_index["archive_bundle"]["local_path"] == str(bundle_path)
+
+
+def test_analysis_bundle_export_updates_dropbox_latest_pointer(tmp_path: Path, monkeypatch):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    uploads: list[tuple[str, str]] = []
+
+    def fake_upload(local_path, dropbox_path, dropbox_auth):
+        uploads.append((Path(local_path).name, str(dropbox_path)))
+        return {"ok": True, "status": 200, "path": str(dropbox_path)}
+
+    def fake_link(dropbox_path, dropbox_auth):
+        return f"https://dropbox.test{dropbox_path}?dl=0"
+
+    monkeypatch.setattr("weather_bot.analysis_bundle.dropbox_upload_file", fake_upload)
+    monkeypatch.setattr("weather_bot.analysis_bundle.dropbox_create_or_get_shared_link", fake_link)
+
+    analysis_exporter = AnalysisBundleExporter(
+        tracker=tracker,
+        runtime=runtime,
+        bundle_root=tmp_path / "analysis_bundle",
+        dropbox_auth={"access_token": "token", "_cached_access_token": "token", "_cached_expires_at": 9999999999},
+        dropbox_root="/weather-bot",
+    )
+    control_plane = ControlPlane(runtime, tracker, analysis_exporter=analysis_exporter)
+    dashboard = DashboardStateService(
+        tracker=tracker,
+        runtime=runtime,
+        control_plane=control_plane,
+        state_export_path=tmp_path / "dashboard_state.json",
+        analysis_exporter=analysis_exporter,
+    )
+    analysis_exporter.bind_dashboard_state(
+        snapshot_refresher=dashboard.refresh_once,
+        snapshot_getter=dashboard.get_state_threadsafe,
+    )
+
+    response = dashboard.apply_control_threadsafe({"action": "export_analysis_bundle"})
+
+    exports = response["state"]["exports"]
+    assert response["ok"] is True
+    assert exports["analysis_dropbox_enabled"] is True
+    assert exports["last_analysis_bundle_dropbox_path"] == "/weather-bot/latest/WEATHER-BOT_latest_bundle.zip"
+    assert exports["last_analysis_index_dropbox_path"] == "/weather-bot/latest/WEATHER-BOT_latest_index.json"
+    assert exports["last_analysis_bundle_dropbox_url"] == "https://dropbox.test/weather-bot/latest/WEATHER-BOT_latest_bundle.zip?dl=0"
+    assert exports["last_analysis_index_dropbox_url"] == "https://dropbox.test/weather-bot/latest/WEATHER-BOT_latest_index.json?dl=0"
+    assert exports["last_analysis_bundle_dropbox_error"] is None
+    latest_index = json.loads(Path(exports["latest_analysis_index_path"]).read_text(encoding="utf-8"))
+    assert latest_index["dropbox"]["latest_bundle_url"] == exports["last_analysis_bundle_dropbox_url"]
+    assert latest_index["dropbox"]["latest_index_url"] == exports["last_analysis_index_dropbox_url"]
+    assert {path for _, path in uploads} >= {
+        "/weather-bot/daily-archives/" + Path(exports["last_analysis_bundle_path"]).name,
+        "/weather-bot/latest/WEATHER-BOT_latest_bundle.zip",
+        "/weather-bot/latest/WEATHER-BOT_latest_index.json",
+    }
+
+
+def test_sync_dropbox_latest_bundle_to_local_extracts_bundle(tmp_path: Path, monkeypatch):
+    def fake_download(remote_path, dropbox_auth, local_path):
+        local_path = Path(local_path)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        if str(remote_path).endswith("_latest_bundle.zip"):
+            with zipfile.ZipFile(local_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("manifest.json", json.dumps({"label": "WEATHER-BOT"}))
+        else:
+            local_path.write_text(json.dumps({"label": "WEATHER-BOT"}), encoding="utf-8")
+        return {"ok": True, "status": 200, "path": str(local_path)}
+
+    monkeypatch.setattr("weather_bot.dropbox_exports.dropbox_download_file", fake_download)
+
+    result = sync_dropbox_latest_bundle_to_local(
+        dropbox_token="token",
+        dropbox_root="/weather-bot",
+        output_dir=tmp_path / "dropbox_sync",
+        label="WEATHER-BOT",
+    )
+
+    assert result["ok"] is True
+    assert Path(result["downloads"]["latest_bundle_zip"]["path"]).exists()
+    assert Path(result["downloads"]["latest_index_json"]["path"]).exists()
+    assert result["extraction_error"] is None
+    assert Path(result["extracted_bundle_dir"], "manifest.json").exists()
+
+
 def test_dashboard_rejects_empty_control_action(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
@@ -235,9 +382,12 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert 'id="control-diagnostics"' in html
     assert "openProposalModal" in html
     assert "copyExportPath" in html
+    assert "copyBundlePath" in html
+    assert "copyCloudLink" in html
     assert "Showing ${shown} of ${total} open trades" in html
     assert "set_paper_entry_min_edge_abs" in html
     assert "set_temperature_market_scope" in html
+    assert "export_analysis_bundle" in html
     assert "setEdgeLimit()" in html
     assert "set_temperature_scan_interval_minutes" in html
     assert "set_precipitation_scan_interval_minutes" in html
@@ -246,6 +396,9 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "setTempScope()" in html
     assert "marketScopeOptions" in html
     assert "marketScopeLabel" in html
+    assert "EXPORT BUNDLE" in html
+    assert "COPY BUNDLE PATH" in html
+    assert "COPY CLOUD LINK" in html
 
 
 def test_dashboard_apply_control_returns_json_when_refresh_fails(tmp_path: Path, monkeypatch):

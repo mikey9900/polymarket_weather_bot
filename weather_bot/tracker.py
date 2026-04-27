@@ -150,6 +150,18 @@ class WeatherTracker:
         self._ensure_paper_position_columns()
         self.conn.commit()
 
+    def backup_database(self, destination: str | Path) -> str:
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            backup_conn = sqlite3.connect(str(target))
+            try:
+                self.conn.backup(backup_conn)
+                backup_conn.commit()
+            finally:
+                backup_conn.close()
+        return str(target)
+
     def close(self) -> None:
         with self._lock:
             self.conn.close()

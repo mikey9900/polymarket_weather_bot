@@ -11,11 +11,12 @@ from typing import Any
 
 
 class DashboardStateService:
-    def __init__(self, *, tracker, runtime, control_plane, refresh_seconds: float = 5.0, codex_manager=None, state_export_path: str | Path | None = None):
+    def __init__(self, *, tracker, runtime, control_plane, refresh_seconds: float = 5.0, codex_manager=None, state_export_path: str | Path | None = None, analysis_exporter=None):
         self.tracker = tracker
         self.runtime = runtime
         self.control_plane = control_plane
         self.codex_manager = codex_manager
+        self.analysis_exporter = analysis_exporter
         self.refresh_seconds = max(1.0, float(refresh_seconds))
         self.state_export_path = Path(state_export_path) if state_export_path else None
         self._state_export_error: str | None = None
@@ -69,6 +70,7 @@ class DashboardStateService:
     def _build_snapshot(self) -> dict[str, Any]:
         paper_stats = self.tracker.get_paper_stats()
         runtime_status = self.runtime.get_status_snapshot()
+        analysis_status = self._analysis_export_status()
         stale_after_s = getattr(getattr(self.runtime, "config", None), "paper", None)
         stale_after_s = getattr(stale_after_s, "mark_stale_after_seconds", None)
         payload = {
@@ -110,6 +112,7 @@ class DashboardStateService:
                 "dashboard_state_error": self._state_export_error,
                 "scan_export_root": str(self.runtime.scan_export_root) if getattr(self.runtime, "scan_export_root", None) is not None else None,
                 "scan_export_error": runtime_status.get("last_scan_export_error"),
+                **analysis_status,
             },
         }
         strategy_engine = getattr(self.runtime, "strategy_engine", None)
@@ -188,6 +191,7 @@ class DashboardStateService:
                     "dashboard_state_error": self._state_export_error,
                     "scan_export_root": str(self.runtime.scan_export_root) if getattr(self.runtime, "scan_export_root", None) is not None else None,
                     "scan_export_error": self.runtime.get_status_snapshot().get("last_scan_export_error"),
+                    **self._analysis_export_status(),
                 },
             }
         runtime_status = self.runtime.get_status_snapshot()
@@ -199,8 +203,32 @@ class DashboardStateService:
         exports["dashboard_state_error"] = self._state_export_error
         exports["scan_export_root"] = str(self.runtime.scan_export_root) if getattr(self.runtime, "scan_export_root", None) is not None else None
         exports["scan_export_error"] = runtime_status.get("last_scan_export_error")
+        exports.update(self._analysis_export_status())
         snapshot["exports"] = exports
         return snapshot
+
+    def _analysis_export_status(self) -> dict[str, Any]:
+        if self.analysis_exporter is None:
+            return {
+                "analysis_bundle_label": None,
+                "analysis_bundle_root": None,
+                "latest_analysis_bundle_path": None,
+                "latest_analysis_bundle_exists": False,
+                "latest_analysis_index_path": None,
+                "latest_analysis_index_exists": False,
+                "last_analysis_bundle_path": None,
+                "last_analysis_bundle_error": None,
+                "last_analysis_bundle_at": None,
+                "analysis_dropbox_enabled": False,
+                "analysis_dropbox_root": None,
+                "analysis_dropbox_configuration_error": None,
+                "last_analysis_bundle_dropbox_path": None,
+                "last_analysis_bundle_dropbox_url": None,
+                "last_analysis_index_dropbox_path": None,
+                "last_analysis_index_dropbox_url": None,
+                "last_analysis_bundle_dropbox_error": None,
+            }
+        return dict(self.analysis_exporter.status())
 
     @staticmethod
     def _should_skip_refresh(action: str, status: int) -> bool:

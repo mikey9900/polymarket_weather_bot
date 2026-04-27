@@ -7,10 +7,11 @@ import time
 from dataclasses import dataclass
 
 from .config import WeatherBotConfig, load_config
+from .analysis_bundle import AnalysisBundleExporter
 from .control_plane import ControlPlane
 from .dashboard_state import DashboardStateService
 from .live_api import LiveApiServer
-from .paths import PID_LOCK_PATH, SCAN_EXPORTS_ROOT, STATE_EXPORT_PATH
+from .paths import ANALYSIS_BUNDLE_ROOT, PID_LOCK_PATH, SCAN_EXPORTS_ROOT, STATE_EXPORT_PATH
 from .process_lock import PidLock, acquire_pid_lock
 from .research.codex_automation import CodexAutomationManager
 from .research.runtime import ResearchSnapshotProvider
@@ -79,7 +80,17 @@ def get_application() -> WeatherApplication:
         telegram=telegram,
         scan_export_root=SCAN_EXPORTS_ROOT,
     )
-    control_plane = ControlPlane(runtime, tracker, codex_manager=codex_manager)
+    analysis_exporter = AnalysisBundleExporter(
+        tracker=tracker,
+        runtime=runtime,
+        bundle_root=ANALYSIS_BUNDLE_ROOT,
+    )
+    control_plane = ControlPlane(
+        runtime,
+        tracker,
+        codex_manager=codex_manager,
+        analysis_exporter=analysis_exporter,
+    )
     dashboard_state = DashboardStateService(
         tracker=tracker,
         runtime=runtime,
@@ -87,6 +98,11 @@ def get_application() -> WeatherApplication:
         refresh_seconds=config.dashboard.refresh_seconds,
         codex_manager=codex_manager,
         state_export_path=STATE_EXPORT_PATH,
+        analysis_exporter=analysis_exporter,
+    )
+    analysis_exporter.bind_dashboard_state(
+        snapshot_refresher=dashboard_state.refresh_once,
+        snapshot_getter=dashboard_state.get_state_threadsafe,
     )
     live_api = LiveApiServer(dashboard_state, host=config.dashboard.host, port=config.dashboard.port)
     pid_lock = acquire_pid_lock(PID_LOCK_PATH)

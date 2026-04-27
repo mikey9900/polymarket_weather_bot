@@ -96,10 +96,11 @@ class ControlResult:
 
 
 class ControlPlane:
-    def __init__(self, runtime, tracker, *, codex_manager=None):
+    def __init__(self, runtime, tracker, *, codex_manager=None, analysis_exporter=None):
         self.runtime = runtime
         self.tracker = tracker
         self.codex_manager = codex_manager
+        self.analysis_exporter = analysis_exporter
         self._last_control = {"action": None, "ok": None, "message": "Operator link ready.", "created_at": None}
 
     def last_control(self) -> dict[str, Any]:
@@ -170,6 +171,7 @@ class ControlPlane:
                 "toggle_temperature": True,
                 "toggle_precipitation": True,
                 "toggle_paper_auto_trade": True,
+                "export_analysis_bundle": self.analysis_exporter is not None,
                 "research_run_now": self.codex_manager is not None,
                 "tuner_run_now": self.codex_manager is not None,
                 "tuner_promote_latest": self.codex_manager is not None,
@@ -358,6 +360,30 @@ class ControlPlane:
             enabled = self.runtime.set_paper_auto_trade(_coerce_bool(request.value))
             state = "enabled" if enabled else "disabled"
             return self._record(ControlResult(True, 200, f"Automatic paper trading {state}.", action))
+        if action == "export_analysis_bundle":
+            if self.analysis_exporter is None:
+                return self._record(ControlResult(False, 503, "Analysis bundle export is not configured.", action))
+            try:
+                result = self.analysis_exporter.export_bundle(reason="operator")
+            except Exception as exc:
+                return self._record(
+                    ControlResult(False, 500, f"Analysis bundle export failed: {type(exc).__name__}: {exc}", action)
+                )
+            note = ""
+            if result.get("dropbox_ok"):
+                note = " Dropbox latest bundle and index are now in sync."
+            elif result.get("dropbox_configuration_error"):
+                note = f" Dropbox configuration warning: {result.get('dropbox_configuration_error')}."
+            elif result.get("dropbox_enabled") and result.get("dropbox_error"):
+                note = f" Dropbox upload warning: {result.get('dropbox_error')}."
+            return self._record(
+                ControlResult(
+                    True,
+                    200,
+                    f"Analysis bundle exported to {result['bundle_path']} with {result['scan_export_count']} scan files.{note}",
+                    action,
+                )
+            )
         if self.codex_manager is not None:
             if action == "research_run_now":
                 result = self.codex_manager.enqueue_daily_refresh(requested_by="operator")

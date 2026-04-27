@@ -45,6 +45,8 @@ CODEX_LOCK_PATH = CODEX_ROOT / "runner.lock"
 EXPORT_ROOT = SHARED_DATA_ROOT / "exports"
 STATE_EXPORT_PATH = EXPORT_ROOT / "dashboard_state.json"
 SCAN_EXPORTS_ROOT = EXPORT_ROOT / "scan_runs"
+ANALYSIS_BUNDLE_ROOT = EXPORT_ROOT / "analysis_bundle"
+DROPBOX_SYNC_ROOT = REPO_ROOT / "dropbox_sync"
 
 
 def ensure_data_dirs() -> None:
@@ -58,6 +60,7 @@ def ensure_data_dirs() -> None:
         CODEX_RUNS_ROOT,
         EXPORT_ROOT,
         SCAN_EXPORTS_ROOT,
+        ANALYSIS_BUNDLE_ROOT,
     ):
         path.mkdir(parents=True, exist_ok=True)
 
