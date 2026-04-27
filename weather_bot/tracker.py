@@ -274,61 +274,34 @@ class WeatherTracker:
         exit_fee_bps: float = 0.0,
         exit_slippage_bps: float = 0.0,
     ) -> PaperPosition | None:
-        entry_reference_price = _contract_probability(signal.direction, signal.market_prob)
-        mark_probability = _contract_probability(signal.direction, signal.forecast_prob)
-        entry_price = _apply_entry_slippage(entry_reference_price, entry_slippage_bps)
-        if entry_reference_price is None or entry_price is None or entry_price <= 0:
+        entry_context = _paper_entry_context(signal, entry_slippage_bps)
+        if entry_context is None:
             return None
         with self._lock:
             initial, available = self.get_paper_capital()
-            cost = round(min(float(stake_usd), available), 6)
-            if cost <= 0:
+            position_size = _paper_entry_position_size(stake_usd, available, entry_context["entry_price"], fee_bps)
+            if position_size is None:
                 return None
-            entry_fee_paid = _fee_amount(cost, fee_bps)
-            net_entry_notional = round(cost - entry_fee_paid, 6)
-            if net_entry_notional <= 0:
-                return None
-            shares = round(net_entry_notional / float(entry_price), 6)
-            self.set_setting("paper_capital", {"initial": initial, "available": round(available - cost, 6)})
-            values = (
-                signal_id,
-                decision_id,
-                signal.signal_key,
-                signal.market_type,
-                signal.market_slug,
-                signal.event_slug,
-                signal.city_slug,
-                signal.event_date,
-                signal.label,
-                signal.direction,
-                signal.score,
-                entry_price,
-                entry_reference_price,
-                entry_fee_paid,
-                _bps(fee_bps),
-                _bps(entry_slippage_bps),
-                shares,
-                cost,
-                "open",
-                None,
-                None,
-                entry_reference_price,
-                mark_probability,
-                signal.edge_abs,
-                decision_final_score,
-                signal.created_at,
-                "Entry mark captured from signal.",
-                None,
-                None,
-                None,
-                _bps(exit_fee_bps),
-                _bps(exit_slippage_bps),
-                None,
-                None,
-                None,
-                notes,
-                signal.created_at,
-                None,
+            self.set_setting(
+                "paper_capital",
+                {"initial": initial, "available": round(available - position_size["cost"], 6)},
+            )
+            values = _paper_position_insert_values(
+                signal_id=signal_id,
+                decision_id=decision_id,
+                signal=signal,
+                notes=notes,
+                decision_final_score=decision_final_score,
+                entry_reference_price=entry_context["entry_reference_price"],
+                entry_price=entry_context["entry_price"],
+                mark_probability=entry_context["mark_probability"],
+                entry_fee_paid=position_size["entry_fee_paid"],
+                shares=position_size["shares"],
+                cost=position_size["cost"],
+                fee_bps=fee_bps,
+                entry_slippage_bps=entry_slippage_bps,
+                exit_fee_bps=exit_fee_bps,
+                exit_slippage_bps=exit_slippage_bps,
             )
             placeholders = ", ".join(["?"] * len(values))
             cursor = self.conn.execute(
@@ -346,23 +319,13 @@ class WeatherTracker:
                 values,
             )
             self.conn.commit()
-            return PaperPosition(
-                id=int(cursor.lastrowid),
-                signal_key=signal.signal_key,
-                market_type=signal.market_type,
-                market_slug=signal.market_slug,
-                event_slug=signal.event_slug,
-                city_slug=signal.city_slug,
-                event_date=signal.event_date,
-                label=signal.label,
-                direction=signal.direction,
-                score=signal.score,
-                entry_price=entry_price,
-                shares=shares,
-                cost=cost,
-                status="open",
+            return _paper_position_record(
+                position_id=int(cursor.lastrowid),
+                signal=signal,
+                entry_price=entry_context["entry_price"],
+                shares=position_size["shares"],
+                cost=position_size["cost"],
                 notes=notes,
-                created_at=signal.created_at,
             )
 
     def update_paper_position_review(
@@ -424,38 +387,18 @@ class WeatherTracker:
     ) -> dict[str, Any] | None:
         closed_at = str(closed_at or iso_now())
         with self._lock:
-            row = self.conn.execute(
-                "SELECT * FROM paper_positions WHERE id = ? AND status = 'open'",
-                (int(position_id),),
-            ).fetchone()
+            row = self.conn.execute("SELECT * FROM paper_positions WHERE id = ? AND status = 'open'", (int(position_id),)).fetchone()
             if row is None:
                 return None
 
             initial, available = self.get_paper_capital()
-            shares = float(row["shares"] or 0.0)
-            cost = float(row["cost"] or 0.0)
-            reference_price = _bounded_probability(exit_price)
-            if reference_price is None:
-                reference_price = _bounded_probability(row["mark_price"])
-            if reference_price is None:
-                reference_price = _bounded_probability(row["entry_reference_price"])
-            if reference_price is None:
-                reference_price = _bounded_probability(row["entry_price"]) or 0.0
-            applied_exit_fee_bps = _bps(exit_fee_bps if exit_fee_bps is not None else row["exit_fee_bps"])
-            applied_exit_slippage_bps = _bps(
-                exit_slippage_bps if exit_slippage_bps is not None else row["exit_slippage_bps"]
+            exit_context = _paper_position_exit_context(
+                row,
+                exit_price=exit_price,
+                exit_fee_bps=exit_fee_bps,
+                exit_slippage_bps=exit_slippage_bps,
             )
-            fill_exit_price, gross_payout, exit_fee_paid, net_payout = _estimate_net_exit_value(
-                shares,
-                reference_price,
-                fee_bps=applied_exit_fee_bps,
-                slippage_bps=applied_exit_slippage_bps,
-            )
-            fill_exit_price = fill_exit_price or 0.0
-            gross_payout = gross_payout or 0.0
-            exit_fee_paid = exit_fee_paid or 0.0
-            net_payout = net_payout or 0.0
-            pnl = round(net_payout - cost, 6)
+            pnl = round(exit_context["net_payout"] - float(row["cost"] or 0.0), 6)
 
             self.conn.execute(
                 """
@@ -481,41 +424,36 @@ class WeatherTracker:
                 """,
                 (
                     pnl,
-                    reference_price,
+                    exit_context["reference_price"],
                     _bounded_probability(mark_probability),
                     _as_float(edge_abs),
                     _as_float(final_score),
                     closed_at,
                     str(mark_reason or reason or ""),
-                    fill_exit_price,
-                    reference_price,
-                    exit_fee_paid,
-                    applied_exit_fee_bps,
-                    applied_exit_slippage_bps,
-                    gross_payout,
-                    net_payout,
+                    exit_context["fill_exit_price"],
+                    exit_context["reference_price"],
+                    exit_context["exit_fee_paid"],
+                    exit_context["applied_exit_fee_bps"],
+                    exit_context["applied_exit_slippage_bps"],
+                    exit_context["gross_payout"],
+                    exit_context["net_payout"],
                     str(reason or "manual"),
                     closed_at,
                     int(position_id),
                 ),
             )
-            self.set_setting("paper_capital", {"initial": initial, "available": round(available + net_payout, 6)})
+            self.set_setting(
+                "paper_capital",
+                {"initial": initial, "available": round(available + exit_context["net_payout"], 6)},
+            )
             self.conn.commit()
-            return {
-                "ok": True,
-                "position_id": int(row["id"]),
-                "market_slug": str(row["market_slug"] or ""),
-                "direction": str(row["direction"] or ""),
-                "status": "closed",
-                "exit_price": fill_exit_price,
-                "exit_reference_price": reference_price,
-                "exit_reason": str(reason or "manual"),
-                "exit_fee_paid": exit_fee_paid,
-                "gross_exit_payout": gross_payout,
-                "net_exit_payout": net_payout,
-                "realized_pnl": pnl,
-                "closed_at": closed_at,
-            }
+            return _closed_position_payload(
+                row,
+                exit_context=exit_context,
+                pnl=pnl,
+                closed_at=closed_at,
+                reason=reason,
+            )
 
     def settle_market(self, market_slug: str, resolution: str) -> ResolutionOutcome:
         resolution = str(resolution or "").upper()
@@ -981,84 +919,10 @@ class WeatherTracker:
 
 def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
     payload = dict(row)
-    created_at = _parse_iso_datetime(payload.get("created_at"))
-    resolved_at = _parse_iso_datetime(payload.get("resolved_at"))
     now = datetime.now(timezone.utc)
-    anchor = resolved_at or now
-    holding_seconds = None
-    if created_at is not None:
-        holding_seconds = max(0.0, (anchor - created_at).total_seconds())
-
-    time_to_resolution_s = payload.get("signal_time_to_resolution_s")
-    remaining_to_resolution_s = None
-    if time_to_resolution_s is not None:
-        try:
-            total_window = float(time_to_resolution_s)
-        except (TypeError, ValueError):
-            total_window = None
-        if total_window is not None:
-            if holding_seconds is None:
-                remaining_to_resolution_s = max(0.0, total_window)
-            else:
-                remaining_to_resolution_s = max(0.0, total_window - holding_seconds)
-
-    direction = str(payload.get("direction") or "").upper()
-    default_market_probability = _contract_probability(direction, payload.get("signal_market_prob"))
-    default_outcome_probability = _contract_probability(direction, payload.get("signal_forecast_prob"))
-    entry_reference_price = _bounded_probability(payload.get("entry_reference_price"))
-    entry_price = _bounded_probability(payload.get("entry_price"))
-    if entry_reference_price is None:
-        entry_reference_price = default_market_probability
-    if entry_price is None:
-        entry_price = entry_reference_price or default_market_probability or 0.0
-    shares = _as_float(payload.get("shares")) or 0.0
-    cost = _as_float(payload.get("cost")) or 0.0
-    entry_fee_paid = _as_float(payload.get("entry_fee_paid")) or 0.0
-    entry_fee_bps = _bps(payload.get("entry_fee_bps"))
-    entry_slippage_bps = _bps(payload.get("entry_slippage_bps"))
-    exit_fee_bps = _bps(payload.get("exit_fee_bps"))
-    exit_slippage_bps = _bps(payload.get("exit_slippage_bps"))
-    mark_price = _bounded_probability(payload.get("mark_price"))
-    if mark_price is None:
-        mark_price = default_market_probability
-    outcome_probability = _bounded_probability(payload.get("mark_probability"))
-    if outcome_probability is None:
-        outcome_probability = default_outcome_probability
-    estimated_exit_price, gross_liquidation_value, estimated_exit_fee_paid, net_liquidation_value = _estimate_net_exit_value(
-        shares,
-        mark_price,
-        fee_bps=exit_fee_bps,
-        slippage_bps=exit_slippage_bps,
-    )
-    model_exit_price, gross_model_value, model_exit_fee_paid, net_model_value = _estimate_net_exit_value(
-        shares,
-        outcome_probability,
-        fee_bps=exit_fee_bps,
-        slippage_bps=exit_slippage_bps,
-    )
-    if outcome_probability is not None:
-        expected_payout = round(shares * outcome_probability, 6)
-        expected_value_pnl = round((net_model_value or 0.0) - cost, 6)
-    else:
-        expected_payout = None
-        expected_value_pnl = None
-    if mark_price is not None:
-        mark_to_market_payout = round(shares * mark_price, 6)
-        mark_to_market_pnl = round((net_liquidation_value or 0.0) - cost, 6)
-    else:
-        mark_to_market_payout = None
-        mark_to_market_pnl = None
-    mark_updated_at = _parse_iso_datetime(payload.get("mark_updated_at"))
-    mark_age_seconds = None
-    if mark_updated_at is not None:
-        mark_age_seconds = max(0.0, (now - mark_updated_at).total_seconds())
-
-    decision_metadata = {}
-    try:
-        if payload.get("decision_metadata_json"):
-            decision_metadata = json.loads(str(payload["decision_metadata_json"]))
-    except json.JSONDecodeError:
-        decision_metadata = {}
+    holding_metrics = _dashboard_holding_metrics(payload, now)
+    pricing_metrics = _dashboard_pricing_metrics(payload)
+    decision_metadata = _json_object(payload.get("decision_metadata_json"))
 
     return {
         "id": int(payload["id"]),
@@ -1079,20 +943,327 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
         "decision_reason": str(payload.get("decision_reason") or ""),
         "decision_policy_action": str(payload.get("decision_policy_action") or ""),
         "decision_metadata": decision_metadata,
-        "entry_price": entry_price,
+        "entry_price": pricing_metrics["entry_price"],
+        "entry_reference_price": pricing_metrics["entry_reference_price"],
+        "entry_fee_paid": pricing_metrics["entry_fee_paid"],
+        "entry_fee_bps": pricing_metrics["entry_fee_bps"],
+        "entry_slippage_bps": pricing_metrics["entry_slippage_bps"],
+        "market_probability": pricing_metrics["mark_price"],
+        "outcome_probability": pricing_metrics["outcome_probability"],
+        "shares": pricing_metrics["shares"],
+        "cost": pricing_metrics["cost"],
+        "realized_pnl": _as_float(payload.get("realized_pnl")),
+        "expected_payout": pricing_metrics["expected_payout"],
+        "expected_value_pnl": pricing_metrics["expected_value_pnl"],
+        "mark_price": pricing_metrics["mark_price"],
+        "mark_probability": pricing_metrics["outcome_probability"],
+        "mark_to_market_payout": pricing_metrics["mark_to_market_payout"],
+        "mark_to_market_pnl": pricing_metrics["mark_to_market_pnl"],
+        "estimated_exit_price": pricing_metrics["estimated_exit_price"],
+        "estimated_exit_fee_paid": pricing_metrics["estimated_exit_fee_paid"],
+        "gross_liquidation_value": pricing_metrics["gross_liquidation_value"],
+        "net_liquidation_value": pricing_metrics["net_liquidation_value"],
+        "model_exit_price": pricing_metrics["model_exit_price"],
+        "model_exit_fee_paid": pricing_metrics["model_exit_fee_paid"],
+        "gross_model_value": pricing_metrics["gross_model_value"],
+        "net_model_value": pricing_metrics["net_model_value"],
+        "mark_edge_abs": _as_float(payload.get("mark_edge_abs")),
+        "mark_final_score": _as_float(payload.get("mark_final_score")),
+        "mark_updated_at": str(payload.get("mark_updated_at") or ""),
+        "mark_reason": str(payload.get("mark_reason") or ""),
+        "mark_to_market_mode": "reviewed_contract_mark" if payload.get("mark_updated_at") else "entry_contract_mark",
+        "expected_value_mode": "reviewed_model_prob" if payload.get("mark_probability") is not None else "entry_model_prob",
+        "exit_price": _bounded_probability(payload.get("exit_price")),
+        "exit_reference_price": _bounded_probability(payload.get("exit_reference_price")),
+        "exit_fee_paid": _as_float(payload.get("exit_fee_paid")),
+        "exit_fee_bps": pricing_metrics["exit_fee_bps"],
+        "exit_slippage_bps": pricing_metrics["exit_slippage_bps"],
+        "gross_exit_payout": _as_float(payload.get("gross_exit_payout")),
+        "net_exit_payout": _as_float(payload.get("net_exit_payout")),
+        "exit_reason": str(payload.get("exit_reason") or ""),
+        "mark_age_seconds": holding_metrics["mark_age_seconds"],
+        "mark_is_stale": False,
+        "edge": _as_float(payload.get("signal_edge")),
+        "edge_abs": _as_float(payload.get("signal_edge_abs")),
+        "edge_size": str(payload.get("signal_edge_size") or ""),
+        "confidence": str(payload.get("signal_confidence") or ""),
+        "source_count": int(payload.get("signal_source_count") or 0),
+        "liquidity": _as_float(payload.get("signal_liquidity")),
+        "source_dispersion_pct": _as_float(payload.get("signal_source_dispersion_pct")),
+        "time_to_resolution_s": _as_float(payload.get("signal_time_to_resolution_s")),
+        "remaining_to_resolution_s": holding_metrics["remaining_to_resolution_s"],
+        "holding_seconds": holding_metrics["holding_seconds"],
+        "created_at": str(payload.get("created_at") or ""),
+        "resolved_at": str(payload.get("resolved_at") or ""),
+        "resolution": str(payload.get("resolution") or ""),
+    }
+
+
+def _paper_entry_context(signal: WeatherSignal, entry_slippage_bps: Any) -> dict[str, float | None] | None:
+    entry_reference_price = _contract_probability(signal.direction, signal.market_prob)
+    entry_price = _apply_entry_slippage(entry_reference_price, entry_slippage_bps)
+    if entry_reference_price is None or entry_price is None or entry_price <= 0:
+        return None
+    return {
         "entry_reference_price": entry_reference_price,
+        "mark_probability": _contract_probability(signal.direction, signal.forecast_prob),
+        "entry_price": entry_price,
+    }
+
+
+def _paper_entry_position_size(
+    stake_usd: Any,
+    available: float,
+    entry_price: float | None,
+    fee_bps: Any,
+) -> dict[str, float] | None:
+    if entry_price is None or entry_price <= 0:
+        return None
+    cost = round(min(float(stake_usd), available), 6)
+    if cost <= 0:
+        return None
+    entry_fee_paid = _fee_amount(cost, fee_bps)
+    net_entry_notional = round(cost - entry_fee_paid, 6)
+    if net_entry_notional <= 0:
+        return None
+    return {
+        "cost": cost,
+        "entry_fee_paid": entry_fee_paid,
+        "shares": round(net_entry_notional / float(entry_price), 6),
+    }
+
+
+def _paper_position_insert_values(
+    *,
+    signal_id: int,
+    decision_id: int,
+    signal: WeatherSignal,
+    notes: str,
+    decision_final_score: float | None,
+    entry_reference_price: float | None,
+    entry_price: float | None,
+    mark_probability: float | None,
+    entry_fee_paid: float,
+    shares: float,
+    cost: float,
+    fee_bps: Any,
+    entry_slippage_bps: Any,
+    exit_fee_bps: Any,
+    exit_slippage_bps: Any,
+) -> tuple[Any, ...]:
+    return (
+        signal_id,
+        decision_id,
+        signal.signal_key,
+        signal.market_type,
+        signal.market_slug,
+        signal.event_slug,
+        signal.city_slug,
+        signal.event_date,
+        signal.label,
+        signal.direction,
+        signal.score,
+        entry_price,
+        entry_reference_price,
+        entry_fee_paid,
+        _bps(fee_bps),
+        _bps(entry_slippage_bps),
+        shares,
+        cost,
+        "open",
+        None,
+        None,
+        entry_reference_price,
+        mark_probability,
+        signal.edge_abs,
+        decision_final_score,
+        signal.created_at,
+        "Entry mark captured from signal.",
+        None,
+        None,
+        None,
+        _bps(exit_fee_bps),
+        _bps(exit_slippage_bps),
+        None,
+        None,
+        None,
+        notes,
+        signal.created_at,
+        None,
+    )
+
+
+def _paper_position_record(
+    *,
+    position_id: int,
+    signal: WeatherSignal,
+    entry_price: float | None,
+    shares: float,
+    cost: float,
+    notes: str,
+) -> PaperPosition:
+    return PaperPosition(
+        id=position_id,
+        signal_key=signal.signal_key,
+        market_type=signal.market_type,
+        market_slug=signal.market_slug,
+        event_slug=signal.event_slug,
+        city_slug=signal.city_slug,
+        event_date=signal.event_date,
+        label=signal.label,
+        direction=signal.direction,
+        score=signal.score,
+        entry_price=entry_price or 0.0,
+        shares=shares,
+        cost=cost,
+        status="open",
+        notes=notes,
+        created_at=signal.created_at,
+    )
+
+
+def _paper_position_exit_context(
+    row: sqlite3.Row,
+    *,
+    exit_price: Any,
+    exit_fee_bps: Any,
+    exit_slippage_bps: Any,
+) -> dict[str, float]:
+    reference_price = _first_bounded_probability(
+        exit_price,
+        row["mark_price"],
+        row["entry_reference_price"],
+        row["entry_price"],
+        default=0.0,
+    )
+    applied_exit_fee_bps = _bps(exit_fee_bps if exit_fee_bps is not None else row["exit_fee_bps"])
+    applied_exit_slippage_bps = _bps(exit_slippage_bps if exit_slippage_bps is not None else row["exit_slippage_bps"])
+    fill_exit_price, gross_payout, exit_fee_paid, net_payout = _estimate_net_exit_value(
+        row["shares"],
+        reference_price,
+        fee_bps=applied_exit_fee_bps,
+        slippage_bps=applied_exit_slippage_bps,
+    )
+    return {
+        "reference_price": reference_price,
+        "applied_exit_fee_bps": applied_exit_fee_bps,
+        "applied_exit_slippage_bps": applied_exit_slippage_bps,
+        "fill_exit_price": fill_exit_price or 0.0,
+        "gross_payout": gross_payout or 0.0,
+        "exit_fee_paid": exit_fee_paid or 0.0,
+        "net_payout": net_payout or 0.0,
+    }
+
+
+def _closed_position_payload(
+    row: sqlite3.Row,
+    *,
+    exit_context: dict[str, float],
+    pnl: float,
+    closed_at: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "position_id": int(row["id"]),
+        "market_slug": str(row["market_slug"] or ""),
+        "direction": str(row["direction"] or ""),
+        "status": "closed",
+        "exit_price": exit_context["fill_exit_price"],
+        "exit_reference_price": exit_context["reference_price"],
+        "exit_reason": str(reason or "manual"),
+        "exit_fee_paid": exit_context["exit_fee_paid"],
+        "gross_exit_payout": exit_context["gross_payout"],
+        "net_exit_payout": exit_context["net_payout"],
+        "realized_pnl": pnl,
+        "closed_at": closed_at,
+    }
+
+
+def _dashboard_holding_metrics(payload: dict[str, Any], now: datetime) -> dict[str, float | None]:
+    created_at = _parse_iso_datetime(payload.get("created_at"))
+    resolved_at = _parse_iso_datetime(payload.get("resolved_at"))
+    anchor = resolved_at or now
+    holding_seconds = None
+    if created_at is not None:
+        holding_seconds = max(0.0, (anchor - created_at).total_seconds())
+    remaining_to_resolution_s = _remaining_resolution_seconds(payload.get("signal_time_to_resolution_s"), holding_seconds)
+    mark_updated_at = _parse_iso_datetime(payload.get("mark_updated_at"))
+    mark_age_seconds = None
+    if mark_updated_at is not None:
+        mark_age_seconds = max(0.0, (now - mark_updated_at).total_seconds())
+    return {
+        "holding_seconds": holding_seconds,
+        "remaining_to_resolution_s": remaining_to_resolution_s,
+        "mark_age_seconds": mark_age_seconds,
+    }
+
+
+def _remaining_resolution_seconds(time_to_resolution_s: Any, holding_seconds: float | None) -> float | None:
+    total_window = _as_float(time_to_resolution_s)
+    if total_window is None:
+        return None
+    if holding_seconds is None:
+        return max(0.0, total_window)
+    return max(0.0, total_window - holding_seconds)
+
+
+def _dashboard_pricing_metrics(payload: dict[str, Any]) -> dict[str, Any]:
+    direction = str(payload.get("direction") or "").upper()
+    default_market_probability = _contract_probability(direction, payload.get("signal_market_prob"))
+    default_outcome_probability = _contract_probability(direction, payload.get("signal_forecast_prob"))
+    entry_reference_price = _first_bounded_probability(
+        payload.get("entry_reference_price"),
+        default=default_market_probability,
+    )
+    entry_price = _first_bounded_probability(
+        payload.get("entry_price"),
+        entry_reference_price,
+        default_market_probability,
+        default=0.0,
+    )
+    mark_price = _first_bounded_probability(payload.get("mark_price"), default=default_market_probability)
+    outcome_probability = _first_bounded_probability(
+        payload.get("mark_probability"),
+        default=default_outcome_probability,
+    )
+    shares = _as_float(payload.get("shares")) or 0.0
+    cost = _as_float(payload.get("cost")) or 0.0
+    entry_fee_paid = _as_float(payload.get("entry_fee_paid")) or 0.0
+    entry_fee_bps = _bps(payload.get("entry_fee_bps"))
+    entry_slippage_bps = _bps(payload.get("entry_slippage_bps"))
+    exit_fee_bps = _bps(payload.get("exit_fee_bps"))
+    exit_slippage_bps = _bps(payload.get("exit_slippage_bps"))
+    estimated_exit_price, gross_liquidation_value, estimated_exit_fee_paid, net_liquidation_value = _estimate_net_exit_value(
+        shares,
+        mark_price,
+        fee_bps=exit_fee_bps,
+        slippage_bps=exit_slippage_bps,
+    )
+    model_exit_price, gross_model_value, model_exit_fee_paid, net_model_value = _estimate_net_exit_value(
+        shares,
+        outcome_probability,
+        fee_bps=exit_fee_bps,
+        slippage_bps=exit_slippage_bps,
+    )
+    expected_payout = round(shares * outcome_probability, 6) if outcome_probability is not None else None
+    expected_value_pnl = round((net_model_value or 0.0) - cost, 6) if outcome_probability is not None else None
+    mark_to_market_payout = round(shares * mark_price, 6) if mark_price is not None else None
+    mark_to_market_pnl = round((net_liquidation_value or 0.0) - cost, 6) if mark_price is not None else None
+    return {
+        "entry_reference_price": entry_reference_price,
+        "entry_price": entry_price,
         "entry_fee_paid": entry_fee_paid,
         "entry_fee_bps": entry_fee_bps,
         "entry_slippage_bps": entry_slippage_bps,
-        "market_probability": mark_price,
+        "exit_fee_bps": exit_fee_bps,
+        "exit_slippage_bps": exit_slippage_bps,
+        "mark_price": mark_price,
         "outcome_probability": outcome_probability,
         "shares": shares,
         "cost": cost,
-        "realized_pnl": _as_float(payload.get("realized_pnl")),
         "expected_payout": expected_payout,
         "expected_value_pnl": expected_value_pnl,
-        "mark_price": mark_price,
-        "mark_probability": outcome_probability,
         "mark_to_market_payout": mark_to_market_payout,
         "mark_to_market_pnl": mark_to_market_pnl,
         "estimated_exit_price": estimated_exit_price,
@@ -1103,36 +1274,18 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
         "model_exit_fee_paid": model_exit_fee_paid,
         "gross_model_value": gross_model_value,
         "net_model_value": net_model_value,
-        "mark_edge_abs": _as_float(payload.get("mark_edge_abs")),
-        "mark_final_score": _as_float(payload.get("mark_final_score")),
-        "mark_updated_at": str(payload.get("mark_updated_at") or ""),
-        "mark_reason": str(payload.get("mark_reason") or ""),
-        "mark_to_market_mode": "reviewed_contract_mark" if payload.get("mark_updated_at") else "entry_contract_mark",
-        "expected_value_mode": "reviewed_model_prob" if payload.get("mark_probability") is not None else "entry_model_prob",
-        "exit_price": _bounded_probability(payload.get("exit_price")),
-        "exit_reference_price": _bounded_probability(payload.get("exit_reference_price")),
-        "exit_fee_paid": _as_float(payload.get("exit_fee_paid")),
-        "exit_fee_bps": exit_fee_bps,
-        "exit_slippage_bps": exit_slippage_bps,
-        "gross_exit_payout": _as_float(payload.get("gross_exit_payout")),
-        "net_exit_payout": _as_float(payload.get("net_exit_payout")),
-        "exit_reason": str(payload.get("exit_reason") or ""),
-        "mark_age_seconds": mark_age_seconds,
-        "mark_is_stale": False,
-        "edge": _as_float(payload.get("signal_edge")),
-        "edge_abs": _as_float(payload.get("signal_edge_abs")),
-        "edge_size": str(payload.get("signal_edge_size") or ""),
-        "confidence": str(payload.get("signal_confidence") or ""),
-        "source_count": int(payload.get("signal_source_count") or 0),
-        "liquidity": _as_float(payload.get("signal_liquidity")),
-        "source_dispersion_pct": _as_float(payload.get("signal_source_dispersion_pct")),
-        "time_to_resolution_s": _as_float(payload.get("signal_time_to_resolution_s")),
-        "remaining_to_resolution_s": remaining_to_resolution_s,
-        "holding_seconds": holding_seconds,
-        "created_at": str(payload.get("created_at") or ""),
-        "resolved_at": str(payload.get("resolved_at") or ""),
-        "resolution": str(payload.get("resolution") or ""),
     }
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    raw = str(value or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
@@ -1164,6 +1317,14 @@ def _bounded_probability(value: Any) -> float | None:
     if raw is None:
         return None
     return round(max(0.0, min(1.0, raw)), 6)
+
+
+def _first_bounded_probability(*values: Any, default: float | None = None) -> float | None:
+    for value in values:
+        bounded = _bounded_probability(value)
+        if bounded is not None:
+            return bounded
+    return default
 
 
 def _contract_probability(direction: Any, yes_probability: Any) -> float | None:

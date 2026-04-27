@@ -2,32 +2,30 @@
 # scanner/weather_event_scanner.py
 #
 # PURPOSE:
-#   Fetches Polymarket daily temperature events by constructing
-#   their slugs directly from known cities and date ranges.
+#   Fetch Polymarket daily temperature events by constructing
+#   slugs directly from known cities and date ranges.
 #
-# SLUG PATTERN (confirmed):
+# SLUG PATTERN:
 #   highest-temperature-in-<city>-on-<month>-<day>-<year>
 #   e.g. "highest-temperature-in-san-francisco-on-april-11-2026"
-#
-# CITIES:
-#   All 33 confirmed active cities from debug_discover_cities.py
-#   US cities use °F, international cities use °C.
-#   Units are handled automatically by forecast_engine.py via
-#   the CITY_COORDS dict — no manual unit switching needed here.
 # =============================================================
 
-import requests
+from __future__ import annotations
+
 import json
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+
+import requests
 
 GAMMA = "https://gamma-api.polymarket.com"
 
+
 # -------------------------------------------------------------
-# ALL 33 CONFIRMED CITIES (from debug_discover_cities.py)
+# CONFIRMED TEMPERATURE CITIES
 # -------------------------------------------------------------
-CITIES = [
-    # US — Fahrenheit
+
+NORTH_AMERICA_CITIES = [
     "nyc",
     "los-angeles",
     "chicago",
@@ -39,13 +37,14 @@ CITIES = [
     "denver",
     "atlanta",
     "miami",
+    "toronto",
+    "mexico-city",
+]
 
-    # International — Celsius
+INTERNATIONAL_CITIES = [
     "london",
     "paris",
     "tokyo",
-    "toronto",
-    "mexico-city",
     "beijing",
     "shanghai",
     "singapore",
@@ -65,53 +64,96 @@ CITIES = [
     "moscow",
 ]
 
+CITIES = [*NORTH_AMERICA_CITIES, *INTERNATIONAL_CITIES]
+
+TEMPERATURE_MARKET_SCOPE_ALIASES = {
+    "": "both",
+    "all": "both",
+    "both": "both",
+    "global": "both",
+    "na": "north_america",
+    "northamerica": "north_america",
+    "north-america": "north_america",
+    "north america": "north_america",
+    "north_america": "north_america",
+    "domestic": "north_america",
+    "international": "international",
+    "intl": "international",
+    "outside_north_america": "international",
+}
+
+
 # How many days behind today to include (grace period for recent markets)
 DAYS_BEHIND = 1
 
 # How many days ahead to look for upcoming markets
 DAYS_AHEAD = 7
 
-# Cache file — stores slugs we've already fetched so repeat scans skip them
+# Cache file stores slugs already confirmed missing so repeat scans skip them.
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "seen_events.json")
+
+
+def normalize_temperature_market_scope(market_scope: str | None) -> str:
+    raw = str(market_scope or "").strip().lower()
+    return TEMPERATURE_MARKET_SCOPE_ALIASES.get(raw, "both")
+
+
+def cities_for_temperature_market_scope(market_scope: str | None) -> list[str]:
+    scope = normalize_temperature_market_scope(market_scope)
+    if scope == "north_america":
+        return list(NORTH_AMERICA_CITIES)
+    if scope == "international":
+        return list(INTERNATIONAL_CITIES)
+    return list(CITIES)
+
+
+def _market_scope_label(market_scope: str | None) -> str:
+    scope = normalize_temperature_market_scope(market_scope)
+    if scope == "north_america":
+        return "North America"
+    if scope == "international":
+        return "International"
+    return "Both"
 
 
 # =============================================================
 # CACHE HELPERS
 # =============================================================
 
-def _load_cache():
-    """Loads seen event slugs from disk. Returns empty set on first run."""
+def _load_cache() -> set[str]:
+    """Load seen event slugs from disk. Returns an empty set on first run."""
     if not os.path.exists(CACHE_FILE):
         return set()
     try:
-        with open(CACHE_FILE, "r") as f:
-            return set(json.load(f))
-    except Exception as e:
-        print(f"  ⚠️  Cache unreadable ({e}) — starting fresh")
+        with open(CACHE_FILE, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        print(f"  WARNING Cache unreadable ({exc}) - starting fresh")
         return set()
+    return set(payload)
 
 
-def _save_cache(seen: set):
-    """Saves seen slugs to disk once at end of scan."""
+def _save_cache(seen: set[str]) -> None:
+    """Save seen slugs once at the end of the scan."""
     try:
-        with open(CACHE_FILE, "w") as f:
-            json.dump(sorted(seen), f, indent=2)
-    except Exception as e:
-        print(f"  ⚠️  Could not save cache: {e}")
+        with open(CACHE_FILE, "w", encoding="utf-8") as handle:
+            json.dump(sorted(seen), handle, indent=2)
+    except Exception as exc:
+        print(f"  WARNING Could not save cache: {exc}")
 
 
-def clear_cache():
+def clear_cache() -> None:
     """
-    Deletes the cache file to force a fresh scan next time.
+    Delete the cache file to force a fresh scan next time.
     Run manually:
         from scanner.weather_event_scanner import clear_cache
         clear_cache()
     """
     if os.path.exists(CACHE_FILE):
         os.remove(CACHE_FILE)
-        print("✅ Cache cleared.")
+        print("OK Cache cleared.")
     else:
-        print("ℹ️  No cache file found.")
+        print("INFO No cache file found.")
 
 
 # =============================================================
@@ -119,22 +161,10 @@ def clear_cache():
 # =============================================================
 
 def _build_slug(city: str, dt: datetime) -> str:
-    """
-    Builds the Polymarket event slug for a city and date.
-
-    Pattern: highest-temperature-in-<city>-on-<month>-<day>-<year>
-    Example: highest-temperature-in-nyc-on-april-11-2026
-
-    Args:
-        city: city slug e.g. "san-francisco"
-        dt:   datetime for the target date
-
-    Returns:
-        slug string
-    """
-    month = dt.strftime("%B").lower()  # "april"
-    day   = str(dt.day)                # "11" (no leading zero)
-    year  = str(dt.year)               # "2026"
+    """Build the Polymarket event slug for a city and date."""
+    month = dt.strftime("%B").lower()
+    day = str(dt.day)
+    year = str(dt.year)
     return f"highest-temperature-in-{city}-on-{month}-{day}-{year}"
 
 
@@ -142,75 +172,61 @@ def _build_slug(city: str, dt: datetime) -> str:
 # MAIN FETCH FUNCTION
 # =============================================================
 
-def fetch_weather_events(limit: int = 300) -> list:
+def fetch_weather_events(limit: int = 300, *, market_scope: str = "both") -> list[dict]:
     """
-    Fetches all active daily temperature events by constructing
-    slugs directly for each city × date combination.
+    Fetch active daily temperature events by constructing slugs directly.
 
     Each returned item is:
         {
             "event":   { ...raw event dict from API... },
-            "markets": [ ...list of child market dicts... ]
+            "markets": [ ...list of child market dicts... ],
         }
-
-    Args:
-        limit: max number of events to return (safety cap)
-
-    Returns:
-        list of event bundle dicts
     """
 
-    seen       = _load_cache()
-    results    = []
+    scope = normalize_temperature_market_scope(market_scope)
+    cities = cities_for_temperature_market_scope(scope)
+    seen = _load_cache()
+    results: list[dict] = []
     cache_hits = 0
-    not_found  = 0
-    checked    = 0
+    not_found = 0
+    checked = 0
 
     today = datetime.now(timezone.utc)
-    dates = [
-        today + timedelta(days=d)
-        for d in range(-DAYS_BEHIND, DAYS_AHEAD + 1)
-    ]
+    dates = [today + timedelta(days=offset) for offset in range(-DAYS_BEHIND, DAYS_AHEAD + 1)]
 
-    total = len(CITIES) * len(dates)
-    print(f"  🌡️  Checking {len(CITIES)} cities × {len(dates)} dates = {total} slugs\n")
+    total = len(cities) * len(dates)
+    print(f"  SCAN Scope { _market_scope_label(scope) } | {len(cities)} cities x {len(dates)} dates = {total} slugs")
 
     for dt in dates:
-        for city in CITIES:
+        for city in cities:
             if len(results) >= limit:
                 break
 
             slug = _build_slug(city, dt)
             checked += 1
 
-            # Skip if already processed in a previous scan
             if slug in seen:
                 cache_hits += 1
                 continue
 
-            # Fetch the event by exact slug
             try:
-                r = requests.get(
+                response = requests.get(
                     f"{GAMMA}/events",
                     params={"slug": slug},
                     timeout=10,
                 )
-                r.raise_for_status()
-                data = r.json()
-
-            except Exception as e:
-                print(f"  ⚠️  Request failed for {slug}: {e}")
+                response.raise_for_status()
+                data = response.json()
+            except Exception as exc:
+                print(f"  WARNING Request failed for {slug}: {exc}")
                 continue
 
-            # Empty response = this event doesn't exist
             if not data or (isinstance(data, list) and len(data) == 0):
                 not_found += 1
-                seen.add(slug)  # cache: slug confirmed non-existent
+                seen.add(slug)
                 continue
 
             event = data[0] if isinstance(data, list) else data
-
-            # Verify slug matches exactly (avoid partial matches)
             if event.get("slug") != slug:
                 not_found += 1
                 seen.add(slug)
@@ -218,24 +234,17 @@ def fetch_weather_events(limit: int = 300) -> list:
 
             markets = event.get("markets") or []
             end_date = (event.get("endDate") or "")[:10]
+            print(f"  FOUND {event.get('title')}\n     Ends: {end_date} | {len(markets)} markets")
 
-            print(
-                f"  ✅ {event.get('title')}\n"
-                f"     Ends: {end_date} | {len(markets)} markets"
-            )
+            # Valid events are re-fetched each scan so prices stay fresh.
+            results.append({"event": event, "markets": markets})
 
-            # Do NOT cache valid events — re-fetch each scan so prices stay fresh.
-            # Only non-existent slugs are cached (above).
-            results.append({
-                "event":   event,
-                "markets": markets,
-            })
+        if len(results) >= limit:
+            break
 
     _save_cache(seen)
     print(
-        f"\n✅ Done. {len(results)} events found. "
-        f"({cache_hits} cache hits | {not_found} not found | "
-        f"{checked} slugs checked)\n"
+        f"\nOK Done. {len(results)} events found. "
+        f"({cache_hits} cache hits | {not_found} not found | {checked} slugs checked)\n"
     )
-
     return results

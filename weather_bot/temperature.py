@@ -12,10 +12,19 @@ from scanner.weather_event_scanner import fetch_weather_events
 
 from .models import ForecastSnapshot, ScanBatch, WeatherSignal
 
+FORECAST_PROVIDER_KEYS = ("wu", "openmeteo", "vc", "noaa", "weatherapi")
+SOURCE_PROBABILITY_KEYS = {
+    "wu": "wu_prob",
+    "openmeteo": "om_prob",
+    "visual_crossing": "vc_prob",
+    "noaa": "noaa_prob",
+    "weatherapi": "weatherapi_prob",
+}
 
-def scan_temperature_signals(limit: int = 300) -> ScanBatch:
+
+def scan_temperature_signals(limit: int = 300, *, market_scope: str = "both") -> ScanBatch:
     started_at = datetime.now(timezone.utc)
-    bundles = fetch_weather_events(limit=limit)
+    bundles = fetch_weather_events(limit=limit, market_scope=market_scope)
     signals: list[WeatherSignal] = []
     flagged_events = 0
     processed_events = 0
@@ -92,7 +101,7 @@ def _process_temperature_bundle(bundle: dict, created_at: datetime) -> dict[str,
         for bucket in buckets:
             bucket["event_slug"] = event_slug
         forecast_data = get_both_bucket_probabilities(city_slug, event_date, buckets)
-        if not any(forecast_data.get(key) is not None for key in ("wu", "openmeteo", "vc", "noaa", "weatherapi")):
+        if not _has_any_forecast_data(forecast_data):
             return _bundle_result(skipped_events=1)
         discrepancies = find_discrepancies(
             event_title=str(event.get("title") or "Unknown"),
@@ -156,22 +165,16 @@ def _scan_worker_count(bundle_count: int) -> int:
 
 
 def _build_temperature_signal(*, event: dict, discrepancy: dict, event_end: datetime | None, created_at: datetime) -> WeatherSignal:
-    forecast_probs = {
-        "wu": discrepancy.get("wu_prob"),
-        "openmeteo": discrepancy.get("om_prob"),
-        "visual_crossing": discrepancy.get("vc_prob"),
-        "noaa": discrepancy.get("noaa_prob"),
-        "weatherapi": discrepancy.get("weatherapi_prob"),
-    }
-    available = [float(value) for value in forecast_probs.values() if value is not None]
-    dispersion = max(available) - min(available) if len(available) >= 2 else 0.0
-    time_to_resolution_s = None
-    if event_end is not None:
-        time_to_resolution_s = max(0.0, (event_end - created_at).total_seconds())
+    forecast_probs = _forecast_probabilities(discrepancy)
+    dispersion = _source_dispersion(forecast_probs)
+    time_to_resolution_s = _time_to_resolution_seconds(event_end, created_at)
+    edge_abs = abs(float(discrepancy.get("discrepancy") or 0.0))
+    source_count = int(discrepancy.get("source_count") or 1)
+    liquidity = float(discrepancy.get("liquidity") or 0.0)
     score = _score_temperature_signal(
-        edge_abs=abs(float(discrepancy.get("discrepancy") or 0.0)),
-        source_count=int(discrepancy.get("source_count") or 1),
-        liquidity=float(discrepancy.get("liquidity") or 0.0),
+        edge_abs=edge_abs,
+        source_count=source_count,
+        liquidity=liquidity,
         time_to_resolution_s=time_to_resolution_s,
         dispersion=dispersion,
     )
@@ -180,18 +183,7 @@ def _build_temperature_signal(*, event: dict, discrepancy: dict, event_end: date
         f"temperature:{discrepancy.get('market_slug') or discrepancy.get('event_slug')}:"
         f"{discrepancy.get('direction')}:{created_at.strftime('%Y%m%dT%H%M%S')}"
     )
-    snapshot = ForecastSnapshot(
-        market_type="temperature",
-        city_slug=str(discrepancy.get("city_slug") or ""),
-        event_date=event_date_str,
-        unit=str(discrepancy.get("unit") or "F"),
-        wu_temp=_as_float(discrepancy.get("wu_temp")),
-        om_temp=_as_float(discrepancy.get("om_temp")),
-        vc_temp=_as_float(discrepancy.get("vc_temp")),
-        noaa_temp=_as_float(discrepancy.get("noaa_temp")),
-        weatherapi_temp=_as_float(discrepancy.get("weatherapi_temp")),
-        source_probabilities=forecast_probs,
-    )
+    snapshot = _forecast_snapshot(discrepancy, event_date_str, forecast_probs)
     return WeatherSignal(
         signal_key=signal_key,
         market_type="temperature",
@@ -205,17 +197,58 @@ def _build_temperature_signal(*, event: dict, discrepancy: dict, event_end: date
         market_prob=float(discrepancy.get("market_prob") or 0.0),
         forecast_prob=float(discrepancy.get("forecast_prob") or 0.0),
         edge=float(discrepancy.get("discrepancy") or 0.0),
-        edge_abs=abs(float(discrepancy.get("discrepancy") or 0.0)),
+        edge_abs=edge_abs,
         edge_size=str(discrepancy.get("edge_size") or "small"),
         confidence=str(discrepancy.get("confidence") or "unknown"),
-        source_count=int(discrepancy.get("source_count") or 1),
-        liquidity=float(discrepancy.get("liquidity") or 0.0),
+        source_count=source_count,
+        liquidity=liquidity,
         time_to_resolution_s=time_to_resolution_s,
         source_dispersion_pct=round(dispersion, 6),
         score=round(score, 4),
         forecast_snapshot=snapshot,
         raw_payload=dict(discrepancy),
         created_at=created_at.isoformat(),
+    )
+
+
+def _has_any_forecast_data(forecast_data: dict) -> bool:
+    return any(forecast_data.get(key) is not None for key in FORECAST_PROVIDER_KEYS)
+
+
+def _forecast_probabilities(discrepancy: dict) -> dict[str, float | None]:
+    return {
+        provider: discrepancy.get(key)
+        for provider, key in SOURCE_PROBABILITY_KEYS.items()
+    }
+
+
+def _source_dispersion(forecast_probabilities: dict[str, float | None]) -> float:
+    available = [float(value) for value in forecast_probabilities.values() if value is not None]
+    return max(available) - min(available) if len(available) >= 2 else 0.0
+
+
+def _time_to_resolution_seconds(event_end: datetime | None, created_at: datetime) -> float | None:
+    if event_end is None:
+        return None
+    return max(0.0, (event_end - created_at).total_seconds())
+
+
+def _forecast_snapshot(
+    discrepancy: dict,
+    event_date_str: str,
+    forecast_probabilities: dict[str, float | None],
+) -> ForecastSnapshot:
+    return ForecastSnapshot(
+        market_type="temperature",
+        city_slug=str(discrepancy.get("city_slug") or ""),
+        event_date=event_date_str,
+        unit=str(discrepancy.get("unit") or "F"),
+        wu_temp=_as_float(discrepancy.get("wu_temp")),
+        om_temp=_as_float(discrepancy.get("om_temp")),
+        vc_temp=_as_float(discrepancy.get("vc_temp")),
+        noaa_temp=_as_float(discrepancy.get("noaa_temp")),
+        weatherapi_temp=_as_float(discrepancy.get("weatherapi_temp")),
+        source_probabilities=forecast_probabilities,
     )
 
 

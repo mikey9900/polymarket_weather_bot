@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from scanner.weather_event_scanner import cities_for_temperature_market_scope
 from weather_bot.config import load_config
 from weather_bot.control_plane import ControlPlane, ControlRequest
 from weather_bot.dashboard_state import DashboardStateService
@@ -17,6 +18,7 @@ from weather_bot.models import ForecastSnapshot, ScanBatch, WeatherSignal
 from weather_bot.paths import DEFAULT_CONFIG_TEMPLATE_PATH
 from weather_bot.runtime import WeatherRuntime, _scheduled_interval_seconds
 from weather_bot.strategy import WeatherStrategyEngine
+from weather_bot.temperature import scan_temperature_signals
 from weather_bot.telegram_client import TelegramClient
 from weather_bot.tracker import WeatherTracker
 
@@ -47,6 +49,28 @@ def test_load_config_accepts_precipitation_enabled_ha_override(tmp_path: Path):
     config = load_config(config_path, ha_options_path=options_path)
 
     assert config.precipitation.enabled is True
+
+
+def test_load_config_accepts_temperature_market_scope_ha_override(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(json.dumps({"temperature_market_scope": "north_america"}), encoding="utf-8")
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.temperature.market_scope == "north_america"
+
+
+def test_temperature_market_scope_city_groups_are_split_cleanly():
+    north_america = set(cities_for_temperature_market_scope("north_america"))
+    international = set(cities_for_temperature_market_scope("international"))
+    both = set(cities_for_temperature_market_scope("both"))
+
+    assert {"nyc", "toronto", "mexico-city"}.issubset(north_america)
+    assert "london" not in north_america
+    assert "london" in international
+    assert "nyc" not in international
+    assert north_america | international == both
 
 
 def test_runtime_startup_respects_precipitation_config_over_saved_runtime_state(tmp_path: Path):
@@ -213,11 +237,15 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "copyExportPath" in html
     assert "Showing ${shown} of ${total} open trades" in html
     assert "set_paper_entry_min_edge_abs" in html
+    assert "set_temperature_market_scope" in html
     assert "setEdgeLimit()" in html
     assert "set_temperature_scan_interval_minutes" in html
     assert "set_precipitation_scan_interval_minutes" in html
     assert "setTempCadence()" in html
     assert "setRainCadence()" in html
+    assert "setTempScope()" in html
+    assert "marketScopeOptions" in html
+    assert "marketScopeLabel" in html
 
 
 def test_dashboard_apply_control_returns_json_when_refresh_fails(tmp_path: Path, monkeypatch):
@@ -377,6 +405,21 @@ def test_control_infers_open_cap_action_from_actionless_payload(tmp_path: Path):
 
     assert response["ok"] is True
     assert response["state"]["controls"]["paper_max_open_positions"] == 80
+
+
+def test_control_infers_temperature_market_scope_from_actionless_payload(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe({"value": {"temperature_market_scope": "north_america"}})
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["temperature_market_scope"] == "north_america"
 
 
 def test_control_infers_manual_close_action_from_actionless_payload(tmp_path: Path):
@@ -942,6 +985,73 @@ def test_runtime_scan_export_failure_is_non_fatal(tmp_path: Path, monkeypatch):
     assert state["last_scan_export_error"] == "disk full"
 
 
+def test_scan_temperature_signals_passes_market_scope_to_event_fetcher(monkeypatch):
+    calls: list[tuple[int, str]] = []
+
+    def fake_fetch_weather_events(*, limit=300, market_scope="both"):
+        calls.append((int(limit), str(market_scope)))
+        return []
+
+    monkeypatch.setattr("weather_bot.temperature.fetch_weather_events", fake_fetch_weather_events)
+
+    batch = scan_temperature_signals(limit=12, market_scope="international")
+
+    assert batch.total_events == 0
+    assert calls == [(12, "international")]
+
+
+def test_runtime_passes_temperature_market_scope_to_supported_scanner(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    calls: list[tuple[int, str]] = []
+
+    def scoped_scanner(*, limit=300, market_scope="both"):
+        calls.append((int(limit), str(market_scope)))
+        return _batch(_signal("scope-pass-through"))
+
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        temperature_scanner=scoped_scanner,
+    )
+
+    runtime.set_temperature_market_scope("north_america")
+    batch, _ = runtime.run_temperature_scan(send_alerts=False)
+
+    assert len(batch.signals) == 1
+    assert calls == [(300, "north_america")]
+
+
+def test_runtime_keeps_legacy_temperature_scanner_compatible(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    calls: list[int] = []
+
+    def legacy_scanner(*, limit=300):
+        calls.append(int(limit))
+        return _batch(_signal("legacy-scan-compatible"))
+
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        temperature_scanner=legacy_scanner,
+    )
+
+    runtime.set_temperature_market_scope("international")
+    batch, _ = runtime.run_temperature_scan(send_alerts=False)
+
+    assert len(batch.signals) == 1
+    assert calls == [300]
+
+
 def test_runtime_review_closes_position_when_targeted_refresh_loses_edge(tmp_path: Path, monkeypatch):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
@@ -1074,6 +1184,58 @@ def test_runtime_review_refreshes_targeted_provider_payload_after_cache_interval
     assert first["reviewed"] == 1
     assert second["reviewed"] == 1
     assert provider_calls == [1, 1]
+
+
+def test_runtime_review_batch_reuses_cached_payload_when_positions_change_and_refresh_fails(tmp_path: Path, monkeypatch):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("cache-shift-1", market_slug="market-cache-shift-1", label="70-71F")], auto_trade_enabled=True)
+
+    requested_labels: list[tuple[str, ...]] = []
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        temperature_scanner=lambda *, limit=300: (_ for _ in ()).throw(AssertionError("temperature scanner should not run")),
+    )
+
+    def fake_bucket_probs(city_slug, target_date, buckets, provider_context="scheduled"):
+        labels = tuple(sorted(bucket["label"] for bucket in buckets))
+        requested_labels.append(labels)
+        if len(requested_labels) == 1:
+            return {
+                "wu": None,
+                "openmeteo": {bucket["label"]: 0.80 for bucket in buckets},
+                "vc": None,
+                "noaa": None,
+                "weatherapi": None,
+                "wu_temp": None,
+                "om_temp": 72.0,
+                "vc_temp": None,
+                "noaa_temp": None,
+                "weatherapi_temp": None,
+                "unit": "F",
+            }
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr("weather_bot.runtime.get_both_bucket_probabilities", fake_bucket_probs)
+
+    initial_positions = tracker.get_dashboard_paper_positions(limit=20, status="open")
+    seeded_batch, seeded_refresh = runtime._get_review_weather_batch("temperature", initial_positions)
+
+    strategy.process_signals([_signal("cache-shift-2", market_slug="market-cache-shift-2", label="72-73F")], auto_trade_enabled=True)
+    expanded_positions = tracker.get_dashboard_paper_positions(limit=20, status="open")
+    fallback_batch, fallback_refresh = runtime._get_review_weather_batch("temperature", expanded_positions)
+
+    assert seeded_refresh is False
+    assert len(seeded_batch.signals) == 1
+    assert fallback_refresh is False
+    assert len(fallback_batch.signals) == 1
+    assert requested_labels == [("70-71F",), ("70-71F", "72-73F")]
+    assert runtime._open_position_weather_cache["temperature"]["scope"] == "review"
 
 
 def test_runtime_review_temperature_refresh_only_requests_open_position_buckets(tmp_path: Path, monkeypatch):

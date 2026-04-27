@@ -36,6 +36,14 @@ PRECIPITATION_SCAN_INTERVAL_KEYS = (
     "minutes",
     "value",
 )
+TEMPERATURE_MARKET_SCOPE_KEYS = (
+    "temperature_market_scope",
+    "market_scope",
+    "scope",
+    "region",
+    "temperatureMarketScope",
+    "value",
+)
 ENTRY_EDGE_LIMIT_KEYS = (
     "edge_pct",
     "min_edge_abs_pct",
@@ -119,6 +127,7 @@ class ControlPlane:
         return {
             "state": runtime_status.get("state", "unknown"),
             "temperature_enabled": runtime_status.get("temperature_enabled", True),
+            "temperature_market_scope": runtime_status.get("temperature_market_scope", "both"),
             "precipitation_enabled": runtime_status.get("precipitation_enabled", True),
             "paper_auto_trade": runtime_status.get("paper_auto_trade", True),
             "scan_in_progress": runtime_status.get("scan_in_progress", False),
@@ -153,6 +162,7 @@ class ControlPlane:
                 "scan_precipitation": True,
                 "set_temperature_scan_interval_minutes": True,
                 "set_precipitation_scan_interval_minutes": True,
+                "set_temperature_market_scope": True,
                 "set_paper_capital": True,
                 "set_paper_max_open_positions": True,
                 "set_paper_entry_min_edge_abs": True,
@@ -226,6 +236,26 @@ class ControlPlane:
                     True,
                     200,
                     f"Temperature edge scan cadence set to every {cadence} minutes for future scheduled sweeps.",
+                    action,
+                )
+            )
+        if action == "set_temperature_market_scope":
+            try:
+                value = _coerce_mapping(
+                    request.value,
+                    fallback_key="temperature_market_scope",
+                    nested_keys=("value", "payload", "data"),
+                )
+                raw_scope = _coerce_text(value, keys=TEMPERATURE_MARKET_SCOPE_KEYS)
+            except (TypeError, ValueError):
+                return self._record(ControlResult(False, 400, "Temperature market scope is required.", action))
+            scope = self.runtime.set_temperature_market_scope(raw_scope)
+            label = _temperature_market_scope_label(scope)
+            return self._record(
+                ControlResult(
+                    True,
+                    200,
+                    f"Temperature market scope set to {label} for future temperature scans. Open positions keep reviewing normally.",
                     action,
                 )
             )
@@ -441,6 +471,8 @@ def _infer_action_from_payload(payload: dict[str, Any]) -> str:
     for source in sources:
         if any(key in source for key in ("temperature_scan_minutes", "temperature_scan_interval_minutes", "temp_scan_minutes", "temp_scan_interval_minutes")):
             return "set_temperature_scan_interval_minutes"
+        if any(key in source for key in TEMPERATURE_MARKET_SCOPE_KEYS[:-1]):
+            return "set_temperature_market_scope"
         if any(key in source for key in ("precipitation_scan_minutes", "precipitation_scan_interval_minutes", "rain_scan_minutes", "rain_scan_interval_minutes")):
             return "set_precipitation_scan_interval_minutes"
         if any(key in source for key in ENTRY_EDGE_LIMIT_KEYS):
@@ -454,6 +486,30 @@ def _infer_action_from_payload(payload: dict[str, Any]) -> str:
         if any(key in source for key in ("capital", "paper_capital", "paper_initial_capital")):
             return "set_paper_capital"
     return ""
+
+
+def _coerce_text(value: Any, *, keys: tuple[str, ...] = ()) -> str:
+    raw = value
+    if isinstance(raw, dict):
+        for key in keys:
+            if key in raw:
+                raw = raw.get(key)
+                break
+        else:
+            raise ValueError("missing text value")
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError("empty text value")
+    return text
+
+
+def _temperature_market_scope_label(value: Any) -> str:
+    scope = str(value or "").strip().lower()
+    if scope == "north_america":
+        return "North America"
+    if scope == "international":
+        return "International"
+    return "Both"
 
 
 def _coerce_percent_as_probability(value: Any, *, keys: tuple[str, ...] = ()) -> float:

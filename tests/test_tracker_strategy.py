@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 from weather_bot.config import load_config
-from weather_bot.models import ForecastSnapshot, WeatherSignal
+from weather_bot.models import ForecastSnapshot, WeatherDecision, WeatherSignal
 from weather_bot.paths import DEFAULT_CONFIG_TEMPLATE_PATH
 from weather_bot.strategy import WeatherStrategyEngine
 from weather_bot.tracker import WeatherTracker
@@ -226,3 +226,117 @@ def test_strategy_lowered_open_cap_does_not_close_existing_positions(tmp_path: P
     assert third.position is None
     assert third.decision.accepted is False
     assert "Maximum open paper positions reached." in third.decision.reason
+
+
+def test_tracker_dashboard_positions_preserve_zero_probabilities_and_invalid_decision_metadata(tmp_path: Path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    signal = _make_signal()
+    signal_id = tracker.log_signal(signal)
+    decision_id = tracker.log_decision(
+        signal_id,
+        WeatherDecision(
+            signal_key=signal.signal_key,
+            accepted=True,
+            reason="paper entry",
+            final_score=signal.score,
+            policy_action="paper_trade",
+            metadata={"note": "valid before mutation"},
+        ),
+    )
+    position = tracker.create_paper_position(
+        signal_id=signal_id,
+        decision_id=decision_id,
+        signal=signal,
+        stake_usd=10.0,
+    )
+
+    assert position is not None
+
+    tracker.conn.execute(
+        """
+        UPDATE paper_positions
+        SET entry_reference_price = NULL,
+            mark_price = 0.0,
+            mark_probability = 0.0,
+            mark_updated_at = ?
+        WHERE id = ?
+        """,
+        (datetime.now(timezone.utc).isoformat(), int(position.id)),
+    )
+    tracker.conn.execute("UPDATE decisions SET metadata_json = ? WHERE id = ?", ("{", decision_id))
+    tracker.conn.commit()
+
+    dashboard_position = tracker.get_dashboard_paper_positions(limit=1)[0]
+
+    assert dashboard_position["entry_reference_price"] == signal.market_prob
+    assert dashboard_position["market_probability"] == 0.0
+    assert dashboard_position["outcome_probability"] == 0.0
+    assert dashboard_position["expected_value_mode"] == "reviewed_model_prob"
+    assert dashboard_position["decision_metadata"] == {}
+
+
+def test_tracker_create_paper_position_rejects_fee_dominated_notional(tmp_path: Path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    signal = _make_signal()
+    signal_id = tracker.log_signal(signal)
+    decision_id = tracker.log_decision(
+        signal_id,
+        WeatherDecision(
+            signal_key=signal.signal_key,
+            accepted=True,
+            reason="paper entry",
+            final_score=signal.score,
+            policy_action="paper_trade",
+        ),
+    )
+
+    position = tracker.create_paper_position(
+        signal_id=signal_id,
+        decision_id=decision_id,
+        signal=signal,
+        stake_usd=10.0,
+        fee_bps=10000.0,
+    )
+    initial, available = tracker.get_paper_capital()
+
+    assert position is None
+    assert initial == 1000.0
+    assert available == 1000.0
+
+
+def test_tracker_close_paper_position_preserves_explicit_zero_exit_price(tmp_path: Path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    signal = _make_signal()
+    signal_id = tracker.log_signal(signal)
+    decision_id = tracker.log_decision(
+        signal_id,
+        WeatherDecision(
+            signal_key=signal.signal_key,
+            accepted=True,
+            reason="paper entry",
+            final_score=signal.score,
+            policy_action="paper_trade",
+        ),
+    )
+    position = tracker.create_paper_position(
+        signal_id=signal_id,
+        decision_id=decision_id,
+        signal=signal,
+        stake_usd=10.0,
+    )
+
+    assert position is not None
+
+    result = tracker.close_paper_position(int(position.id), exit_price=0.0, reason="manual_zero_exit")
+    latest_trade = tracker.get_dashboard_paper_positions(limit=1)[0]
+
+    assert result is not None
+    assert result["exit_reference_price"] == 0.0
+    assert result["exit_price"] == 0.0
+    assert result["net_exit_payout"] == 0.0
+    assert result["realized_pnl"] == -position.cost
+    assert latest_trade["status"] == "closed"
+    assert latest_trade["exit_reference_price"] == 0.0

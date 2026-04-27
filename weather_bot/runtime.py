@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import threading
@@ -20,6 +21,7 @@ from polymarket.polymarket_prices import get_yes_price
 from precipitation.precip_forecast import calc_precip_bucket_probs, get_om_monthly_precip, get_vc_monthly_precip
 from precipitation.precip_parser import parse_precip_bucket
 from parser.weather_parser import parse_temperature_bucket
+from scanner.weather_event_scanner import normalize_temperature_market_scope
 
 from .messages import format_resolution_message, format_scan_summary, format_signal_message
 from .models import ResolutionOutcome, ScanBatch, WeatherSignal
@@ -28,6 +30,7 @@ from .temperature import _build_temperature_signal, scan_temperature_signals
 
 
 logger = logging.getLogger(__name__)
+TEMPERATURE_FORECAST_KEYS = ("wu", "openmeteo", "vc", "noaa", "weatherapi")
 
 
 class WeatherRuntime:
@@ -70,6 +73,9 @@ class WeatherRuntime:
         default_state = {
             "state": "running",
             "temperature_enabled": bool(self.config.temperature.enabled),
+            "temperature_market_scope": normalize_temperature_market_scope(
+                getattr(self.config.temperature, "market_scope", "both")
+            ),
             "precipitation_enabled": bool(self.config.precipitation.enabled),
             "paper_auto_trade": True,
             "paper_max_open_positions": int(getattr(self.strategy_engine, "paper_max_open_positions", self.config.paper.max_open_positions)),
@@ -114,6 +120,9 @@ class WeatherRuntime:
         }
         saved_state = self.tracker.get_runtime_state("runtime_status", default=default_state)
         self._state = {**default_state, **saved_state}
+        self._state["temperature_market_scope"] = normalize_temperature_market_scope(
+            self._state.get("temperature_market_scope") or getattr(self.config.temperature, "market_scope", "both")
+        )
         self._state["precipitation_enabled"] = bool(self.config.precipitation.enabled)
         self._state["open_position_weather_refresh_interval_seconds"] = self._open_position_weather_refresh_interval_seconds()
         self._state["auto_temperature_scan_interval_seconds"] = _normalize_scan_interval_seconds(
@@ -176,6 +185,11 @@ class WeatherRuntime:
         self._update_state(temperature_enabled=bool(enabled))
         return bool(enabled)
 
+    def set_temperature_market_scope(self, value: str) -> str:
+        scope = normalize_temperature_market_scope(value)
+        self._update_state(temperature_market_scope=scope)
+        return scope
+
     def set_precipitation_enabled(self, enabled: bool) -> bool:
         self._update_state(precipitation_enabled=bool(enabled))
         return bool(enabled)
@@ -210,6 +224,18 @@ class WeatherRuntime:
         minutes = _normalize_scan_interval_minutes(value)
         self._update_state(auto_precipitation_scan_interval_seconds=minutes * 60)
         return int(minutes)
+
+    def _temperature_market_scope(self) -> str:
+        return normalize_temperature_market_scope(
+            self.get_status_snapshot().get("temperature_market_scope")
+            or getattr(self.config.temperature, "market_scope", "both")
+        )
+
+    def _invoke_temperature_scanner(self, *, limit: int) -> ScanBatch:
+        scanner = self.temperature_scanner
+        if _callable_accepts_keyword(scanner, "market_scope"):
+            return scanner(limit=limit, market_scope=self._temperature_market_scope())
+        return scanner(limit=limit)
 
     def get_status_snapshot(self) -> dict:
         with self._state_lock:
@@ -260,7 +286,7 @@ class WeatherRuntime:
         return self._run_scan(
             scan_type="temperature",
             enabled_key="temperature_enabled",
-            scanner=lambda: self.temperature_scanner(limit=limit or self.config.temperature.scan_limit),
+            scanner=lambda: self._invoke_temperature_scanner(limit=limit or self.config.temperature.scan_limit),
             auto_trade=self.config.temperature.auto_paper_trade,
             send_alerts=send_alerts,
             ignore_pause=ignore_pause,
@@ -363,66 +389,36 @@ class WeatherRuntime:
         market_types: set[str] | None = None,
     ) -> dict[str, Any]:
         with self._scan_lock:
-            positions = self.tracker.get_dashboard_paper_positions(limit=500, status="open")
-            if market_types:
-                positions = [item for item in positions if str(item.get("market_type") or "") in market_types]
+            positions = self._open_positions_for_review(market_types)
             if not positions:
-                reviewed_at = datetime.now(timezone.utc).isoformat()
-                self._update_state(
-                    open_position_review_in_progress=False,
-                    last_open_position_review_at=reviewed_at,
-                    last_open_position_review_status="idle",
-                    last_open_position_review_error=None,
-                    last_open_position_review_reason=str(reason or "scheduled_review"),
-                    last_open_position_review_count=0,
-                    last_open_position_close_count=0,
+                self._set_open_position_review_state(
+                    status="idle",
+                    reason=reason,
+                    reviewed_count=0,
+                    closed_count=0,
+                    in_progress=False,
                 )
                 return {"ok": True, "reviewed": 0, "closed": 0, "reason": reason}
 
             self._update_state(open_position_review_in_progress=True)
-            reviewed_count = 0
-            closed_count = 0
             try:
                 self.settle_due_positions(send_alerts=False)
-                active_positions = self.tracker.get_dashboard_paper_positions(limit=500, status="open")
-                if market_types:
-                    active_positions = [item for item in active_positions if str(item.get("market_type") or "") in market_types]
-                market_groups = sorted({str(item.get("market_type") or "") for item in active_positions})
-                for market_type in market_groups:
-                    type_positions = [
-                        item for item in active_positions if str(item.get("market_type") or "") == market_type
-                    ]
-                    batch, refresh_market_prices = self._get_review_weather_batch(market_type, type_positions)
-                    allow_missing_signal_close = int(batch.error_count or 0) == 0
-                    summary = self._review_positions_for_signals(
-                        scan_type=market_type,
-                        signals=batch.signals,
-                        positions=type_positions,
-                        trigger=reason,
-                        allow_close_on_missing_signal=allow_missing_signal_close,
-                        refresh_market_prices=refresh_market_prices,
-                    )
-                    reviewed_count += int(summary["reviewed"])
-                    closed_count += int(summary["closed"])
-                reviewed_at = datetime.now(timezone.utc).isoformat()
-                self._update_state(
-                    open_position_review_in_progress=False,
-                    last_open_position_review_at=reviewed_at,
-                    last_open_position_review_status="completed",
-                    last_open_position_review_error=None,
-                    last_open_position_review_reason=str(reason or "scheduled_review"),
-                    last_open_position_review_count=reviewed_count,
-                    last_open_position_close_count=closed_count,
+                active_positions = self._open_positions_for_review(market_types)
+                summary = self._review_market_type_groups(active_positions, reason=reason)
+                self._set_open_position_review_state(
+                    status="completed",
+                    reason=reason,
+                    reviewed_count=int(summary["reviewed"]),
+                    closed_count=int(summary["closed"]),
+                    in_progress=False,
                 )
-                return {"ok": True, "reviewed": reviewed_count, "closed": closed_count, "reason": reason}
+                return {"ok": True, "reviewed": int(summary["reviewed"]), "closed": int(summary["closed"]), "reason": reason}
             except Exception as exc:
-                reviewed_at = datetime.now(timezone.utc).isoformat()
-                self._update_state(
-                    open_position_review_in_progress=False,
-                    last_open_position_review_at=reviewed_at,
-                    last_open_position_review_status="failed",
-                    last_open_position_review_error=str(exc),
-                    last_open_position_review_reason=str(reason or "scheduled_review"),
+                self._set_open_position_review_state(
+                    status="failed",
+                    reason=reason,
+                    error=str(exc),
+                    in_progress=False,
                 )
                 raise
 
@@ -670,6 +666,87 @@ class WeatherRuntime:
             "refreshed_at_monotonic": time.monotonic(),
         }
 
+    def _open_positions_for_review(self, market_types: set[str] | None = None) -> list[dict[str, Any]]:
+        positions = self.tracker.get_dashboard_paper_positions(limit=500, status="open")
+        return self._filter_positions_by_market_types(positions, market_types)
+
+    def _filter_positions_by_market_types(
+        self,
+        positions: list[dict[str, Any]],
+        market_types: set[str] | None,
+    ) -> list[dict[str, Any]]:
+        if not market_types:
+            return positions
+        allowed = {str(market_type or "") for market_type in market_types}
+        return [item for item in positions if str(item.get("market_type") or "") in allowed]
+
+    def _set_open_position_review_state(
+        self,
+        *,
+        status: str,
+        reason: str,
+        reviewed_count: int = 0,
+        closed_count: int = 0,
+        error: str | None = None,
+        in_progress: bool,
+    ) -> None:
+        reviewed_at = datetime.now(timezone.utc).isoformat()
+        self._update_state(
+            open_position_review_in_progress=bool(in_progress),
+            last_open_position_review_at=reviewed_at,
+            last_open_position_review_status=str(status or "idle"),
+            last_open_position_review_error=error,
+            last_open_position_review_reason=str(reason or "scheduled_review"),
+            last_open_position_review_count=int(reviewed_count),
+            last_open_position_close_count=int(closed_count),
+        )
+
+    def _review_market_type_groups(
+        self,
+        positions: list[dict[str, Any]],
+        *,
+        reason: str,
+    ) -> dict[str, int]:
+        reviewed_count = 0
+        closed_count = 0
+        for market_type, type_positions in self._positions_grouped_by_market_type(positions).items():
+            summary = self._review_market_type_positions(
+                market_type=market_type,
+                positions=type_positions,
+                reason=reason,
+            )
+            reviewed_count += int(summary["reviewed"])
+            closed_count += int(summary["closed"])
+        return {"reviewed": reviewed_count, "closed": closed_count}
+
+    def _positions_grouped_by_market_type(
+        self,
+        positions: list[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for position in positions:
+            market_type = str(position.get("market_type") or "")
+            grouped.setdefault(market_type, []).append(position)
+        return dict(sorted(grouped.items()))
+
+    def _review_market_type_positions(
+        self,
+        *,
+        market_type: str,
+        positions: list[dict[str, Any]],
+        reason: str,
+    ) -> dict[str, int]:
+        batch, refresh_market_prices = self._get_review_weather_batch(market_type, positions)
+        allow_missing_signal_close = int(batch.error_count or 0) == 0
+        return self._review_positions_for_signals(
+            scan_type=market_type,
+            signals=batch.signals,
+            positions=positions,
+            trigger=reason,
+            allow_close_on_missing_signal=allow_missing_signal_close,
+            refresh_market_prices=refresh_market_prices,
+        )
+
     def _get_review_weather_batch(
         self,
         market_type: str,
@@ -684,39 +761,90 @@ class WeatherRuntime:
         now = time.monotonic()
         position_keys = self._review_position_keys(cache_key, positions)
 
-        if (
-            cache_entry is not None
-            and str(cache_entry.get("scope") or "") == "review"
-            and tuple(cache_entry.get("position_keys") or ()) == position_keys
-            and refresh_interval_s > 0
-        ):
-            age_s = now - float(cache_entry.get("refreshed_at_monotonic") or 0.0)
-            if age_s < refresh_interval_s:
-                payload = list(cache_entry.get("payload") or [])
-                return self._build_review_batch_from_payload(cache_key, payload), False
+        cached_payload_batch = self._cached_review_payload_batch(
+            cache_key=cache_key,
+            cache_entry=cache_entry,
+            position_keys=position_keys,
+            refresh_interval_s=refresh_interval_s,
+            now=now,
+        )
+        if cached_payload_batch is not None:
+            return cached_payload_batch, False
 
         try:
             payload = self._build_review_weather_payload(cache_key, positions)
             batch = self._build_review_batch_from_payload(cache_key, payload)
-            self._open_position_weather_cache[cache_key] = {
-                "scope": "review",
-                "batch": batch,
-                "payload": payload,
-                "position_keys": position_keys,
-                "refreshed_at_monotonic": now,
-            }
+            self._store_review_weather_cache_entry(
+                cache_key=cache_key,
+                batch=batch,
+                payload=payload,
+                position_keys=position_keys,
+                refreshed_at_monotonic=now,
+            )
             return batch, False
         except Exception as exc:
-            if cache_entry is not None:
-                logger.warning("open position weather refresh failed for %s; reusing cached data: %s", cache_key, exc)
-                if str(cache_entry.get("scope") or "") == "review":
-                    payload = list(cache_entry.get("payload") or [])
-                    if payload:
-                        return self._build_review_batch_from_payload(cache_key, payload), False
-                batch = cache_entry.get("batch")
-                if isinstance(batch, ScanBatch):
-                    return batch, True
+            fallback = self._fallback_review_weather_batch(cache_key=cache_key, cache_entry=cache_entry, error=exc)
+            if fallback is not None:
+                return fallback
             raise
+
+    def _cached_review_payload_batch(
+        self,
+        *,
+        cache_key: str,
+        cache_entry: dict[str, Any] | None,
+        position_keys: tuple[tuple[Any, ...], ...],
+        refresh_interval_s: int,
+        now: float,
+    ) -> ScanBatch | None:
+        if (
+            cache_entry is None
+            or str(cache_entry.get("scope") or "") != "review"
+            or tuple(cache_entry.get("position_keys") or ()) != position_keys
+            or refresh_interval_s <= 0
+        ):
+            return None
+        age_s = now - float(cache_entry.get("refreshed_at_monotonic") or 0.0)
+        if age_s >= refresh_interval_s:
+            return None
+        payload = list(cache_entry.get("payload") or [])
+        return self._build_review_batch_from_payload(cache_key, payload)
+
+    def _store_review_weather_cache_entry(
+        self,
+        *,
+        cache_key: str,
+        batch: ScanBatch,
+        payload: list[dict[str, Any]],
+        position_keys: tuple[tuple[Any, ...], ...],
+        refreshed_at_monotonic: float,
+    ) -> None:
+        self._open_position_weather_cache[cache_key] = {
+            "scope": "review",
+            "batch": batch,
+            "payload": payload,
+            "position_keys": position_keys,
+            "refreshed_at_monotonic": refreshed_at_monotonic,
+        }
+
+    def _fallback_review_weather_batch(
+        self,
+        *,
+        cache_key: str,
+        cache_entry: dict[str, Any] | None,
+        error: Exception,
+    ) -> tuple[ScanBatch, bool] | None:
+        if cache_entry is None:
+            return None
+        logger.warning("open position weather refresh failed for %s; reusing cached data: %s", cache_key, error)
+        if str(cache_entry.get("scope") or "") == "review":
+            payload = list(cache_entry.get("payload") or [])
+            if payload:
+                return self._build_review_batch_from_payload(cache_key, payload), False
+        batch = cache_entry.get("batch")
+        if isinstance(batch, ScanBatch):
+            return batch, True
+        return None
 
     def _build_review_signal_map(
         self,
@@ -824,27 +952,19 @@ class WeatherRuntime:
                 buckets,
                 provider_context="review",
             )
-            provider_available = any(
-                forecast_data.get(key) is not None for key in ("wu", "openmeteo", "vc", "noaa", "weatherapi")
-            )
+            provider_data = dict(forecast_data) if self._has_temperature_forecast_data(forecast_data) else None
             for position, bucket in items:
                 payload.append(
-                    {
-                        "market_type": "temperature",
-                        "market_slug": str(position.get("market_slug") or "").strip(),
-                        "event_slug": str(position.get("event_slug") or "").strip(),
-                        "event_title": str(position.get("event_title") or position.get("market_slug") or "Unknown market"),
-                        "city_slug": city_slug,
-                        "event_date": event_date.isoformat(),
-                        "label": bucket.get("label"),
-                        "bucket": dict(bucket),
-                        "liquidity": float(position.get("liquidity") or 0.0),
-                        "fallback_market_prob": _as_probability(
-                            position.get("market_probability") or position.get("mark_price") or position.get("entry_price")
-                        ),
-                        "remaining_to_resolution_s": _as_float(position.get("remaining_to_resolution_s")),
-                        "forecast_data": dict(forecast_data) if provider_available else None,
-                    }
+                    self._review_payload_item(
+                        position,
+                        market_type="temperature",
+                        city_slug=city_slug,
+                        event_date=event_date.isoformat(),
+                        label=bucket.get("label"),
+                        bucket=dict(bucket),
+                        forecast_data=provider_data,
+                        remaining_to_resolution_s=_as_float(position.get("remaining_to_resolution_s")),
+                    )
                 )
         return payload
 
@@ -881,26 +1001,57 @@ class WeatherRuntime:
                     "om_temp": om_data["total_projected"] if om_data else None,
                     "vc_temp": vc_data["total_projected"] if vc_data else None,
                     "unit": unit,
-                }
+                        }
             for position, bucket in items:
                 payload.append(
-                    {
-                        "market_type": "precipitation",
-                        "market_slug": str(position.get("market_slug") or "").strip(),
-                        "event_slug": str(position.get("event_slug") or "").strip(),
-                        "event_title": str(position.get("event_title") or position.get("market_slug") or "Unknown market"),
-                        "city_slug": city_slug,
-                        "event_date": f"{year:04d}-{month:02d}-01",
-                        "label": bucket.get("label"),
-                        "bucket": dict(bucket),
-                        "liquidity": float(position.get("liquidity") or 0.0),
-                        "fallback_market_prob": _as_probability(
-                            position.get("market_probability") or position.get("mark_price") or position.get("entry_price")
-                        ),
-                        "forecast_data": provider_data,
-                    }
+                    self._review_payload_item(
+                        position,
+                        market_type="precipitation",
+                        city_slug=city_slug,
+                        event_date=f"{year:04d}-{month:02d}-01",
+                        label=bucket.get("label"),
+                        bucket=dict(bucket),
+                        forecast_data=provider_data,
+                    )
                 )
         return payload
+
+    def _has_temperature_forecast_data(self, forecast_data: dict[str, Any]) -> bool:
+        return any(forecast_data.get(key) is not None for key in TEMPERATURE_FORECAST_KEYS)
+
+    def _review_payload_item(
+        self,
+        position: dict[str, Any],
+        *,
+        market_type: str,
+        city_slug: str,
+        event_date: str,
+        label: Any,
+        bucket: dict[str, Any],
+        forecast_data: dict[str, Any] | None,
+        remaining_to_resolution_s: float | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "market_type": str(market_type or ""),
+            "market_slug": str(position.get("market_slug") or "").strip(),
+            "event_slug": str(position.get("event_slug") or "").strip(),
+            "event_title": str(position.get("event_title") or position.get("market_slug") or "Unknown market"),
+            "city_slug": str(city_slug or ""),
+            "event_date": str(event_date or ""),
+            "label": label,
+            "bucket": dict(bucket),
+            "liquidity": float(position.get("liquidity") or 0.0),
+            "fallback_market_prob": self._review_fallback_market_prob(position),
+            "forecast_data": forecast_data,
+        }
+        if remaining_to_resolution_s is not None:
+            payload["remaining_to_resolution_s"] = remaining_to_resolution_s
+        return payload
+
+    def _review_fallback_market_prob(self, position: dict[str, Any]) -> float | None:
+        return _as_probability(
+            position.get("market_probability") or position.get("mark_price") or position.get("entry_price")
+        )
 
     def _build_review_batch_from_payload(self, market_type: str, payload: list[dict[str, Any]]) -> ScanBatch:
         if market_type == "temperature":
@@ -922,21 +1073,17 @@ class WeatherRuntime:
             if not isinstance(forecast_data, dict):
                 error_count += 1
                 skipped_events += 1
-                if len(error_samples) < 5:
-                    error_samples.append(f"temperature provider unavailable for {item.get('market_slug')}")
+                self._append_review_batch_error(
+                    error_samples,
+                    f"temperature provider unavailable for {item.get('market_slug')}",
+                )
                 continue
             market_slug = str(item.get("market_slug") or "").strip()
-            market_prob = market_probs.get(market_slug)
-            if market_prob is None:
-                market_prob = _as_probability(item.get("fallback_market_prob"))
+            market_prob = self._review_batch_market_probability(item, market_probs)
             if market_prob is None:
                 skipped_events += 1
                 continue
-            bucket = dict(item.get("bucket") or {})
-            bucket["market_yes_price"] = market_prob
-            bucket["market_slug"] = market_slug
-            bucket["event_slug"] = str(item.get("event_slug") or "")
-            bucket["liquidity"] = float(item.get("liquidity") or 0.0)
+            bucket = self._review_batch_bucket(item, market_prob, market_slug)
             discrepancies = find_discrepancies(
                 event_title=str(item.get("event_title") or "Unknown"),
                 city_slug=str(item.get("city_slug") or ""),
@@ -993,21 +1140,17 @@ class WeatherRuntime:
             if not isinstance(forecast_data, dict):
                 error_count += 1
                 skipped_events += 1
-                if len(error_samples) < 5:
-                    error_samples.append(f"precip provider unavailable for {item.get('market_slug')}")
+                self._append_review_batch_error(
+                    error_samples,
+                    f"precip provider unavailable for {item.get('market_slug')}",
+                )
                 continue
             market_slug = str(item.get("market_slug") or "").strip()
-            market_prob = market_probs.get(market_slug)
-            if market_prob is None:
-                market_prob = _as_probability(item.get("fallback_market_prob"))
+            market_prob = self._review_batch_market_probability(item, market_probs)
             if market_prob is None:
                 skipped_events += 1
                 continue
-            bucket = dict(item.get("bucket") or {})
-            bucket["market_yes_price"] = market_prob
-            bucket["market_slug"] = market_slug
-            bucket["event_slug"] = str(item.get("event_slug") or "")
-            bucket["liquidity"] = float(item.get("liquidity") or 0.0)
+            bucket = self._review_batch_bucket(item, market_prob, market_slug)
             discrepancies = find_discrepancies(
                 event_title=str(item.get("event_title") or "Unknown"),
                 city_slug=str(item.get("city_slug") or ""),
@@ -1040,6 +1183,34 @@ class WeatherRuntime:
             error_count=error_count,
             error_samples=error_samples,
         )
+
+    def _review_batch_market_probability(
+        self,
+        item: dict[str, Any],
+        market_probs: dict[str, float | None],
+    ) -> float | None:
+        market_slug = str(item.get("market_slug") or "").strip()
+        market_prob = market_probs.get(market_slug)
+        if market_prob is not None:
+            return market_prob
+        return _as_probability(item.get("fallback_market_prob"))
+
+    def _review_batch_bucket(
+        self,
+        item: dict[str, Any],
+        market_prob: float,
+        market_slug: str,
+    ) -> dict[str, Any]:
+        bucket = dict(item.get("bucket") or {})
+        bucket["market_yes_price"] = market_prob
+        bucket["market_slug"] = market_slug
+        bucket["event_slug"] = str(item.get("event_slug") or "")
+        bucket["liquidity"] = float(item.get("liquidity") or 0.0)
+        return bucket
+
+    def _append_review_batch_error(self, error_samples: list[str], message: str) -> None:
+        if len(error_samples) < 5:
+            error_samples.append(str(message))
 
     def _review_event_date(self, position: dict[str, Any]) -> date | None:
         raw = str(position.get("event_date") or "").strip()
@@ -1220,6 +1391,18 @@ def _scan_status_fields(scan_type: str) -> dict[str, str]:
         "error": f"{prefix}_scan_error",
         "error_count": f"{prefix}_error_count",
     }
+
+
+def _callable_accepts_keyword(func: Any, keyword: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    parameters = signature.parameters.values()
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == keyword
+        for parameter in parameters
+    )
 
 
 def _scheduled_interval_seconds(seconds_value: Any, minutes_value: Any, *, minimum_seconds: int) -> int:

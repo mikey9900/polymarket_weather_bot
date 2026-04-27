@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import threading
-from datetime import date
+from datetime import date, datetime
 
 from forecast import forecast_engine
+from logic.discrepancy_logic import find_discrepancies
 from precipitation import precip_forecast
+from weather_bot.temperature import _build_temperature_signal
 
 
 class _FakeResponse:
@@ -30,6 +32,95 @@ class _FakeDate(date):
     @classmethod
     def today(cls) -> "_FakeDate":
         return cls(2026, 4, 26)
+
+
+def test_find_discrepancies_counts_only_agreeing_sources():
+    discrepancies = find_discrepancies(
+        event_title="Highest temperature in NYC on April 27?",
+        city_slug="nyc",
+        event_date=_FakeDate(2026, 4, 27),
+        buckets=[
+            {
+                "label": "70-71F",
+                "market_yes_price": 0.40,
+                "market_slug": "nyc-apr-27-70-71f",
+                "liquidity": 1200.0,
+                "event_slug": "nyc-apr-27",
+            }
+        ],
+        wu_probs={"70-71F": 0.75},
+        om_probs={"70-71F": 0.73},
+        wu_temp=71.0,
+        om_temp=72.0,
+        unit_symbol="F",
+        vc_probs={"70-71F": 0.18},
+        vc_temp=67.0,
+        noaa_probs=None,
+        noaa_temp=None,
+        weatherapi_probs={"70-71F": 0.77},
+        weatherapi_temp=71.5,
+    )
+
+    assert len(discrepancies) == 1
+    discrepancy = discrepancies[0]
+
+    assert discrepancy["confidence"] == "confirmed"
+    assert discrepancy["direction"] == "YES"
+    assert discrepancy["source_count"] == 3
+    assert discrepancy["wu_prob"] == 0.75
+    assert discrepancy["om_prob"] == 0.73
+    assert discrepancy["vc_prob"] == 0.18
+    assert discrepancy["weatherapi_prob"] == 0.77
+
+
+def test_build_temperature_signal_tracks_all_available_provider_probabilities():
+    created_at = datetime(2026, 4, 26, 12, 0, 0)
+    event_end = datetime(2026, 4, 27, 0, 0, 0)
+    discrepancy = {
+        "event_title": "Highest temperature in NYC on April 27?",
+        "city_slug": "nyc",
+        "event_date": "2026-04-27",
+        "label": "70-71F",
+        "direction": "YES",
+        "market_prob": 0.40,
+        "forecast_prob": 0.75,
+        "discrepancy": 0.35,
+        "edge_size": "large",
+        "confidence": "confirmed",
+        "source_count": 2,
+        "liquidity": 800.0,
+        "market_slug": "nyc-apr-27-70-71f",
+        "event_slug": "nyc-apr-27",
+        "unit": "F",
+        "wu_prob": 0.75,
+        "om_prob": 0.73,
+        "vc_prob": None,
+        "noaa_prob": 0.72,
+        "weatherapi_prob": None,
+        "wu_temp": 71.0,
+        "om_temp": 72.0,
+        "vc_temp": None,
+        "noaa_temp": 71.0,
+        "weatherapi_temp": None,
+    }
+
+    signal = _build_temperature_signal(
+        event={"title": discrepancy["event_title"], "slug": discrepancy["event_slug"]},
+        discrepancy=discrepancy,
+        event_end=event_end,
+        created_at=created_at,
+    )
+
+    assert signal.forecast_snapshot.source_probabilities == {
+        "wu": 0.75,
+        "openmeteo": 0.73,
+        "visual_crossing": None,
+        "noaa": 0.72,
+        "weatherapi": None,
+    }
+    assert signal.source_count == 2
+    assert signal.source_dispersion_pct == 0.03
+    assert signal.time_to_resolution_s == 43200.0
 
 
 def test_openmeteo_precip_forecast_request_uses_explicit_date_range_without_forecast_days(monkeypatch):

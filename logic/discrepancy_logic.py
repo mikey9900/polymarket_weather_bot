@@ -11,10 +11,37 @@
 #   SMALL edge      - one source shows 10-20% discrepancy
 # =============================================================
 
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 SMALL_EDGE_THRESHOLD = 0.10
 LARGE_EDGE_THRESHOLD = 0.20
+TITLE_PREFIX = "Highest temperature in "
+
+PROVIDER_SPECS = (
+    ("wu", "WU", "wu_only", "wu_temp", "wu_prob", "WU"),
+    ("om", "Open-Meteo", "om_only", "om_temp", "om_prob", "OM"),
+    ("vc", "Visual Crossing", "vc_only", "vc_temp", "vc_prob", "VC"),
+    ("noaa", "NOAA", "noaa_only", "noaa_temp", "noaa_prob", "NOAA"),
+    ("weatherapi", "WeatherAPI", "weatherapi_only", "weatherapi_temp", "weatherapi_prob", "WA"),
+)
+
+PROVIDER_BADGES = {
+    "confirmed": "2 SOURCES AGREE",
+    "wu_only": "WU only",
+    "om_only": "OM only",
+    "vc_only": "VC only",
+    "noaa_only": "NOAA only",
+    "weatherapi_only": "WeatherAPI only",
+}
+
+PROVIDER_ICONS = {
+    "confirmed": "[2x]",
+    "wu_only": "[WU]",
+    "om_only": "[OM]",
+    "vc_only": "[VC]",
+    "noaa_only": "[NOAA]",
+    "weatherapi_only": "[WA]",
+}
 
 
 def _check_single_source(
@@ -43,6 +70,76 @@ def _check_single_source(
         "direction": "YES" if diff > 0 else "NO",
         "edge_size": "large" if abs(diff) >= LARGE_EDGE_THRESHOLD else "small",
     }
+
+
+def _iter_provider_specs() -> Iterable[tuple[str, str, str, str, str, str]]:
+    return PROVIDER_SPECS
+
+
+def _single_source_results(label: str, market_prob: float, provider_probabilities: dict[str, Optional[dict]]) -> dict[str, dict]:
+    results: dict[str, dict] = {}
+    for provider_key, provider_name, *_rest in _iter_provider_specs():
+        probs = provider_probabilities.get(provider_key)
+        result = _check_single_source(label, market_prob, probs.get(label) if probs else None, provider_name)
+        if result is not None:
+            results[provider_key] = result
+    return results
+
+
+def _agreeing_sources(single_source_results: dict[str, dict]) -> tuple[str, str, list[dict]] | None:
+    all_results = list(single_source_results.values())
+    if not all_results:
+        return None
+
+    yes_votes = [result for result in all_results if result["direction"] == "YES"]
+    no_votes = [result for result in all_results if result["direction"] == "NO"]
+
+    if len(yes_votes) >= 2:
+        return "confirmed", "YES", yes_votes
+    if len(no_votes) >= 2:
+        return "confirmed", "NO", no_votes
+
+    for provider_key, _provider_name, confidence, *_rest in _iter_provider_specs():
+        result = single_source_results.get(provider_key)
+        if result is not None:
+            return confidence, result["direction"], [result]
+    return None
+
+
+def _short_event_title(event_title: str) -> str:
+    return event_title.replace(TITLE_PREFIX, "").replace("?", "")
+
+
+def _temperature_parts(discrepancy: dict, *, compact: bool) -> list[str]:
+    parts: list[str] = []
+    for _provider_key, _provider_name, _confidence, temp_key, _prob_key, short_label in _iter_provider_specs():
+        value = discrepancy.get(temp_key)
+        if value is None:
+            continue
+        token = f"{short_label}:{value:.0f}" if compact else f"{short_label} {value:.0f}"
+        parts.append(token)
+    return parts
+
+
+def _probability_parts(discrepancy: dict) -> list[str]:
+    parts = [f"Mkt *{round(discrepancy['market_prob'] * 100)}%*"]
+    for _provider_key, _provider_name, _confidence, _temp_key, prob_key, short_label in _iter_provider_specs():
+        value = discrepancy.get(prob_key)
+        if value is not None:
+            parts.append(f"{short_label} {round(value * 100)}%")
+    return parts
+
+
+def _confidence_badge(discrepancy: dict) -> str:
+    source_count = int(discrepancy.get("source_count", 1) or 1)
+    confidence = str(discrepancy.get("confidence", "") or "")
+    if source_count >= 3:
+        return f"{source_count} SOURCES AGREE"
+    return PROVIDER_BADGES.get(confidence, PROVIDER_BADGES["om_only"])
+
+
+def _confidence_icon(confidence: str) -> str:
+    return PROVIDER_ICONS.get(confidence, PROVIDER_ICONS["om_only"])
 
 
 def find_discrepancies(
@@ -79,60 +176,21 @@ def find_discrepancies(
         if market_prob is None:
             continue
 
-        wu_result = _check_single_source(label, market_prob, wu_probs.get(label) if wu_probs else None, "WU")
-        om_result = _check_single_source(label, market_prob, om_probs.get(label) if om_probs else None, "Open-Meteo")
-        vc_result = _check_single_source(
-            label, market_prob, vc_probs.get(label) if vc_probs else None, "Visual Crossing"
-        )
-        noaa_result = _check_single_source(label, market_prob, noaa_probs.get(label) if noaa_probs else None, "NOAA")
-        weatherapi_result = _check_single_source(
-            label,
-            market_prob,
-            weatherapi_probs.get(label) if weatherapi_probs else None,
-            "WeatherAPI",
-        )
-
-        all_results = [
-            result
-            for result in (wu_result, om_result, vc_result, noaa_result, weatherapi_result)
-            if result is not None
-        ]
-        if not all_results:
+        provider_probabilities = {
+            "wu": wu_probs,
+            "om": om_probs,
+            "vc": vc_probs,
+            "noaa": noaa_probs,
+            "weatherapi": weatherapi_probs,
+        }
+        single_source_results = _single_source_results(label, market_prob, provider_probabilities)
+        if not single_source_results:
             continue
 
-        yes_votes = [result for result in all_results if result["direction"] == "YES"]
-        no_votes = [result for result in all_results if result["direction"] == "NO"]
-
-        if len(yes_votes) >= 2:
-            confidence = "confirmed"
-            direction = "YES"
-            agreeing = yes_votes
-        elif len(no_votes) >= 2:
-            confidence = "confirmed"
-            direction = "NO"
-            agreeing = no_votes
-        elif wu_result:
-            confidence = "wu_only"
-            direction = wu_result["direction"]
-            agreeing = [wu_result]
-        elif om_result:
-            confidence = "om_only"
-            direction = om_result["direction"]
-            agreeing = [om_result]
-        elif vc_result:
-            confidence = "vc_only"
-            direction = vc_result["direction"]
-            agreeing = [vc_result]
-        elif noaa_result:
-            confidence = "noaa_only"
-            direction = noaa_result["direction"]
-            agreeing = [noaa_result]
-        elif weatherapi_result:
-            confidence = "weatherapi_only"
-            direction = weatherapi_result["direction"]
-            agreeing = [weatherapi_result]
-        else:
+        agreement = _agreeing_sources(single_source_results)
+        if agreement is None:
             continue
+        confidence, direction, agreeing = agreement
 
         avg_disc = sum(result["discrepancy"] for result in agreeing) / len(agreeing)
         discrepancy_val = round(avg_disc, 3)
@@ -160,11 +218,11 @@ def find_discrepancies(
                 "unit": unit_symbol,
                 "market_slug": market_slug,
                 "liquidity": liquidity,
-                "wu_prob": wu_result["forecast_prob"] if wu_result else None,
-                "om_prob": om_result["forecast_prob"] if om_result else None,
-                "vc_prob": vc_result["forecast_prob"] if vc_result else None,
-                "noaa_prob": noaa_result["forecast_prob"] if noaa_result else None,
-                "weatherapi_prob": weatherapi_result["forecast_prob"] if weatherapi_result else None,
+                "wu_prob": single_source_results.get("wu", {}).get("forecast_prob"),
+                "om_prob": single_source_results.get("om", {}).get("forecast_prob"),
+                "vc_prob": single_source_results.get("vc", {}).get("forecast_prob"),
+                "noaa_prob": single_source_results.get("noaa", {}).get("forecast_prob"),
+                "weatherapi_prob": single_source_results.get("weatherapi", {}).get("forecast_prob"),
                 "event_slug": bucket.get("event_slug", ""),
             }
         )
@@ -176,59 +234,19 @@ def find_discrepancies(
 def format_discrepancy_message(d: dict) -> str:
     """Formats a single discrepancy into a Telegram message."""
 
-    conf = d.get("confidence", "")
-    src_count = d.get("source_count", 1)
+    conf = str(d.get("confidence", "") or "")
     edge_size = d.get("edge_size", "small")
     direction = d["direction"]
     bet_emoji = "UP" if direction == "YES" else "DOWN"
     size_dot = "[L]" if edge_size == "large" else "[S]"
-
-    if src_count >= 3:
-        badge = f"{src_count} SOURCES AGREE"
-    elif conf == "confirmed":
-        badge = "2 SOURCES AGREE"
-    elif conf == "wu_only":
-        badge = "WU only"
-    elif conf == "vc_only":
-        badge = "VC only"
-    elif conf == "noaa_only":
-        badge = "NOAA only"
-    elif conf == "weatherapi_only":
-        badge = "WeatherAPI only"
-    else:
-        badge = "OM only"
-
-    short = d["event_title"].replace("Highest temperature in ", "").replace("?", "")
-
+    badge = _confidence_badge(d)
+    short = _short_event_title(d["event_title"])
     unit = d.get("unit", "F")
-    temp_parts = []
-    for label, key in (
-        ("WU", "wu_temp"),
-        ("OM", "om_temp"),
-        ("VC", "vc_temp"),
-        ("NOAA", "noaa_temp"),
-        ("WA", "weatherapi_temp"),
-    ):
-        value = d.get(key)
-        if value is not None:
-            temp_parts.append(f"{label} {value:.0f}")
+    temp_parts = _temperature_parts(d, compact=False)
     temp_line = ("  ".join(temp_parts) + unit) if temp_parts else ""
-
-    market_pct = round(d["market_prob"] * 100)
     diff_pct = round(d["discrepancy"] * 100)
     diff_str = f"+{diff_pct}%" if diff_pct > 0 else f"{diff_pct}%"
-
-    prob_parts = [f"Mkt *{market_pct}%*"]
-    for label, key in (
-        ("WU", "wu_prob"),
-        ("OM", "om_prob"),
-        ("VC", "vc_prob"),
-        ("NOAA", "noaa_prob"),
-        ("WA", "weatherapi_prob"),
-    ):
-        value = d.get(key)
-        if value is not None:
-            prob_parts.append(f"{label} {round(value * 100)}%")
+    prob_parts = _probability_parts(d)
 
     liq_str = f"${d.get('liquidity', 0):,.0f}"
 
@@ -245,39 +263,15 @@ def format_discrepancy_message(d: dict) -> str:
 def format_small_edge(d: dict) -> str:
     """Compact one-liner for small edges."""
 
-    conf = d.get("confidence", "")
+    conf = str(d.get("confidence", "") or "")
     direction = d["direction"]
     bet_emoji = "UP" if direction == "YES" else "DOWN"
     pct = round(d["discrepancy"] * 100)
     sign = "+" if pct > 0 else ""
-
-    if conf == "confirmed":
-        conf_icon = "[2x]"
-    elif conf == "wu_only":
-        conf_icon = "[WU]"
-    elif conf == "vc_only":
-        conf_icon = "[VC]"
-    elif conf == "weatherapi_only":
-        conf_icon = "[WA]"
-    elif conf == "noaa_only":
-        conf_icon = "[NOAA]"
-    else:
-        conf_icon = "[OM]"
-
-    short = d["event_title"].replace("Highest temperature in ", "").replace("?", "")
-
+    conf_icon = _confidence_icon(conf)
+    short = _short_event_title(d["event_title"])
     unit = d.get("unit", "F")
-    temp_parts = []
-    for label, key in (
-        ("WU", "wu_temp"),
-        ("OM", "om_temp"),
-        ("VC", "vc_temp"),
-        ("NOAA", "noaa_temp"),
-        ("WA", "weatherapi_temp"),
-    ):
-        value = d.get(key)
-        if value is not None:
-            temp_parts.append(f"{label}:{value:.0f}")
+    temp_parts = _temperature_parts(d, compact=True)
     temp_str = (" ".join(temp_parts) + unit) if temp_parts else ""
 
     market_pct = round(d["market_prob"] * 100)
