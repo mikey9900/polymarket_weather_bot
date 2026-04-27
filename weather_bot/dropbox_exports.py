@@ -85,18 +85,36 @@ def resolve_dropbox_access_token(dropbox_auth: dict[str, Any]) -> str:
 
     refresh_token = str(dropbox_auth.get("refresh_token") or "").strip()
     if refresh_token:
-        response = requests.post(
-            DROPBOX_OAUTH_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": str(dropbox_auth.get("app_key") or ""),
-                "client_secret": str(dropbox_auth.get("app_secret") or ""),
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        payload = response.json() if response.text else {}
+        try:
+            response = requests.post(
+                DROPBOX_OAUTH_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": str(dropbox_auth.get("app_key") or ""),
+                    "client_secret": str(dropbox_auth.get("app_secret") or ""),
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=20,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Dropbox OAuth refresh request failed: {exc}") from exc
+        raw = response.text or ""
+        if response.status_code >= 400:
+            details = _dropbox_error_details(raw)
+            summary = (
+                str(details.get("friendly") or "").strip()
+                or str(details.get("summary") or "").strip()
+                or raw.strip()
+                or f"HTTP {response.status_code}"
+            )
+            raise RuntimeError(f"Dropbox OAuth refresh failed ({response.status_code}): {summary}")
+        try:
+            payload = response.json() if raw else {}
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Dropbox OAuth refresh returned invalid JSON ({response.status_code})."
+            ) from exc
         access_token = str(payload.get("access_token") or "").strip()
         if not access_token:
             raise RuntimeError("Dropbox OAuth refresh succeeded but returned no access_token.")
@@ -358,9 +376,34 @@ def _dropbox_error_details(raw_error: str) -> dict[str, Any]:
         return details
     error_obj = payload.get("error") if isinstance(payload, dict) else None
     summary = payload.get("error_summary") if isinstance(payload, dict) else None
+    description = payload.get("error_description") if isinstance(payload, dict) else None
     if summary:
         details["summary"] = summary
+    if description:
+        details["description"] = description
     if isinstance(error_obj, dict):
         details["error"] = error_obj
-    details["friendly"] = details.get("friendly") or summary or text
+    elif error_obj is not None:
+        details["error"] = str(error_obj)
+    friendly = str(details.get("friendly") or "").strip()
+    error_code = str(details.get("error") or "").strip()
+    description_text = str(details.get("description") or "").strip()
+    if not friendly:
+        if error_code == "invalid_grant":
+            friendly = description_text or "Refresh token is invalid, expired, revoked, or tied to a different Dropbox app."
+        elif error_code == "invalid_client":
+            friendly = description_text or "Dropbox app key or app secret is invalid for this refresh token."
+        elif error_code == "invalid_request":
+            friendly = description_text or "Dropbox rejected the OAuth refresh request payload."
+        elif error_code and description_text:
+            friendly = f"{error_code}: {description_text}"
+        elif description_text:
+            friendly = description_text
+        elif summary:
+            friendly = str(summary)
+        elif error_code:
+            friendly = error_code
+        else:
+            friendly = text
+    details["friendly"] = friendly
     return details

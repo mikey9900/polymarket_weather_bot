@@ -7,10 +7,11 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 import yaml
 
 from weather_bot.analysis_bundle import AnalysisBundleExporter
-from weather_bot.dropbox_exports import sync_dropbox_latest_bundle_to_local
+from weather_bot.dropbox_exports import resolve_dropbox_access_token, sync_dropbox_latest_bundle_to_local
 from scanner.weather_event_scanner import cities_for_temperature_market_scope
 from weather_bot.config import load_config
 from weather_bot.control_plane import ControlPlane, ControlRequest
@@ -336,6 +337,32 @@ def test_sync_dropbox_latest_bundle_to_local_extracts_bundle(tmp_path: Path, mon
     assert Path(result["downloads"]["latest_index_json"]["path"]).exists()
     assert result["extraction_error"] is None
     assert Path(result["extracted_bundle_dir"], "manifest.json").exists()
+
+
+def test_dropbox_refresh_error_surfaces_oauth_reason(monkeypatch):
+    class FakeResponse:
+        status_code = 400
+        text = json.dumps({"error": "invalid_grant", "error_description": "refresh token is malformed"})
+
+        def json(self):
+            return json.loads(self.text)
+
+    monkeypatch.setattr("weather_bot.dropbox_exports.requests.post", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(RuntimeError) as excinfo:
+        resolve_dropbox_access_token(
+            {
+                "refresh_token": "bad-token",
+                "app_key": "bad-key",
+                "app_secret": "bad-secret",
+                "_cached_access_token": None,
+                "_cached_expires_at": None,
+            }
+        )
+
+    message = str(excinfo.value)
+    assert "Dropbox OAuth refresh failed (400)" in message
+    assert "refresh token is malformed" in message
 
 
 def test_dashboard_rejects_empty_control_action(tmp_path: Path):
