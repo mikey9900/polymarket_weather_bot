@@ -371,7 +371,11 @@ class ControlPlane:
                 )
             note = ""
             if result.get("dropbox_ok"):
-                note = " Dropbox latest bundle and index are now in sync."
+                report_path = str(result.get("dropbox_latest_report_path") or "").strip()
+                if report_path:
+                    note = f" Dropbox latest bundle, report, and index are now in sync. Report: {report_path}."
+                else:
+                    note = " Dropbox latest bundle, report, and index are now in sync."
             elif result.get("dropbox_configuration_error"):
                 note = f" Dropbox configuration warning: {result.get('dropbox_configuration_error')}."
             elif result.get("dropbox_enabled") and result.get("dropbox_error"):

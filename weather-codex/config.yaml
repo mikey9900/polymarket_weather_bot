@@ -1,6 +1,6 @@
 name: "Weather Codex Runner"
 description: "Queue-backed research and tuning sidecar for the weather bot"
-version: "0.1.47"
+version: "0.1.48"
 slug: "weather_codex_runner"
 startup: services
 boot: auto

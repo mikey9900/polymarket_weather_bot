@@ -311,6 +311,8 @@ def test_analysis_bundle_export_updates_dropbox_latest_pointer(tmp_path: Path, m
     assert exports["last_analysis_index_dropbox_url"] == "https://dropbox.test/weather-bot/latest/WEATHER-BOT_latest_index.json?dl=0"
     assert exports["last_analysis_report_dropbox_url"] == "https://dropbox.test/weather-bot/latest/WEATHER-BOT_latest_report.xlsx?dl=0"
     assert exports["last_analysis_bundle_dropbox_error"] is None
+    assert "Dropbox latest bundle, report, and index are now in sync." in response["message"]
+    assert "Report: /weather-bot/latest/WEATHER-BOT_latest_report.xlsx." in response["message"]
     latest_index = json.loads(Path(exports["latest_analysis_index_path"]).read_text(encoding="utf-8"))
     assert latest_index["dropbox"]["latest_bundle_url"] == exports["last_analysis_bundle_dropbox_url"]
     assert latest_index["dropbox"]["latest_index_url"] == exports["last_analysis_index_dropbox_url"]
