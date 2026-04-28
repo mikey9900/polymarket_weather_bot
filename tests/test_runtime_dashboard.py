@@ -237,21 +237,28 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     bundle_path = Path(response["state"]["exports"]["last_analysis_bundle_path"])
     latest_bundle_path = Path(response["state"]["exports"]["latest_analysis_bundle_path"])
     latest_index_path = Path(response["state"]["exports"]["latest_analysis_index_path"])
+    latest_report_path = Path(response["state"]["exports"]["latest_analysis_report_path"])
+    report_path = Path(response["state"]["exports"]["last_analysis_report_path"])
     assert bundle_path.exists()
     assert latest_bundle_path.exists()
     assert latest_index_path.exists()
+    assert latest_report_path.exists()
+    assert report_path.exists()
     with zipfile.ZipFile(bundle_path) as archive:
         names = set(archive.namelist())
     assert "dashboard_state.json" in names
     assert "runtime_status.json" in names
     assert "weatherbot.db" in names
     assert "weather_cache.db" in names
+    assert "analysis_report.xlsx" in names
     assert "manifest.json" in names
     assert "scan_runs/20260427T120000_temperature_completed.json" in names
     latest_index = json.loads(latest_index_path.read_text(encoding="utf-8"))
     assert latest_index["label"] == "WEATHER-BOT"
     assert latest_index["latest_bundle"]["local_path"] == str(latest_bundle_path)
     assert latest_index["archive_bundle"]["local_path"] == str(bundle_path)
+    assert latest_index["latest_report"]["local_path"] == str(latest_report_path)
+    assert latest_index["archive_report"]["local_path"] == str(report_path)
 
 
 def test_analysis_bundle_export_updates_dropbox_latest_pointer(tmp_path: Path, monkeypatch):
@@ -299,16 +306,21 @@ def test_analysis_bundle_export_updates_dropbox_latest_pointer(tmp_path: Path, m
     assert exports["analysis_dropbox_enabled"] is True
     assert exports["last_analysis_bundle_dropbox_path"] == "/weather-bot/latest/WEATHER-BOT_latest_bundle.zip"
     assert exports["last_analysis_index_dropbox_path"] == "/weather-bot/latest/WEATHER-BOT_latest_index.json"
+    assert exports["last_analysis_report_dropbox_path"] == "/weather-bot/latest/WEATHER-BOT_latest_report.xlsx"
     assert exports["last_analysis_bundle_dropbox_url"] == "https://dropbox.test/weather-bot/latest/WEATHER-BOT_latest_bundle.zip?dl=0"
     assert exports["last_analysis_index_dropbox_url"] == "https://dropbox.test/weather-bot/latest/WEATHER-BOT_latest_index.json?dl=0"
+    assert exports["last_analysis_report_dropbox_url"] == "https://dropbox.test/weather-bot/latest/WEATHER-BOT_latest_report.xlsx?dl=0"
     assert exports["last_analysis_bundle_dropbox_error"] is None
     latest_index = json.loads(Path(exports["latest_analysis_index_path"]).read_text(encoding="utf-8"))
     assert latest_index["dropbox"]["latest_bundle_url"] == exports["last_analysis_bundle_dropbox_url"]
     assert latest_index["dropbox"]["latest_index_url"] == exports["last_analysis_index_dropbox_url"]
+    assert latest_index["dropbox"]["latest_report_url"] == exports["last_analysis_report_dropbox_url"]
     assert {path for _, path in uploads} >= {
         "/weather-bot/daily-archives/" + Path(exports["last_analysis_bundle_path"]).name,
+        "/weather-bot/daily-archives/" + Path(exports["last_analysis_report_path"]).name,
         "/weather-bot/latest/WEATHER-BOT_latest_bundle.zip",
         "/weather-bot/latest/WEATHER-BOT_latest_index.json",
+        "/weather-bot/latest/WEATHER-BOT_latest_report.xlsx",
     }
 
 
@@ -335,6 +347,7 @@ def test_sync_dropbox_latest_bundle_to_local_extracts_bundle(tmp_path: Path, mon
     assert result["ok"] is True
     assert Path(result["downloads"]["latest_bundle_zip"]["path"]).exists()
     assert Path(result["downloads"]["latest_index_json"]["path"]).exists()
+    assert Path(result["downloads"]["latest_report_xlsx"]["path"]).exists()
     assert result["extraction_error"] is None
     assert Path(result["extracted_bundle_dir"], "manifest.json").exists()
 

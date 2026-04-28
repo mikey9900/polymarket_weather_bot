@@ -216,7 +216,10 @@ class DashboardStateService:
                 "latest_analysis_bundle_exists": False,
                 "latest_analysis_index_path": None,
                 "latest_analysis_index_exists": False,
+                "latest_analysis_report_path": None,
+                "latest_analysis_report_exists": False,
                 "last_analysis_bundle_path": None,
+                "last_analysis_report_path": None,
                 "last_analysis_bundle_error": None,
                 "last_analysis_bundle_at": None,
                 "analysis_dropbox_enabled": False,
@@ -226,6 +229,8 @@ class DashboardStateService:
                 "last_analysis_bundle_dropbox_url": None,
                 "last_analysis_index_dropbox_path": None,
                 "last_analysis_index_dropbox_url": None,
+                "last_analysis_report_dropbox_path": None,
+                "last_analysis_report_dropbox_url": None,
                 "last_analysis_bundle_dropbox_error": None,
             }
         return dict(self.analysis_exporter.status())

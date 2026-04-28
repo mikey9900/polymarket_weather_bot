@@ -234,6 +234,7 @@ def sync_dropbox_latest_bundle_to_local(
     filenames = {
         "latest_bundle_zip": f"{safe_label}_latest_bundle.zip",
         "latest_index_json": f"{safe_label}_latest_index.json",
+        "latest_report_xlsx": f"{safe_label}_latest_report.xlsx",
     }
     downloads = {}
     for key, filename in filenames.items():

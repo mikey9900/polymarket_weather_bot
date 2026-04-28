@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .analysis_report import build_analysis_report
 from .dropbox_exports import (
     build_dropbox_auth,
     dropbox_create_or_get_shared_link,
@@ -50,6 +51,9 @@ class AnalysisBundleExporter:
         self._last_dropbox_bundle_url: str | None = None
         self._last_dropbox_index_path: str | None = None
         self._last_dropbox_index_url: str | None = None
+        self._last_report_path: str | None = None
+        self._last_dropbox_report_path: str | None = None
+        self._last_dropbox_report_url: str | None = None
         self._last_dropbox_error: str | None = None
         self.bundle_root.mkdir(parents=True, exist_ok=True)
 
@@ -77,6 +81,10 @@ class AnalysisBundleExporter:
     def latest_index_path(self) -> Path:
         return self.bundle_root / f"{self.bundle_label}_latest_index.json"
 
+    @property
+    def latest_report_path(self) -> Path:
+        return self.bundle_root / f"{self.bundle_label}_latest_report.xlsx"
+
     def bind_dashboard_state(
         self,
         *,
@@ -94,7 +102,10 @@ class AnalysisBundleExporter:
             "latest_analysis_bundle_exists": self.latest_bundle_path.exists(),
             "latest_analysis_index_path": str(self.latest_index_path),
             "latest_analysis_index_exists": self.latest_index_path.exists(),
+            "latest_analysis_report_path": str(self.latest_report_path),
+            "latest_analysis_report_exists": self.latest_report_path.exists(),
             "last_analysis_bundle_path": self._last_bundle_path,
+            "last_analysis_report_path": self._last_report_path,
             "last_analysis_bundle_error": self._last_error,
             "last_analysis_bundle_at": self._last_created_at,
             "analysis_dropbox_enabled": self.dropbox_auth is not None,
@@ -104,6 +115,8 @@ class AnalysisBundleExporter:
             "last_analysis_bundle_dropbox_url": self._last_dropbox_bundle_url,
             "last_analysis_index_dropbox_path": self._last_dropbox_index_path,
             "last_analysis_index_dropbox_url": self._last_dropbox_index_url,
+            "last_analysis_report_dropbox_path": self._last_dropbox_report_path,
+            "last_analysis_report_dropbox_url": self._last_dropbox_report_url,
             "last_analysis_bundle_dropbox_error": self._last_dropbox_error,
         }
 
@@ -124,6 +137,8 @@ class AnalysisBundleExporter:
         runtime_status = self.runtime.get_status_snapshot()
         latest_bundle_path = self.latest_bundle_path
         latest_index_path = self.latest_index_path
+        report_path = self.bundle_root / f"{stamp}_{self.bundle_label}_analysis_report.xlsx"
+        latest_report_path = self.latest_report_path
 
         try:
             with tempfile.TemporaryDirectory(prefix="weather-analysis-bundle-") as temp_dir:
@@ -132,6 +147,14 @@ class AnalysisBundleExporter:
                 weather_cache_backup_path = temp_root / "weather_cache.db"
                 self.tracker.backup_database(tracker_backup_path)
                 backup_weather_cache(weather_cache_backup_path)
+                build_analysis_report(
+                    output_path=report_path,
+                    label=self.bundle_label,
+                    created_at=created_at,
+                    snapshot=snapshot,
+                    tracker=self.tracker,
+                    runtime=self.runtime,
+                )
 
                 with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                     included_entries.append("dashboard_state.json")
@@ -150,6 +173,9 @@ class AnalysisBundleExporter:
 
                     included_entries.append("weather_cache.db")
                     archive.write(weather_cache_backup_path, arcname="weather_cache.db")
+
+                    included_entries.append("analysis_report.xlsx")
+                    archive.write(report_path, arcname="analysis_report.xlsx")
 
                     for path in scan_files:
                         arcname = f"scan_runs/{path.name}"
@@ -171,12 +197,15 @@ class AnalysisBundleExporter:
                     archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
 
             shutil.copy2(bundle_path, latest_bundle_path)
+            shutil.copy2(report_path, latest_report_path)
             index_payload = self._build_latest_index(
                 created_at=created_at,
                 reason=reason,
                 bundle_path=bundle_path,
                 latest_bundle_path=latest_bundle_path,
                 latest_index_path=latest_index_path,
+                report_path=report_path,
+                latest_report_path=latest_report_path,
                 scan_export_root=scan_export_root,
                 scan_files=scan_files,
                 runtime_status=runtime_status,
@@ -188,16 +217,21 @@ class AnalysisBundleExporter:
                 bundle_path=bundle_path,
                 latest_bundle_path=latest_bundle_path,
                 latest_index_path=latest_index_path,
+                report_path=report_path,
+                latest_report_path=latest_report_path,
                 index_payload=index_payload,
             )
 
             self._last_bundle_path = str(bundle_path)
+            self._last_report_path = str(report_path)
             self._last_error = None
             self._last_created_at = created_at.isoformat()
             return {
                 "bundle_path": str(bundle_path),
                 "latest_bundle_path": str(latest_bundle_path),
                 "latest_index_path": str(latest_index_path),
+                "report_path": str(report_path),
+                "latest_report_path": str(latest_report_path),
                 "created_at": self._last_created_at,
                 "scan_export_count": len(scan_files),
                 "entry_count": len(included_entries) + 1,
@@ -230,6 +264,8 @@ class AnalysisBundleExporter:
         bundle_path: Path,
         latest_bundle_path: Path,
         latest_index_path: Path,
+        report_path: Path,
+        latest_report_path: Path,
         scan_export_root: Path | None,
         scan_files: list[Path],
         runtime_status: dict[str, Any],
@@ -253,6 +289,16 @@ class AnalysisBundleExporter:
                 "filename": latest_index_path.name,
                 "local_path": str(latest_index_path),
             },
+            "archive_report": {
+                "filename": report_path.name,
+                "local_path": str(report_path),
+                "size_bytes": report_path.stat().st_size if report_path.exists() else None,
+            },
+            "latest_report": {
+                "filename": latest_report_path.name,
+                "local_path": str(latest_report_path),
+                "size_bytes": latest_report_path.stat().st_size if latest_report_path.exists() else None,
+            },
             "analysis_bundle_root": str(self.bundle_root),
             "scan_export_root": str(scan_export_root) if scan_export_root is not None else None,
             "scan_export_count": len(scan_files),
@@ -267,6 +313,9 @@ class AnalysisBundleExporter:
                 "latest_bundle_url": None,
                 "latest_index_path": None,
                 "latest_index_url": None,
+                "archive_report_path": None,
+                "latest_report_path": None,
+                "latest_report_url": None,
                 "error": None,
             },
         }
@@ -280,12 +329,16 @@ class AnalysisBundleExporter:
         bundle_path: Path,
         latest_bundle_path: Path,
         latest_index_path: Path,
+        report_path: Path,
+        latest_report_path: Path,
         index_payload: dict[str, Any],
     ) -> dict[str, Any]:
         self._last_dropbox_bundle_path = None
         self._last_dropbox_bundle_url = None
         self._last_dropbox_index_path = None
         self._last_dropbox_index_url = None
+        self._last_dropbox_report_path = None
+        self._last_dropbox_report_url = None
         self._last_dropbox_error = self._dropbox_configuration_error
         dropbox_meta = dict(index_payload.get("dropbox") or {})
 
@@ -300,25 +353,34 @@ class AnalysisBundleExporter:
                 "dropbox_latest_bundle_url": None,
                 "dropbox_latest_index_path": None,
                 "dropbox_latest_index_url": None,
+                "dropbox_archive_report_path": None,
+                "dropbox_latest_report_path": None,
+                "dropbox_latest_report_url": None,
                 "dropbox_error": self._dropbox_configuration_error,
             }
 
         archive_remote_path = self._dropbox_path("daily-archives", bundle_path.name)
+        archive_report_remote_path = self._dropbox_path("daily-archives", report_path.name)
         latest_bundle_remote_path = self._dropbox_path("latest", latest_bundle_path.name)
         latest_index_remote_path = self._dropbox_path("latest", latest_index_path.name)
+        latest_report_remote_path = self._dropbox_path("latest", latest_report_path.name)
         errors: list[str] = []
 
         for local_path, remote_path, error_label in (
             (bundle_path, archive_remote_path, "archive upload"),
+            (report_path, archive_report_remote_path, "archive report upload"),
             (latest_bundle_path, latest_bundle_remote_path, "latest bundle upload"),
+            (latest_report_path, latest_report_remote_path, "latest report upload"),
         ):
             response = dropbox_upload_file(local_path, remote_path, self.dropbox_auth)
             if not response.get("ok"):
                 errors.append(f"{error_label}: {response.get('error') or response.get('status')}")
 
         latest_bundle_url = None
+        latest_report_url = None
         if not errors:
             latest_bundle_url = dropbox_create_or_get_shared_link(latest_bundle_remote_path, self.dropbox_auth)
+            latest_report_url = dropbox_create_or_get_shared_link(latest_report_remote_path, self.dropbox_auth)
 
         dropbox_meta.update(
             {
@@ -326,6 +388,9 @@ class AnalysisBundleExporter:
                 "latest_bundle_path": latest_bundle_remote_path,
                 "latest_bundle_url": latest_bundle_url,
                 "latest_index_path": latest_index_remote_path,
+                "archive_report_path": archive_report_remote_path,
+                "latest_report_path": latest_report_remote_path,
+                "latest_report_url": latest_report_url,
             }
         )
         index_payload["dropbox"] = dropbox_meta
@@ -349,6 +414,8 @@ class AnalysisBundleExporter:
         self._last_dropbox_bundle_url = latest_bundle_url if not errors else None
         self._last_dropbox_index_path = latest_index_remote_path if not errors else None
         self._last_dropbox_index_url = latest_index_url if not errors else None
+        self._last_dropbox_report_path = latest_report_remote_path if not errors else None
+        self._last_dropbox_report_url = latest_report_url if not errors else None
         self._last_dropbox_error = " | ".join(errors) if errors else None
         dropbox_meta["error"] = self._last_dropbox_error
         index_payload["dropbox"] = dropbox_meta
@@ -361,6 +428,9 @@ class AnalysisBundleExporter:
             "dropbox_latest_bundle_url": latest_bundle_url,
             "dropbox_latest_index_path": latest_index_remote_path,
             "dropbox_latest_index_url": latest_index_url,
+            "dropbox_archive_report_path": archive_report_remote_path,
+            "dropbox_latest_report_path": latest_report_remote_path,
+            "dropbox_latest_report_url": latest_report_url,
             "dropbox_error": self._last_dropbox_error,
         }
 
