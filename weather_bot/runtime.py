@@ -146,6 +146,8 @@ class WeatherRuntime:
                 getattr(self.strategy_engine, "paper_entry_min_edge_abs", self.config.strategy.temperature.min_edge_abs)
             )
             self._state["paper_entry_min_edge_abs_override"] = None
+        if self._reconcile_boot_state():
+            self.tracker.set_runtime_state("runtime_status", dict(self._state))
 
     def start_background_loops(self) -> None:
         if self._threads:
@@ -255,9 +257,11 @@ class WeatherRuntime:
         if scan_type not in {"temperature", "precipitation"}:
             return {"ok": False, "queued": False, "message": f"Unknown scan type: {scan_type or 'empty'}"}
         with self._queue_condition:
-            active_type = str(self.get_status_snapshot().get("active_scan_type") or "")
+            snapshot = self.get_status_snapshot()
+            active_type = str(snapshot.get("active_scan_type") or "")
+            active_scan_matches = bool(snapshot.get("scan_in_progress")) and active_type == scan_type
             pending_types = [str(job.get("scan_type") or "") for job in self._scan_queue]
-            if active_type == scan_type or scan_type in pending_types:
+            if active_scan_matches or scan_type in pending_types:
                 self._sync_queue_state_locked()
                 return {"ok": True, "queued": False, "message": f"{scan_type.title()} scan already active or queued."}
             self._scan_queue.append(
@@ -1378,6 +1382,42 @@ class WeatherRuntime:
         with self._state_lock:
             self._state.update(changes)
             self.tracker.set_runtime_state("runtime_status", dict(self._state))
+
+    def _reconcile_boot_state(self) -> bool:
+        changes: dict[str, Any] = {
+            "scan_in_progress": False,
+            "scan_queue_depth": 0,
+            "pending_scan_types": [],
+            "active_scan_type": None,
+            "active_scan_started_at": None,
+            "scan_worker_healthy": False,
+            "open_position_review_in_progress": False,
+        }
+        interrupted_scan_types: list[str] = []
+        interruption_note = "Previous process exited before this scan finished."
+        for scan_type in ("temperature", "precipitation"):
+            status_fields = _scan_status_fields(scan_type)
+            status = str(self._state.get(status_fields["status"]) or "").strip().lower()
+            was_active = bool(self._state.get("scan_in_progress")) and str(self._state.get("active_scan_type") or "") == scan_type
+            if status == "running" or was_active:
+                interrupted_scan_types.append(scan_type)
+                changes[status_fields["status"]] = "interrupted"
+                if not str(self._state.get(status_fields["error"]) or "").strip():
+                    changes[status_fields["error"]] = interruption_note
+        review_status = str(self._state.get("last_open_position_review_status") or "").strip().lower()
+        if review_status == "running" or bool(self._state.get("open_position_review_in_progress")):
+            changes["last_open_position_review_status"] = "interrupted"
+            if not str(self._state.get("last_open_position_review_error") or "").strip():
+                changes["last_open_position_review_error"] = "Previous process exited before the open-position review finished."
+        if interrupted_scan_types and not str(self._state.get("last_scan_worker_error") or "").strip():
+            interrupted_labels = ", ".join(scan_type.title() for scan_type in interrupted_scan_types)
+            changes["last_scan_worker_error"] = f"Recovered stale scan state for: {interrupted_labels}."
+        changed = False
+        for key, value in changes.items():
+            if self._state.get(key) != value:
+                self._state[key] = value
+                changed = True
+        return changed
 
 
 def _scan_status_fields(scan_type: str) -> dict[str, str]:

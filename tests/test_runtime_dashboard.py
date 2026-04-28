@@ -89,6 +89,66 @@ def test_runtime_startup_respects_precipitation_config_over_saved_runtime_state(
     assert runtime.get_status_snapshot()["precipitation_enabled"] is False
 
 
+def test_runtime_startup_clears_stale_scan_state_and_allows_new_queue(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.set_runtime_state(
+        "runtime_status",
+        {
+            "scan_in_progress": True,
+            "scan_queue_depth": 1,
+            "pending_scan_types": ["temperature"],
+            "active_scan_type": "temperature",
+            "active_scan_started_at": "2026-04-25T12:00:00+00:00",
+            "scan_worker_healthy": True,
+            "last_temperature_scan_status": "running",
+            "last_temperature_scan_reason": "operator",
+            "open_position_review_in_progress": True,
+            "last_open_position_review_status": "running",
+        },
+    )
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+
+    state = runtime.get_status_snapshot()
+    assert state["scan_in_progress"] is False
+    assert state["scan_queue_depth"] == 0
+    assert state["pending_scan_types"] == []
+    assert state["active_scan_type"] is None
+    assert state["active_scan_started_at"] is None
+    assert state["scan_worker_healthy"] is False
+    assert state["last_temperature_scan_status"] == "interrupted"
+    assert state["last_temperature_scan_error"] == "Previous process exited before this scan finished."
+    assert state["last_open_position_review_status"] == "interrupted"
+    assert state["last_open_position_review_error"] == "Previous process exited before the open-position review finished."
+    assert state["last_scan_worker_error"] == "Recovered stale scan state for: Temperature."
+
+    persisted = tracker.get_runtime_state("runtime_status")
+    assert persisted["scan_in_progress"] is False
+    assert persisted["active_scan_type"] is None
+    assert persisted["pending_scan_types"] == []
+
+    queued = runtime.request_scan("temperature", send_alerts=False, reason="operator")
+    assert queued["queued"] is True
+
+
+def test_request_scan_ignores_stray_active_type_when_scan_flag_is_clear(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    runtime._update_state(active_scan_type="temperature", scan_in_progress=False)
+
+    first = runtime.request_scan("temperature", send_alerts=False, reason="operator")
+    second = runtime.request_scan("temperature", send_alerts=False, reason="operator")
+
+    assert first["queued"] is True
+    assert second["queued"] is False
+
+
 def _signal(
     key: str = "rt-1",
     *,
