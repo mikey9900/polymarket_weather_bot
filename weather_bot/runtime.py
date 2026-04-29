@@ -70,6 +70,10 @@ class WeatherRuntime:
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         self._open_position_weather_cache: dict[str, dict[str, Any]] = {}
+        self._next_scheduled_scan_at: dict[str, datetime | None] = {
+            "temperature": None,
+            "precipitation": None,
+        }
         default_state = {
             "state": "running",
             "temperature_enabled": bool(self.config.temperature.enabled),
@@ -148,6 +152,7 @@ class WeatherRuntime:
             self._state["paper_entry_min_edge_abs_override"] = None
         if self._reconcile_boot_state():
             self.tracker.set_runtime_state("runtime_status", dict(self._state))
+        self._prime_next_scheduled_scans()
 
     def start_background_loops(self) -> None:
         if self._threads:
@@ -172,6 +177,8 @@ class WeatherRuntime:
         for thread in self._threads:
             thread.join(timeout=5.0)
         self._threads.clear()
+        self._set_next_scheduled_scan("temperature", None)
+        self._set_next_scheduled_scan("precipitation", None)
         self._update_state(scan_worker_healthy=False)
 
     def pause(self) -> None:
@@ -220,11 +227,19 @@ class WeatherRuntime:
     def set_auto_temperature_scan_minutes(self, value: int) -> int:
         minutes = _normalize_scan_interval_minutes(value)
         self._update_state(auto_temperature_scan_interval_seconds=minutes * 60)
+        self._set_next_scheduled_scan(
+            "temperature",
+            datetime.now(timezone.utc) + timedelta(seconds=minutes * 60),
+        )
         return int(minutes)
 
     def set_auto_precipitation_scan_minutes(self, value: int) -> int:
         minutes = _normalize_scan_interval_minutes(value)
         self._update_state(auto_precipitation_scan_interval_seconds=minutes * 60)
+        self._set_next_scheduled_scan(
+            "precipitation",
+            datetime.now(timezone.utc) + timedelta(seconds=minutes * 60),
+        )
         return int(minutes)
 
     def _temperature_market_scope(self) -> str:
@@ -242,6 +257,13 @@ class WeatherRuntime:
     def get_status_snapshot(self) -> dict:
         with self._state_lock:
             return dict(self._state)
+
+    def get_next_scheduled_scan_at(self, scan_type: str) -> str | None:
+        with self._state_lock:
+            due_at = self._next_scheduled_scan_at.get(str(scan_type or "").strip().lower())
+        if due_at is None:
+            return None
+        return due_at.isoformat()
 
     def request_scan(
         self,
@@ -1239,6 +1261,7 @@ class WeatherRuntime:
 
     def _temperature_loop(self) -> None:
         self._loop_runner(
+            scan_type="temperature",
             interval_seconds_provider=lambda: self.get_status_snapshot().get(
                 "auto_temperature_scan_interval_seconds",
                 self._configured_temperature_scan_interval_seconds(),
@@ -1249,6 +1272,7 @@ class WeatherRuntime:
 
     def _precipitation_loop(self) -> None:
         self._loop_runner(
+            scan_type="precipitation",
             interval_seconds_provider=lambda: self.get_status_snapshot().get(
                 "auto_precipitation_scan_interval_seconds",
                 self._configured_precipitation_scan_interval_seconds(),
@@ -1291,12 +1315,14 @@ class WeatherRuntime:
                 )
                 continue
 
-    def _loop_runner(self, *, interval_seconds_provider, enabled_key: str, runner) -> None:
+    def _loop_runner(self, *, scan_type: str, interval_seconds_provider, enabled_key: str, runner) -> None:
         last_cycle_at = time.monotonic()
         while not self._stop_event.is_set():
             interval_s = max(1, int(interval_seconds_provider()))
             due_at = last_cycle_at + interval_s
             remaining = due_at - time.monotonic()
+            due_timestamp = datetime.now(timezone.utc) + timedelta(seconds=max(0.0, remaining))
+            self._set_next_scheduled_scan(scan_type, due_timestamp)
             if remaining > 0:
                 if self._stop_event.wait(min(1.0, remaining)):
                     break
@@ -1311,6 +1337,7 @@ class WeatherRuntime:
             except Exception:
                 last_cycle_at = time.monotonic()
                 continue
+        self._set_next_scheduled_scan(scan_type, None)
 
     def _configured_temperature_scan_interval_seconds(self) -> int:
         return _scheduled_interval_seconds(
@@ -1325,6 +1352,24 @@ class WeatherRuntime:
             self.config.app.auto_precipitation_scan_minutes,
             minimum_seconds=5,
         )
+
+    def _prime_next_scheduled_scans(self) -> None:
+        now = datetime.now(timezone.utc)
+        self._set_next_scheduled_scan(
+            "temperature",
+            now + timedelta(seconds=self._state.get("auto_temperature_scan_interval_seconds", self._configured_temperature_scan_interval_seconds())),
+        )
+        self._set_next_scheduled_scan(
+            "precipitation",
+            now + timedelta(seconds=self._state.get("auto_precipitation_scan_interval_seconds", self._configured_precipitation_scan_interval_seconds())),
+        )
+
+    def _set_next_scheduled_scan(self, scan_type: str, due_at: datetime | None) -> None:
+        key = str(scan_type or "").strip().lower()
+        if key not in self._next_scheduled_scan_at:
+            return
+        with self._state_lock:
+            self._next_scheduled_scan_at[key] = due_at
 
     def _empty_batch(self, scan_type: str) -> ScanBatch:
         timestamp = datetime.now(timezone.utc).isoformat()

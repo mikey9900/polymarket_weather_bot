@@ -125,6 +125,11 @@ class ControlPlane:
                 minimum_seconds=5,
             ),
         )
+        next_temperature_scan_at = None
+        next_precipitation_scan_at = None
+        if hasattr(self.runtime, "get_next_scheduled_scan_at"):
+            next_temperature_scan_at = self.runtime.get_next_scheduled_scan_at("temperature")
+            next_precipitation_scan_at = self.runtime.get_next_scheduled_scan_at("precipitation")
         return {
             "state": runtime_status.get("state", "unknown"),
             "temperature_enabled": runtime_status.get("temperature_enabled", True),
@@ -147,6 +152,8 @@ class ControlPlane:
             "last_open_position_close_count": runtime_status.get("last_open_position_close_count", 0),
             "temperature_scan_interval_minutes": max(5, int(round(float(temperature_scan_interval_seconds) / 60.0))),
             "precipitation_scan_interval_minutes": max(5, int(round(float(precipitation_scan_interval_seconds) / 60.0))),
+            "next_temperature_scan_at": next_temperature_scan_at,
+            "next_precipitation_scan_at": next_precipitation_scan_at,
             "paper_balance": paper.get("current_balance", 0.0),
             "paper_equity": paper.get("current_equity", 0.0),
             "paper_initial_capital": paper.get("initial_capital", 0.0),

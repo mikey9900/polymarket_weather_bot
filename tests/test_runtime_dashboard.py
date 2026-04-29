@@ -510,6 +510,10 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "setTempCadence()" in html
     assert "setRainCadence()" in html
     assert "setTempScope()" in html
+    assert "temp-scan-countdown" in html
+    assert "rain-scan-countdown" in html
+    assert "updateScannerCountdowns" in html
+    assert "scanCountdownValue" in html
     assert "marketScopeOptions" in html
     assert "marketScopeLabel" in html
     assert "EXPORT BUNDLE" in html
@@ -849,6 +853,8 @@ def test_control_payload_exposes_paper_metrics(tmp_path: Path):
     assert payload["paper_entry_min_edge_abs"] == config.strategy.temperature.min_edge_abs
     assert payload["temperature_scan_interval_minutes"] == config.app.auto_temperature_scan_minutes
     assert payload["precipitation_scan_interval_minutes"] == config.app.auto_precipitation_scan_minutes
+    assert payload["next_temperature_scan_at"] is not None
+    assert payload["next_precipitation_scan_at"] is not None
     assert payload["paper_open_positions"] == 0
 
 
