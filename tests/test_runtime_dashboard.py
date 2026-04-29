@@ -65,6 +65,16 @@ def test_load_config_accepts_temperature_market_scope_ha_override(tmp_path: Path
     assert config.temperature.market_scope == "north_america"
 
 
+def test_load_config_accepts_temperature_forecast_spread_ha_override(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(json.dumps({"temperature_max_forecast_temp_spread_f": 6.5}), encoding="utf-8")
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.strategy.temperature.max_forecast_temp_spread_f == 6.5
+
+
 def test_temperature_market_scope_city_groups_are_split_cleanly():
     north_america = set(cities_for_temperature_market_scope("north_america"))
     international = set(cities_for_temperature_market_scope("international"))
@@ -460,6 +470,10 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     html = render_dashboard_html()
 
     assert "TRADE_COLLAPSE_KEY" in html
+    assert "CONTROL_ACTION_LOCK_MS" in html
+    assert "SCAN_ACTION_DEBOUNCE_MS" in html
+    assert "controlActionLocks" in html
+    assert "isControlLocked(action)" in html
     assert "weather-ops-open-trade-collapse-v1" in html
     assert "toggleTradeExpanded" in html
     assert "tradeToggleKey" in html

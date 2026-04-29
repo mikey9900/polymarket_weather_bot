@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -165,6 +166,68 @@ def test_strategy_rejects_stale_signal(tmp_path: Path):
 
     assert result.decision.accepted is False
     assert "Signal is stale" in result.decision.reason
+
+
+def test_strategy_rejects_temperature_signal_with_wide_raw_source_spread(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    signal = _make_signal(
+        key="wide-spread-f",
+        score=0.88,
+        market_prob=0.2,
+        forecast_prob=0.78,
+        edge=0.58,
+        edge_abs=0.58,
+    )
+    signal = replace(
+        signal,
+        forecast_snapshot=replace(
+            signal.forecast_snapshot,
+            unit="F",
+            om_temp=54.0,
+            vc_temp=65.0,
+            noaa_temp=63.0,
+        ),
+    )
+
+    result = strategy.process_signals([signal], auto_trade_enabled=True)[0]
+
+    assert result.position is None
+    assert result.decision.accepted is False
+    assert "Raw source temperature spread 11.0°F meets or exceeds the 8.0°F ceiling." in result.decision.reason
+
+
+def test_strategy_converts_celsius_source_spread_before_applying_entry_gate(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    signal = _make_signal(
+        key="wide-spread-c",
+        score=0.88,
+        market_prob=0.2,
+        forecast_prob=0.78,
+        edge=0.58,
+        edge_abs=0.58,
+    )
+    signal = replace(
+        signal,
+        forecast_snapshot=replace(
+            signal.forecast_snapshot,
+            unit="C",
+            om_temp=12.0,
+            vc_temp=17.0,
+            noaa_temp=16.0,
+        ),
+    )
+
+    result = strategy.process_signals([signal], auto_trade_enabled=True)[0]
+
+    assert result.position is None
+    assert result.decision.accepted is False
+    assert "Raw source temperature spread 9.0°F meets or exceeds the 8.0°F ceiling." in result.decision.reason
 
 
 def test_strategy_prices_no_contract_using_complement_price(tmp_path: Path):

@@ -298,6 +298,9 @@ class WeatherStrategyEngine:
             "source_dispersion_pct": signal.source_dispersion_pct,
             "component_scores": component_scores,
         }
+        forecast_temp_spread_f = _forecast_temp_spread_f(signal)
+        if forecast_temp_spread_f is not None:
+            metadata["forecast_temp_spread_f"] = round(forecast_temp_spread_f, 4)
         if self.research_provider is not None and hasattr(self.research_provider, "adjust_signal"):
             research_result = self.research_provider.adjust_signal(signal)
             if isinstance(research_result, dict):
@@ -342,6 +345,19 @@ class WeatherStrategyEngine:
         if signal.source_dispersion_pct > thresholds.max_source_dispersion_pct:
             reasons.append(
                 f"Source dispersion {signal.source_dispersion_pct:.1%} exceeds {thresholds.max_source_dispersion_pct:.1%}."
+            )
+        max_forecast_temp_spread_f = getattr(thresholds, "max_forecast_temp_spread_f", None)
+        forecast_temp_spread_f = _forecast_temp_spread_f(signal)
+        if (
+            signal.market_type == "temperature"
+            and max_forecast_temp_spread_f is not None
+            and forecast_temp_spread_f is not None
+            and forecast_temp_spread_f >= float(max_forecast_temp_spread_f)
+        ):
+            reasons.append(
+                "Raw source temperature spread "
+                f"{forecast_temp_spread_f:.1f}\N{DEGREE SIGN}F meets or exceeds the "
+                f"{float(max_forecast_temp_spread_f):.1f}\N{DEGREE SIGN}F ceiling."
             )
         if signal.time_to_resolution_s is not None:
             hours = signal.time_to_resolution_s / 3600.0
@@ -434,6 +450,27 @@ def _timing_score(
     center = (min_hours_to_event + max_hours_to_event) / 2.0
     span = max((max_hours_to_event - min_hours_to_event) / 2.0, 1.0)
     return max(0.2, 1.0 - abs(hours - center) / span)
+
+
+def _forecast_temp_spread_f(signal: WeatherSignal) -> float | None:
+    if signal.market_type != "temperature":
+        return None
+    snapshot = signal.forecast_snapshot
+    temps = [
+        _as_float(snapshot.wu_temp),
+        _as_float(snapshot.om_temp),
+        _as_float(snapshot.vc_temp),
+        _as_float(snapshot.noaa_temp),
+        _as_float(snapshot.weatherapi_temp),
+    ]
+    available = [float(temp) for temp in temps if temp is not None]
+    if len(available) < 2:
+        return None
+    spread = max(available) - min(available)
+    unit = str(snapshot.unit or "").strip().upper()
+    if "C" in unit and "F" not in unit:
+        spread *= 9.0 / 5.0
+    return float(spread)
 
 
 def _as_float(value: Any) -> float | None:
