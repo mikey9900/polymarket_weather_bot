@@ -470,6 +470,7 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     html = render_dashboard_html()
 
     assert "TRADE_COLLAPSE_KEY" in html
+    assert "OPEN_TRADES_PAGE_SIZE=10" in html
     assert "CONTROL_ACTION_LOCK_MS" in html
     assert "SCAN_ACTION_DEBOUNCE_MS" in html
     assert "controlActionLocks" in html
@@ -500,7 +501,16 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "copyExportPath" in html
     assert "copyBundlePath" in html
     assert "copyCloudLink" in html
-    assert "Showing ${shown} of ${total} open trades" in html
+    assert "Showing ${shownStart}-${shownEnd} of ${total} open trades" in html
+    assert "shiftOpenTradePage" in html
+    assert 'id="trade-pager-top"' in html
+    assert 'id="trade-pager-bottom"' in html
+    assert "OPS PROMPT" not in html
+    assert "Home Assistant Primary Deck" not in html
+    assert 'data-cell-id="signals"' not in html
+    assert "RECENT SIGNALS" not in html
+    assert 'pill("Temp Scan"' not in html
+    assert 'pill("Precip Scan"' not in html
     assert "set_paper_entry_min_edge_abs" in html
     assert "set_temperature_market_scope" in html
     assert "export_analysis_bundle" in html
@@ -835,6 +845,23 @@ def test_dashboard_exposes_enriched_open_trade_cards(tmp_path: Path):
     assert trade["mark_to_market_pnl"] < (trade["mark_to_market_payout"] - trade["cost"])
     assert trade["mark_to_market_mode"] == "reviewed_contract_mark"
     assert trade["holding_seconds"] is not None
+
+
+def test_dashboard_open_positions_feed_supports_more_than_twelve_cards(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    for idx in range(15):
+        strategy.process_signals([_signal(f"paged-open-{idx}")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    dashboard.refresh_once()
+    state = dashboard.get_state_threadsafe()
+
+    assert len(state["open_positions"]) == 15
 
 
 def test_control_payload_exposes_paper_metrics(tmp_path: Path):

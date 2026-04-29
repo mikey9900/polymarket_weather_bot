@@ -90,7 +90,7 @@ class DashboardStateService:
                 }
             },
             "open_positions": self.tracker.get_dashboard_paper_positions(
-                limit=12,
+                limit=250,
                 status="open",
                 mark_stale_after_seconds=stale_after_s,
             ),
