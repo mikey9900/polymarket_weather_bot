@@ -255,6 +255,55 @@ def test_strategy_prices_no_contract_using_complement_price(tmp_path: Path):
     assert result.position.entry_price == expected_entry_price
 
 
+def test_strategy_rejects_no_trade_above_temperature_no_entry_cap(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    result = strategy.process_signals(
+        [
+            _make_signal(
+                key="no-cap-blocked",
+                direction="NO",
+                market_prob=0.31,
+                forecast_prob=0.22,
+                edge=-0.47,
+                edge_abs=0.47,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert result.position is None
+    assert result.decision.accepted is False
+    assert "Projected NO entry price" in result.decision.reason
+
+
+def test_strategy_no_entry_cap_does_not_block_yes_side(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    result = strategy.process_signals(
+        [
+            _make_signal(
+                key="yes-cap-ignored",
+                direction="YES",
+                market_prob=0.69,
+                forecast_prob=0.78,
+                edge=0.09,
+                edge_abs=0.69,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert result.position is not None
+    assert result.decision.accepted is True
+
+
 def test_strategy_edge_floor_override_only_affects_future_entries(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")

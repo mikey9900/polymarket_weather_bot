@@ -89,6 +89,16 @@ class WeatherRuntime:
                 getattr(self.strategy_engine, "paper_entry_min_edge_abs", self.config.strategy.temperature.min_edge_abs)
             ),
             "paper_entry_min_edge_abs_override": getattr(self.strategy_engine, "paper_entry_min_edge_abs_override", None),
+            "paper_temperature_max_no_entry_price": getattr(
+                self.strategy_engine,
+                "paper_temperature_max_no_entry_price",
+                getattr(self.config.strategy.temperature, "max_no_entry_price", None),
+            ),
+            "paper_temperature_max_no_entry_price_override": getattr(
+                self.strategy_engine,
+                "paper_temperature_max_no_entry_price_override",
+                None,
+            ),
             "scan_in_progress": False,
             "scan_queue_depth": 0,
             "pending_scan_types": [],
@@ -150,6 +160,26 @@ class WeatherRuntime:
                 getattr(self.strategy_engine, "paper_entry_min_edge_abs", self.config.strategy.temperature.min_edge_abs)
             )
             self._state["paper_entry_min_edge_abs_override"] = None
+        no_entry_cap_override = self._state.get("paper_temperature_max_no_entry_price_override")
+        if hasattr(self.strategy_engine, "set_paper_temperature_max_no_entry_price"):
+            self.strategy_engine.set_paper_temperature_max_no_entry_price(no_entry_cap_override)
+            self._state["paper_temperature_max_no_entry_price"] = getattr(
+                self.strategy_engine,
+                "paper_temperature_max_no_entry_price",
+                getattr(self.config.strategy.temperature, "max_no_entry_price", None),
+            )
+            self._state["paper_temperature_max_no_entry_price_override"] = getattr(
+                self.strategy_engine,
+                "paper_temperature_max_no_entry_price_override",
+                None,
+            )
+        else:
+            self._state["paper_temperature_max_no_entry_price"] = getattr(
+                self.strategy_engine,
+                "paper_temperature_max_no_entry_price",
+                getattr(self.config.strategy.temperature, "max_no_entry_price", None),
+            )
+            self._state["paper_temperature_max_no_entry_price_override"] = None
         if self._reconcile_boot_state():
             self.tracker.set_runtime_state("runtime_status", dict(self._state))
         self._prime_next_scheduled_scans()
@@ -223,6 +253,21 @@ class WeatherRuntime:
             paper_entry_min_edge_abs_override=float(floor),
         )
         return float(floor)
+
+    def set_paper_temperature_max_no_entry_price(self, value: float | None) -> float | None:
+        if hasattr(self.strategy_engine, "set_paper_temperature_max_no_entry_price"):
+            self.strategy_engine.set_paper_temperature_max_no_entry_price(value)
+            cap = getattr(self.strategy_engine, "paper_temperature_max_no_entry_price", None)
+            override = getattr(self.strategy_engine, "paper_temperature_max_no_entry_price_override", None)
+        else:
+            raw = None if value is None else float(value)
+            cap = None if raw is None or raw <= 0 else raw
+            override = cap
+        self._update_state(
+            paper_temperature_max_no_entry_price=cap,
+            paper_temperature_max_no_entry_price_override=override,
+        )
+        return cap
 
     def set_auto_temperature_scan_minutes(self, value: int) -> int:
         minutes = _normalize_scan_interval_minutes(value)

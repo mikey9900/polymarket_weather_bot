@@ -55,6 +55,15 @@ ENTRY_EDGE_LIMIT_KEYS = (
     "paperEntryMinEdgeAbs",
 )
 ENTRY_EDGE_LIMIT_VALUE_KEYS = ("value", *ENTRY_EDGE_LIMIT_KEYS)
+NO_ENTRY_CAP_KEYS = (
+    "no_entry_cap",
+    "temperature_max_no_entry_price",
+    "paper_temperature_max_no_entry_price",
+    "max_no_entry_price",
+    "maxNoEntryPrice",
+    "noEntryCap",
+)
+NO_ENTRY_CAP_VALUE_KEYS = ("value", *NO_ENTRY_CAP_KEYS)
 
 
 @dataclass(frozen=True)
@@ -162,6 +171,10 @@ class ControlPlane:
                 "paper_entry_min_edge_abs",
                 getattr(self.runtime.strategy_engine, "paper_entry_min_edge_abs", 0.0),
             ),
+            "paper_temperature_max_no_entry_price": runtime_status.get(
+                "paper_temperature_max_no_entry_price",
+                getattr(self.runtime.strategy_engine, "paper_temperature_max_no_entry_price", None),
+            ),
             "paper_open_positions": paper.get("open_positions", 0),
             "available_actions": {
                 "start": True,
@@ -174,6 +187,7 @@ class ControlPlane:
                 "set_paper_capital": True,
                 "set_paper_max_open_positions": True,
                 "set_paper_entry_min_edge_abs": True,
+                "set_temperature_max_no_entry_price": True,
                 "close_position": True,
                 "toggle_temperature": True,
                 "toggle_precipitation": True,
@@ -332,6 +346,25 @@ class ControlPlane:
                     action,
                 )
             )
+        if action == "set_temperature_max_no_entry_price":
+            try:
+                value = _coerce_mapping(
+                    request.value,
+                    fallback_key="temperature_max_no_entry_price",
+                    nested_keys=("value", "payload", "data"),
+                )
+                cap = _coerce_optional_probability(value, keys=NO_ENTRY_CAP_VALUE_KEYS)
+            except (TypeError, ValueError):
+                return self._record(ControlResult(False, 400, "NO entry cap must be numeric.", action))
+            applied = self.runtime.set_paper_temperature_max_no_entry_price(cap)
+            if applied is None:
+                message = "NO entry cap disabled for future temperature entries. Current open positions keep their existing exit rules."
+            else:
+                message = (
+                    f"NO entry cap set to {applied:.2f} for future temperature entries only. "
+                    "Current open positions keep their existing exit rules."
+                )
+            return self._record(ControlResult(True, 200, message, action))
         if action == "close_position":
             value = _coerce_mapping(
                 request.value,
@@ -514,6 +547,8 @@ def _infer_action_from_payload(payload: dict[str, Any]) -> str:
             return "set_precipitation_scan_interval_minutes"
         if any(key in source for key in ENTRY_EDGE_LIMIT_KEYS):
             return "set_paper_entry_min_edge_abs"
+        if any(key in source for key in NO_ENTRY_CAP_KEYS):
+            return "set_temperature_max_no_entry_price"
         if any(key in source for key in OPEN_POSITION_CAP_KEYS):
             return "set_paper_max_open_positions"
         if any(key in source for key in ("position_id", "positionId", "paper_position_id", "open_position_id")):
@@ -567,6 +602,37 @@ def _coerce_percent_as_probability(value: Any, *, keys: tuple[str, ...] = ()) ->
                 return _coerce_percent_as_probability(json.loads(raw), keys=keys)
             except Exception as exc:  # pragma: no cover - defensive parsing fallback
                 raise ValueError("invalid percent value") from exc
+        if raw.endswith("%"):
+            raw = raw[:-1].strip()
+    amount = float(raw)
+    if amount > 1.0:
+        amount = amount / 100.0
+    return float(amount)
+
+
+def _coerce_optional_probability(value: Any, *, keys: tuple[str, ...] = ()) -> float | None:
+    raw = value
+    if isinstance(raw, dict):
+        for key in keys:
+            if key in raw:
+                raw = raw.get(key)
+                break
+        else:
+            raise ValueError("missing probability value")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+        lowered = raw.lower()
+        if lowered in {"off", "none", "disable", "disabled"}:
+            return 0.0
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                return _coerce_optional_probability(json.loads(raw), keys=keys)
+            except Exception as exc:  # pragma: no cover - defensive parsing fallback
+                raise ValueError("invalid probability value") from exc
         if raw.endswith("%"):
             raw = raw[:-1].strip()
     amount = float(raw)

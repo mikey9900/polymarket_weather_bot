@@ -50,6 +50,7 @@ class StrategyThresholds:
     max_source_age_hours: float = 6.0
     max_source_dispersion_pct: float = 0.20
     max_forecast_temp_spread_f: float | None = None
+    max_no_entry_price: float | None = None
     exit_min_score: float = 0.55
     exit_near_fair_edge_abs: float = 0.03
     exit_max_source_age_hours: float = 8.0
@@ -179,6 +180,10 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("strategy", {}).setdefault("temperature", {})["max_forecast_temp_spread_f"] = float(
             payload["temperature_max_forecast_temp_spread_f"]
         )
+    if "temperature_max_no_entry_price" in payload:
+        mapped.setdefault("strategy", {}).setdefault("temperature", {})["max_no_entry_price"] = float(
+            payload["temperature_max_no_entry_price"]
+        )
     if "resolution_check_minutes" in payload:
         mapped.setdefault("app", {})["resolution_check_minutes"] = int(payload["resolution_check_minutes"])
     if "open_position_review_seconds" in payload:
@@ -215,6 +220,10 @@ def _load_env_overrides() -> dict[str, Any]:
     if os.getenv("WEATHER_TEMPERATURE_MAX_FORECAST_TEMP_SPREAD_F"):
         payload.setdefault("strategy", {}).setdefault("temperature", {})["max_forecast_temp_spread_f"] = float(
             os.getenv("WEATHER_TEMPERATURE_MAX_FORECAST_TEMP_SPREAD_F", "0")
+        )
+    if os.getenv("WEATHER_TEMPERATURE_MAX_NO_ENTRY_PRICE"):
+        payload.setdefault("strategy", {}).setdefault("temperature", {})["max_no_entry_price"] = float(
+            os.getenv("WEATHER_TEMPERATURE_MAX_NO_ENTRY_PRICE", "0")
         )
     if os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES"):
         payload.setdefault("app", {})["resolution_check_minutes"] = int(os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES", "15"))

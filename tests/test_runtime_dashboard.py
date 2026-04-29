@@ -75,6 +75,16 @@ def test_load_config_accepts_temperature_forecast_spread_ha_override(tmp_path: P
     assert config.strategy.temperature.max_forecast_temp_spread_f == 6.5
 
 
+def test_load_config_accepts_temperature_no_entry_cap_ha_override(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(json.dumps({"temperature_max_no_entry_price": 0.68}), encoding="utf-8")
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.strategy.temperature.max_no_entry_price == 0.68
+
+
 def test_temperature_market_scope_city_groups_are_split_cleanly():
     north_america = set(cities_for_temperature_market_scope("north_america"))
     international = set(cities_for_temperature_market_scope("international"))
@@ -265,6 +275,23 @@ def test_dashboard_control_updates_state(tmp_path: Path):
     assert response["state"]["recent_operator_actions"][0]["action"] == "stop"
 
 
+def test_dashboard_control_updates_no_entry_cap(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe(
+        {"action": "set_temperature_max_no_entry_price", "value": {"temperature_max_no_entry_price": "0.68"}}
+    )
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["paper_temperature_max_no_entry_price"] == pytest.approx(0.68)
+
+
 def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
@@ -329,6 +356,27 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert latest_index["archive_bundle"]["local_path"] == str(bundle_path)
     assert latest_index["latest_report"]["local_path"] == str(latest_report_path)
     assert latest_index["archive_report"]["local_path"] == str(report_path)
+
+
+def test_dashboard_snapshot_exposes_pnl_analytics(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("pnl-analytics-1")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    open_positions = tracker.get_dashboard_paper_positions(limit=12, status="open")
+    runtime.close_position(int(open_positions[0]["id"]), reason="manual_test_close")
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    dashboard.refresh_once()
+    state = dashboard.get_state_threadsafe()
+
+    assert "pnl_analytics" in state
+    assert state["pnl_analytics"]["windows"]["24h"]["closed_count"] == 1
+    assert "YES" in state["pnl_analytics"]["windows"]["24h"]["by_direction"]
+    assert "NO" in state["pnl_analytics"]["windows"]["24h"]["by_direction"]
 
 
 def test_analysis_bundle_export_updates_dropbox_latest_pointer(tmp_path: Path, monkeypatch):
@@ -498,6 +546,11 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "renderControlDiagnostics" in html
     assert 'id="control-diagnostics"' in html
     assert "openProposalModal" in html
+    assert "openPnlModal" in html
+    assert "renderPnlModal" in html
+    assert "setPnlWindow" in html
+    assert 'id="pnl-modal"' in html
+    assert "P&L ANALYTICS" in html
     assert "copyExportPath" in html
     assert "copyBundlePath" in html
     assert "copyCloudLink" in html
@@ -512,9 +565,11 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert 'pill("Temp Scan"' not in html
     assert 'pill("Precip Scan"' not in html
     assert "set_paper_entry_min_edge_abs" in html
+    assert "set_temperature_max_no_entry_price" in html
     assert "set_temperature_market_scope" in html
     assert "export_analysis_bundle" in html
     assert "setEdgeLimit()" in html
+    assert "setNoEntryCap()" in html
     assert "set_temperature_scan_interval_minutes" in html
     assert "set_precipitation_scan_interval_minutes" in html
     assert "setTempCadence()" in html
@@ -526,6 +581,12 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "scanCountdownValue" in html
     assert "marketScopeOptions" in html
     assert "marketScopeLabel" in html
+    assert "noEntryCapOptions" in html
+    assert "paper_temperature_max_no_entry_price" in html
+    assert "LAST 24H" in html
+    assert "LAST 7D" in html
+    assert "LAST 30D" in html
+    assert "YES / NO WIN-LOSS BARS" in html
     assert "EXPORT BUNDLE" in html
     assert "COPY BUNDLE PATH" in html
     assert "COPY CLOUD LINK" in html

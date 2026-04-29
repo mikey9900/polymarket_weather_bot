@@ -89,6 +89,7 @@ class DashboardStateService:
                     "win_rate": paper_stats["win_rate"],
                 }
             },
+            "pnl_analytics": self.tracker.get_pnl_analytics(),
             "open_positions": self.tracker.get_dashboard_paper_positions(
                 limit=250,
                 status="open",
@@ -179,6 +180,7 @@ class DashboardStateService:
                 "controls": self.control_plane.build_controls_payload(),
                 "runtime": self.runtime.get_status_snapshot(),
                 "summary": {"paper": {}},
+                "pnl_analytics": {"generated_at": datetime.now(timezone.utc).isoformat(), "open_book": {}, "windows": {}},
                 "open_positions": [],
                 "recent_signals": [],
                 "recent_trades": [],

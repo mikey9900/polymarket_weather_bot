@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -565,49 +565,8 @@ class WeatherTracker:
         statuses: list[str] | tuple[str, ...] | set[str] | None = None,
         mark_stale_after_seconds: int | None = None,
     ) -> list[dict[str, Any]]:
-        params: list[Any] = []
-        where = ""
-        status_values: list[str] = []
-        if statuses:
-            status_values = [str(item) for item in statuses if str(item).strip()]
-        elif status:
-            status_values = [str(status)]
-        if status_values:
-            placeholders = ", ".join("?" for _ in status_values)
-            where = f"WHERE p.status IN ({placeholders})"
-            params.extend(status_values)
-        params.append(int(limit))
         with self._lock:
-            rows = self.conn.execute(
-                f"""
-                SELECT
-                    p.*,
-                    s.event_title AS signal_event_title,
-                    s.market_prob AS signal_market_prob,
-                    s.forecast_prob AS signal_forecast_prob,
-                    s.edge AS signal_edge,
-                    s.edge_abs AS signal_edge_abs,
-                    s.edge_size AS signal_edge_size,
-                    s.confidence AS signal_confidence,
-                    s.source_count AS signal_source_count,
-                    s.liquidity AS signal_liquidity,
-                    s.time_to_resolution_s AS signal_time_to_resolution_s,
-                    s.source_dispersion_pct AS signal_source_dispersion_pct,
-                    s.score AS signal_adapter_score,
-                    d.final_score AS decision_final_score,
-                    d.reason AS decision_reason,
-                    d.policy_action AS decision_policy_action,
-                    d.metadata_json AS decision_metadata_json
-                FROM paper_positions p
-                LEFT JOIN signals s ON s.id = p.signal_id
-                LEFT JOIN decisions d ON d.id = p.decision_id
-                {where}
-                ORDER BY COALESCE(p.resolved_at, p.created_at) DESC
-                LIMIT ?
-                """,
-                tuple(params),
-            ).fetchall()
-            items = [_serialize_dashboard_position(row) for row in rows]
+            items = self._query_dashboard_paper_positions(limit=limit, status=status, statuses=statuses)
         if mark_stale_after_seconds is None:
             return items
         threshold = max(0, int(mark_stale_after_seconds))
@@ -751,6 +710,82 @@ class WeatherTracker:
                 "total_pnl": float(total_pnl),
                 "win_rate": (wins / total_closed * 100.0) if total_closed else 0.0,
             }
+
+    def get_pnl_analytics(self) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        windows = (
+            ("24h", "Last 24 Hours", timedelta(hours=24)),
+            ("7d", "Last 7 Days", timedelta(days=7)),
+            ("30d", "Last 30 Days", timedelta(days=30)),
+        )
+        with self._lock:
+            closed_positions = self._query_dashboard_paper_positions(limit=None, statuses=("closed", "resolved"))
+            open_positions = self._query_dashboard_paper_positions(limit=500, status="open")
+        payload = {
+            "generated_at": now.isoformat(),
+            "open_book": _summarize_open_book(open_positions),
+            "windows": {},
+        }
+        for key, label, span in windows:
+            cutoff = now - span
+            window_positions = [
+                item for item in closed_positions if (_closed_trade_timestamp(item) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff
+            ]
+            payload["windows"][key] = _build_pnl_window_payload(label, window_positions)
+        return payload
+
+    def _query_dashboard_paper_positions(
+        self,
+        *,
+        limit: int | None,
+        status: str | None = None,
+        statuses: list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        status_values: list[str] = []
+        if statuses:
+            status_values = [str(item) for item in statuses if str(item).strip()]
+        elif status:
+            status_values = [str(status)]
+        if status_values:
+            placeholders = ", ".join("?" for _ in status_values)
+            where = f"WHERE p.status IN ({placeholders})"
+            params.extend(status_values)
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ?"
+            params.append(int(limit))
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                p.*,
+                s.event_title AS signal_event_title,
+                s.market_prob AS signal_market_prob,
+                s.forecast_prob AS signal_forecast_prob,
+                s.edge AS signal_edge,
+                s.edge_abs AS signal_edge_abs,
+                s.edge_size AS signal_edge_size,
+                s.confidence AS signal_confidence,
+                s.source_count AS signal_source_count,
+                s.liquidity AS signal_liquidity,
+                s.time_to_resolution_s AS signal_time_to_resolution_s,
+                s.source_dispersion_pct AS signal_source_dispersion_pct,
+                s.score AS signal_adapter_score,
+                d.final_score AS decision_final_score,
+                d.reason AS decision_reason,
+                d.policy_action AS decision_policy_action,
+                d.metadata_json AS decision_metadata_json
+            FROM paper_positions p
+            LEFT JOIN signals s ON s.id = p.signal_id
+            LEFT JOIN decisions d ON d.id = p.decision_id
+            {where}
+            ORDER BY COALESCE(p.resolved_at, p.created_at) DESC
+            {limit_clause}
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_serialize_dashboard_position(row) for row in rows]
 
     def _ensure_paper_position_columns(self) -> None:
         existing = {
@@ -1401,3 +1436,131 @@ def _close_outcome_label(reason: Any) -> str:
     if "review" in normalized:
         return "Auto Exit"
     return "Closed"
+
+
+def _closed_trade_timestamp(item: dict[str, Any]) -> datetime | None:
+    return _parse_iso_datetime(item.get("resolved_at")) or _parse_iso_datetime(item.get("created_at"))
+
+
+def _build_pnl_window_payload(label: str, trades: list[dict[str, Any]]) -> dict[str, Any]:
+    overall = _summarize_trade_cohort(trades)
+    by_direction = {direction: _summarize_trade_cohort([trade for trade in trades if str(trade.get("direction") or "").upper() == direction]) for direction in ("YES", "NO")}
+    return {
+        "label": label,
+        "closed_count": overall["count"],
+        "wins": overall["wins"],
+        "losses": overall["losses"],
+        "win_rate": overall["win_rate"],
+        "realized_pnl": overall["realized_pnl"],
+        "gross_win_pnl": overall["gross_win_pnl"],
+        "gross_loss_pnl": overall["gross_loss_pnl"],
+        "gross_loss_pnl_abs": overall["gross_loss_pnl_abs"],
+        "avg_win_pnl": overall["avg_win_pnl"],
+        "avg_loss_pnl": overall["avg_loss_pnl"],
+        "best_trade_pnl": overall["best_trade_pnl"],
+        "worst_trade_pnl": overall["worst_trade_pnl"],
+        "by_direction": by_direction,
+        "by_city": _summarize_grouped_trades(trades, key="city_slug", label_key="city_slug", limit=8),
+        "by_exit_reason": _summarize_grouped_trades(trades, key="exit_reason", label_key="exit_reason", limit=6),
+        "top_winners": _top_trade_rows(trades, reverse=True),
+        "top_losses": _top_trade_rows(trades, reverse=False),
+    }
+
+
+def _summarize_trade_cohort(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    pnls = [float(trade.get("realized_pnl") or 0.0) for trade in trades]
+    winners = [pnl for pnl in pnls if pnl > 0]
+    losers = [pnl for pnl in pnls if pnl < 0]
+    realized_pnl = round(sum(pnls), 6)
+    gross_win_pnl = round(sum(winners), 6)
+    gross_loss_pnl = round(sum(losers), 6)
+    gross_loss_pnl_abs = round(abs(gross_loss_pnl), 6)
+    wins = len(winners)
+    losses = len(losers)
+    return {
+        "count": len(trades),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round((wins / len(trades) * 100.0), 2) if trades else 0.0,
+        "realized_pnl": realized_pnl,
+        "gross_win_pnl": gross_win_pnl,
+        "gross_loss_pnl": gross_loss_pnl,
+        "gross_loss_pnl_abs": gross_loss_pnl_abs,
+        "avg_win_pnl": round(gross_win_pnl / wins, 6) if wins else 0.0,
+        "avg_loss_pnl": round(gross_loss_pnl / losses, 6) if losses else 0.0,
+        "best_trade_pnl": round(max(pnls), 6) if pnls else 0.0,
+        "worst_trade_pnl": round(min(pnls), 6) if pnls else 0.0,
+    }
+
+
+def _summarize_grouped_trades(
+    trades: list[dict[str, Any]],
+    *,
+    key: str,
+    label_key: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for trade in trades:
+        raw_label = str(trade.get(label_key) or trade.get(key) or "--").strip() or "--"
+        label = raw_label.upper() if key == "city_slug" else raw_label.replace("_", " ")
+        row = grouped.setdefault(
+            label,
+            {"label": label, "count": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0},
+        )
+        pnl = float(trade.get("realized_pnl") or 0.0)
+        row["count"] += 1
+        row["realized_pnl"] = round(float(row["realized_pnl"]) + pnl, 6)
+        if pnl > 0:
+            row["wins"] += 1
+        elif pnl < 0:
+            row["losses"] += 1
+    ranked = sorted(
+        grouped.values(),
+        key=lambda item: (-abs(float(item["realized_pnl"])), -int(item["count"]), str(item["label"])),
+    )
+    return ranked[: max(0, int(limit))]
+
+
+def _top_trade_rows(trades: list[dict[str, Any]], *, reverse: bool) -> list[dict[str, Any]]:
+    filtered = [trade for trade in trades if (float(trade.get("realized_pnl") or 0.0) > 0 if reverse else float(trade.get("realized_pnl") or 0.0) < 0)]
+    ranked = sorted(
+        filtered,
+        key=lambda trade: float(trade.get("realized_pnl") or 0.0),
+        reverse=reverse,
+    )[:5]
+    rows: list[dict[str, Any]] = []
+    for trade in ranked:
+        rows.append(
+            {
+                "id": int(trade.get("id") or 0),
+                "event_title": str(trade.get("event_title") or trade.get("market_slug") or "Unknown market"),
+                "city_slug": str(trade.get("city_slug") or "").upper(),
+                "direction": str(trade.get("direction") or "").upper(),
+                "target_label": str(trade.get("target_label") or ""),
+                "realized_pnl": round(float(trade.get("realized_pnl") or 0.0), 6),
+                "entry_price": _bounded_probability(trade.get("entry_price")),
+                "resolved_at": str(trade.get("resolved_at") or ""),
+                "exit_reason": str(trade.get("exit_reason") or ""),
+            }
+        )
+    return rows
+
+
+def _summarize_open_book(open_positions: list[dict[str, Any]]) -> dict[str, Any]:
+    summary = {
+        "count": len(open_positions),
+        "stake": round(sum(float(item.get("cost") or 0.0) for item in open_positions), 6),
+        "mark_to_market_pnl": round(sum(float(item.get("mark_to_market_pnl") or 0.0) for item in open_positions), 6),
+        "model_pnl": round(sum(float(item.get("expected_value_pnl") or 0.0) for item in open_positions), 6),
+        "by_direction": {},
+    }
+    for direction in ("YES", "NO"):
+        items = [item for item in open_positions if str(item.get("direction") or "").upper() == direction]
+        summary["by_direction"][direction] = {
+            "count": len(items),
+            "stake": round(sum(float(item.get("cost") or 0.0) for item in items), 6),
+            "mark_to_market_pnl": round(sum(float(item.get("mark_to_market_pnl") or 0.0) for item in items), 6),
+            "model_pnl": round(sum(float(item.get("expected_value_pnl") or 0.0) for item in items), 6),
+        }
+    return summary

@@ -37,6 +37,7 @@ class WeatherStrategyEngine:
         self.research_provider = research_provider
         self._paper_max_open_positions = max(1, int(self.config.paper.max_open_positions))
         self._paper_entry_min_edge_abs_override: float | None = None
+        self._paper_temperature_max_no_entry_price_override: float | None = None
 
     def process_signals(
         self,
@@ -98,6 +99,32 @@ class WeatherStrategyEngine:
         normalized = max(0.05, min(0.40, float(value)))
         self._paper_entry_min_edge_abs_override = normalized
         return float(normalized)
+
+    @property
+    def paper_temperature_max_no_entry_price_override(self) -> float | None:
+        if self._paper_temperature_max_no_entry_price_override is None:
+            return None
+        return float(self._paper_temperature_max_no_entry_price_override)
+
+    @property
+    def paper_temperature_max_no_entry_price(self) -> float | None:
+        if self._paper_temperature_max_no_entry_price_override is not None:
+            raw = float(self._paper_temperature_max_no_entry_price_override)
+            return None if raw <= 0 else raw
+        return _normalize_optional_probability_cap(getattr(self.config.strategy.temperature, "max_no_entry_price", None))
+
+    def set_paper_temperature_max_no_entry_price(self, value: float | None) -> float | None:
+        if value is None:
+            self._paper_temperature_max_no_entry_price_override = None
+        else:
+            raw = _as_float(value)
+            if raw is None:
+                self._paper_temperature_max_no_entry_price_override = None
+            elif raw <= 0:
+                self._paper_temperature_max_no_entry_price_override = 0.0
+            else:
+                self._paper_temperature_max_no_entry_price_override = _normalize_optional_probability_cap(raw)
+        return self.paper_temperature_max_no_entry_price
 
     def evaluate_signal(self, signal: WeatherSignal, *, auto_trade_enabled: bool) -> WeatherDecision:
         thresholds = self._thresholds(signal.market_type)
@@ -359,6 +386,17 @@ class WeatherStrategyEngine:
                 f"{forecast_temp_spread_f:.1f}\N{DEGREE SIGN}F meets or exceeds the "
                 f"{float(max_forecast_temp_spread_f):.1f}\N{DEGREE SIGN}F ceiling."
             )
+        max_no_entry_price = self.paper_temperature_max_no_entry_price
+        if (
+            signal.market_type == "temperature"
+            and str(signal.direction or "").upper() == "NO"
+            and max_no_entry_price is not None
+        ):
+            entry_price = _entry_contract_price(signal, self.config.paper.entry_slippage_bps)
+            if entry_price is not None and entry_price > float(max_no_entry_price):
+                reasons.append(
+                    f"Projected NO entry price {entry_price:.3f} is above the {float(max_no_entry_price):.2f} cap."
+                )
         if signal.time_to_resolution_s is not None:
             hours = signal.time_to_resolution_s / 3600.0
             if hours < thresholds.min_hours_to_event:
@@ -488,3 +526,32 @@ def _contract_probability(direction: str, yes_probability: float | None) -> floa
         return None
     raw = max(0.0, min(1.0, raw))
     return raw if str(direction or "").upper() == "YES" else round(1.0 - raw, 6)
+
+
+def _bps(value: Any) -> float:
+    raw = _as_float(value)
+    if raw is None:
+        return 0.0
+    return round(max(0.0, raw), 6)
+
+
+def _apply_entry_slippage(probability: Any, slippage_bps: Any) -> float | None:
+    raw = _as_float(probability)
+    if raw is None:
+        return None
+    raw = max(0.0, min(1.0, raw))
+    return max(0.0, min(1.0, round(raw * (1.0 + (_bps(slippage_bps) / 10000.0)), 6)))
+
+
+def _entry_contract_price(signal: WeatherSignal, slippage_bps: Any) -> float | None:
+    reference_price = _contract_probability(signal.direction, signal.market_prob)
+    if reference_price is None:
+        return None
+    return _apply_entry_slippage(reference_price, slippage_bps)
+
+
+def _normalize_optional_probability_cap(value: Any) -> float | None:
+    raw = _as_float(value)
+    if raw is None or raw <= 0:
+        return None
+    return round(max(0.05, min(0.99, raw)), 6)
