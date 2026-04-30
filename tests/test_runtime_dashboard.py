@@ -285,7 +285,7 @@ def test_dashboard_control_updates_state(tmp_path: Path):
     assert response["state"]["recent_operator_actions"][0]["action"] == "stop"
 
 
-def test_dashboard_control_updates_no_entry_cap(tmp_path: Path):
+def test_dashboard_control_no_entry_cap_is_legacy_noop(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     tracker.ensure_paper_capital(500.0)
@@ -299,7 +299,8 @@ def test_dashboard_control_updates_no_entry_cap(tmp_path: Path):
     )
 
     assert response["ok"] is True
-    assert response["state"]["controls"]["paper_temperature_max_no_entry_price"] == pytest.approx(0.68)
+    assert response["state"]["controls"]["paper_temperature_max_no_entry_price"] is None
+    assert response["state"]["controls"]["available_actions"]["set_temperature_max_no_entry_price"] is False
 
 
 def test_dashboard_exports_analysis_bundle(tmp_path: Path):

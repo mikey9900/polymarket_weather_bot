@@ -187,7 +187,7 @@ class ControlPlane:
                 "set_paper_capital": True,
                 "set_paper_max_open_positions": True,
                 "set_paper_entry_min_edge_abs": True,
-                "set_temperature_max_no_entry_price": True,
+                "set_temperature_max_no_entry_price": False,
                 "close_position": True,
                 "toggle_temperature": True,
                 "toggle_precipitation": True,

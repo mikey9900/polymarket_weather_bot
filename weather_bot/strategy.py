@@ -37,7 +37,6 @@ class WeatherStrategyEngine:
         self.research_provider = research_provider
         self._paper_max_open_positions = max(1, int(self.config.paper.max_open_positions))
         self._paper_entry_min_edge_abs_override: float | None = None
-        self._paper_temperature_max_no_entry_price_override: float | None = None
 
     def process_signals(
         self,
@@ -102,29 +101,14 @@ class WeatherStrategyEngine:
 
     @property
     def paper_temperature_max_no_entry_price_override(self) -> float | None:
-        if self._paper_temperature_max_no_entry_price_override is None:
-            return None
-        return float(self._paper_temperature_max_no_entry_price_override)
+        return None
 
     @property
     def paper_temperature_max_no_entry_price(self) -> float | None:
-        if self._paper_temperature_max_no_entry_price_override is not None:
-            raw = float(self._paper_temperature_max_no_entry_price_override)
-            return None if raw <= 0 else raw
-        return _normalize_optional_probability_cap(getattr(self.config.strategy.temperature, "max_no_entry_price", None))
+        return None
 
     def set_paper_temperature_max_no_entry_price(self, value: float | None) -> float | None:
-        if value is None:
-            self._paper_temperature_max_no_entry_price_override = None
-        else:
-            raw = _as_float(value)
-            if raw is None:
-                self._paper_temperature_max_no_entry_price_override = None
-            elif raw <= 0:
-                self._paper_temperature_max_no_entry_price_override = 0.0
-            else:
-                self._paper_temperature_max_no_entry_price_override = _normalize_optional_probability_cap(raw)
-        return self.paper_temperature_max_no_entry_price
+        return None
 
     def evaluate_signal(self, signal: WeatherSignal, *, auto_trade_enabled: bool) -> WeatherDecision:
         thresholds = self._thresholds(signal.market_type)
@@ -325,9 +309,6 @@ class WeatherStrategyEngine:
             "source_dispersion_pct": signal.source_dispersion_pct,
             "component_scores": component_scores,
         }
-        forecast_temp_spread_f = _forecast_temp_spread_f(signal)
-        if forecast_temp_spread_f is not None:
-            metadata["forecast_temp_spread_f"] = round(forecast_temp_spread_f, 4)
         if self.research_provider is not None and hasattr(self.research_provider, "adjust_signal"):
             research_result = self.research_provider.adjust_signal(signal)
             if isinstance(research_result, dict):
@@ -373,40 +354,6 @@ class WeatherStrategyEngine:
             reasons.append(
                 f"Source dispersion {signal.source_dispersion_pct:.1%} exceeds {thresholds.max_source_dispersion_pct:.1%}."
             )
-        max_forecast_temp_spread_f = getattr(thresholds, "max_forecast_temp_spread_f", None)
-        forecast_temp_spread_f = _forecast_temp_spread_f(signal)
-        if (
-            signal.market_type == "temperature"
-            and max_forecast_temp_spread_f is not None
-            and forecast_temp_spread_f is not None
-            and forecast_temp_spread_f >= float(max_forecast_temp_spread_f)
-        ):
-            reasons.append(
-                "Raw source temperature spread "
-                f"{forecast_temp_spread_f:.1f}\N{DEGREE SIGN}F meets or exceeds the "
-                f"{float(max_forecast_temp_spread_f):.1f}\N{DEGREE SIGN}F ceiling."
-            )
-        max_no_edge_abs = getattr(thresholds, "max_no_edge_abs", None)
-        if (
-            signal.market_type == "temperature"
-            and str(signal.direction or "").upper() == "NO"
-            and max_no_edge_abs is not None
-            and signal.edge_abs >= float(max_no_edge_abs)
-        ):
-            reasons.append(
-                f"NO edge {signal.edge_abs:.2%} meets or exceeds the {float(max_no_edge_abs):.2%} ceiling."
-            )
-        max_no_entry_price = self.paper_temperature_max_no_entry_price
-        if (
-            signal.market_type == "temperature"
-            and str(signal.direction or "").upper() == "NO"
-            and max_no_entry_price is not None
-        ):
-            entry_price = _entry_contract_price(signal, self.config.paper.entry_slippage_bps)
-            if entry_price is not None and entry_price > float(max_no_entry_price):
-                reasons.append(
-                    f"Projected NO entry price {entry_price:.3f} is above the {float(max_no_entry_price):.2f} cap."
-                )
         if signal.time_to_resolution_s is not None:
             hours = signal.time_to_resolution_s / 3600.0
             if hours < thresholds.min_hours_to_event:
@@ -500,27 +447,6 @@ def _timing_score(
     return max(0.2, 1.0 - abs(hours - center) / span)
 
 
-def _forecast_temp_spread_f(signal: WeatherSignal) -> float | None:
-    if signal.market_type != "temperature":
-        return None
-    snapshot = signal.forecast_snapshot
-    temps = [
-        _as_float(snapshot.wu_temp),
-        _as_float(snapshot.om_temp),
-        _as_float(snapshot.vc_temp),
-        _as_float(snapshot.noaa_temp),
-        _as_float(snapshot.weatherapi_temp),
-    ]
-    available = [float(temp) for temp in temps if temp is not None]
-    if len(available) < 2:
-        return None
-    spread = max(available) - min(available)
-    unit = str(snapshot.unit or "").strip().upper()
-    if "C" in unit and "F" not in unit:
-        spread *= 9.0 / 5.0
-    return float(spread)
-
-
 def _as_float(value: Any) -> float | None:
     try:
         if value is None:
@@ -536,32 +462,3 @@ def _contract_probability(direction: str, yes_probability: float | None) -> floa
         return None
     raw = max(0.0, min(1.0, raw))
     return raw if str(direction or "").upper() == "YES" else round(1.0 - raw, 6)
-
-
-def _bps(value: Any) -> float:
-    raw = _as_float(value)
-    if raw is None:
-        return 0.0
-    return round(max(0.0, raw), 6)
-
-
-def _apply_entry_slippage(probability: Any, slippage_bps: Any) -> float | None:
-    raw = _as_float(probability)
-    if raw is None:
-        return None
-    raw = max(0.0, min(1.0, raw))
-    return max(0.0, min(1.0, round(raw * (1.0 + (_bps(slippage_bps) / 10000.0)), 6)))
-
-
-def _entry_contract_price(signal: WeatherSignal, slippage_bps: Any) -> float | None:
-    reference_price = _contract_probability(signal.direction, signal.market_prob)
-    if reference_price is None:
-        return None
-    return _apply_entry_slippage(reference_price, slippage_bps)
-
-
-def _normalize_optional_probability_cap(value: Any) -> float | None:
-    raw = _as_float(value)
-    if raw is None or raw <= 0:
-        return None
-    return round(max(0.05, min(0.99, raw)), 6)
