@@ -75,6 +75,16 @@ def test_load_config_accepts_temperature_forecast_spread_ha_override(tmp_path: P
     assert config.strategy.temperature.max_forecast_temp_spread_f == 6.5
 
 
+def test_load_config_accepts_temperature_no_edge_cap_ha_override(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(json.dumps({"temperature_max_no_edge_abs": 0.50}), encoding="utf-8")
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.strategy.temperature.max_no_edge_abs == 0.50
+
+
 def test_load_config_accepts_temperature_no_entry_cap_ha_override(tmp_path: Path):
     config_path = _write_config(tmp_path)
     options_path = tmp_path / "options.json"

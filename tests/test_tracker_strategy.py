@@ -243,8 +243,8 @@ def test_strategy_prices_no_contract_using_complement_price(tmp_path: Path):
                 direction="NO",
                 market_prob=0.8,
                 forecast_prob=0.2,
-                edge=-0.6,
-                edge_abs=0.6,
+                edge=-0.49,
+                edge_abs=0.49,
             )
         ],
         auto_trade_enabled=True,
@@ -280,6 +280,31 @@ def test_strategy_rejects_no_trade_above_temperature_no_entry_cap(tmp_path: Path
     assert "Projected NO entry price" in result.decision.reason
 
 
+def test_strategy_rejects_no_trade_above_temperature_no_edge_cap(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    result = strategy.process_signals(
+        [
+            _make_signal(
+                key="no-edge-cap-blocked",
+                direction="NO",
+                market_prob=0.42,
+                forecast_prob=0.18,
+                edge=-0.50,
+                edge_abs=0.50,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert result.position is None
+    assert result.decision.accepted is False
+    assert "NO edge 50.00% meets or exceeds the 50.00% ceiling." in result.decision.reason
+
+
 def test_strategy_no_entry_cap_does_not_block_yes_side(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
@@ -295,6 +320,30 @@ def test_strategy_no_entry_cap_does_not_block_yes_side(tmp_path: Path):
                 forecast_prob=0.78,
                 edge=0.09,
                 edge_abs=0.69,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert result.position is not None
+    assert result.decision.accepted is True
+
+
+def test_strategy_no_edge_cap_does_not_block_yes_side(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    result = strategy.process_signals(
+        [
+            _make_signal(
+                key="yes-edge-cap-ignored",
+                direction="YES",
+                market_prob=0.20,
+                forecast_prob=0.75,
+                edge=0.55,
+                edge_abs=0.55,
             )
         ],
         auto_trade_enabled=True,

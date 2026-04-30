@@ -386,6 +386,16 @@ class WeatherStrategyEngine:
                 f"{forecast_temp_spread_f:.1f}\N{DEGREE SIGN}F meets or exceeds the "
                 f"{float(max_forecast_temp_spread_f):.1f}\N{DEGREE SIGN}F ceiling."
             )
+        max_no_edge_abs = getattr(thresholds, "max_no_edge_abs", None)
+        if (
+            signal.market_type == "temperature"
+            and str(signal.direction or "").upper() == "NO"
+            and max_no_edge_abs is not None
+            and signal.edge_abs >= float(max_no_edge_abs)
+        ):
+            reasons.append(
+                f"NO edge {signal.edge_abs:.2%} meets or exceeds the {float(max_no_edge_abs):.2%} ceiling."
+            )
         max_no_entry_price = self.paper_temperature_max_no_entry_price
         if (
             signal.market_type == "temperature"
