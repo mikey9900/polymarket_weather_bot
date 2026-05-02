@@ -99,6 +99,16 @@ class WeatherRuntime:
                 "paper_temperature_max_no_entry_price_override",
                 None,
             ),
+            "paper_temperature_no_stop_loss_pnl": getattr(
+                self.strategy_engine,
+                "paper_temperature_no_stop_loss_pnl",
+                getattr(self.config.strategy.temperature, "no_stop_loss_pnl", None),
+            ),
+            "paper_temperature_no_stop_loss_min_entry_price": getattr(
+                self.strategy_engine,
+                "paper_temperature_no_stop_loss_min_entry_price",
+                getattr(self.config.strategy.temperature, "no_stop_loss_min_entry_price", None),
+            ),
             "scan_in_progress": False,
             "scan_queue_depth": 0,
             "pending_scan_types": [],
@@ -180,6 +190,16 @@ class WeatherRuntime:
                 getattr(self.config.strategy.temperature, "max_no_entry_price", None),
             )
             self._state["paper_temperature_max_no_entry_price_override"] = None
+        self._state["paper_temperature_no_stop_loss_pnl"] = getattr(
+            self.strategy_engine,
+            "paper_temperature_no_stop_loss_pnl",
+            getattr(self.config.strategy.temperature, "no_stop_loss_pnl", None),
+        )
+        self._state["paper_temperature_no_stop_loss_min_entry_price"] = getattr(
+            self.strategy_engine,
+            "paper_temperature_no_stop_loss_min_entry_price",
+            getattr(self.config.strategy.temperature, "no_stop_loss_min_entry_price", None),
+        )
         if self._reconcile_boot_state():
             self.tracker.set_runtime_state("runtime_status", dict(self._state))
         self._prime_next_scheduled_scans()
@@ -443,6 +463,7 @@ class WeatherRuntime:
             mark_reason=str(position.get("mark_reason") or "Manual dashboard sell."),
             exit_fee_bps=self.config.paper.fee_bps,
             exit_slippage_bps=self.config.paper.exit_slippage_bps,
+            reason_code=str(reason or "manual_dashboard_sell"),
         )
         if result is None:
             return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
@@ -703,6 +724,7 @@ class WeatherRuntime:
                 final_score=decision.final_score,
                 reviewed_at=reviewed_at,
                 reason=f"{trigger}: {decision.reason}",
+                reason_code=decision.reason_code,
                 exit_fee_bps=self.config.paper.fee_bps,
                 exit_slippage_bps=self.config.paper.exit_slippage_bps,
             )
@@ -718,6 +740,7 @@ class WeatherRuntime:
                 edge_abs=decision.edge_abs,
                 final_score=decision.final_score,
                 mark_reason=f"{trigger}: {decision.reason}",
+                reason_code=decision.reason_code,
             )
             if result is not None:
                 closed += 1

@@ -7,9 +7,11 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from openpyxl import load_workbook
 import pytest
 import yaml
 
+from weather_bot.analysis_report import build_analysis_report
 from weather_bot.analysis_bundle import AnalysisBundleExporter
 from weather_bot.dropbox_exports import resolve_dropbox_access_token, sync_dropbox_latest_bundle_to_local
 from scanner.weather_event_scanner import cities_for_temperature_market_scope
@@ -93,6 +95,26 @@ def test_load_config_accepts_temperature_no_entry_cap_ha_override(tmp_path: Path
     config = load_config(config_path, ha_options_path=options_path)
 
     assert config.strategy.temperature.max_no_entry_price == 0.68
+
+
+def test_load_config_accepts_temperature_no_stop_loss_pnl_ha_override(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(json.dumps({"temperature_no_stop_loss_pnl": -4.0}), encoding="utf-8")
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.strategy.temperature.no_stop_loss_pnl == -4.0
+
+
+def test_load_config_accepts_temperature_no_stop_loss_min_entry_price_ha_override(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(json.dumps({"temperature_no_stop_loss_min_entry_price": 0.50}), encoding="utf-8")
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.strategy.temperature.no_stop_loss_min_entry_price == 0.50
 
 
 def test_temperature_market_scope_city_groups_are_split_cleanly():
@@ -308,6 +330,19 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     tracker.ensure_paper_capital(500.0)
     strategy = WeatherStrategyEngine(config, tracker)
+    signal = _signal("bundle-review-history-1", direction="NO", market_prob=0.30, forecast_prob=0.10, edge=-0.20, edge_abs=0.20)
+    result = strategy.process_signals([signal], auto_trade_enabled=True)[0]
+    assert result.position is not None
+    tracker.update_paper_position_review(
+        int(result.position.id),
+        mark_price=0.22,
+        mark_probability=0.88,
+        edge_abs=0.18,
+        final_score=0.74,
+        reviewed_at="2026-04-27T12:15:00+00:00",
+        reason="scheduled_open_position_review: Holding test position.",
+        reason_code="hold",
+    )
     scan_export_root = tmp_path / "scan_runs"
     scan_export_root.mkdir(parents=True, exist_ok=True)
     (scan_export_root / "20260427T120000_temperature_completed.json").write_text(
@@ -359,14 +394,91 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert "weatherbot.db" in names
     assert "weather_cache.db" in names
     assert "analysis_report.xlsx" in names
+    assert "position_review_history.json" in names
     assert "manifest.json" in names
     assert "scan_runs/20260427T120000_temperature_completed.json" in names
+    with zipfile.ZipFile(bundle_path) as archive:
+        review_history = json.loads(archive.read("position_review_history.json").decode("utf-8"))
+    assert review_history
+    assert review_history[0]["event_kind"] in {"review", "close"}
+    workbook = load_workbook(report_path, data_only=True)
+    assert "Review History" in workbook.sheetnames
     latest_index = json.loads(latest_index_path.read_text(encoding="utf-8"))
     assert latest_index["label"] == "WEATHER-BOT"
     assert latest_index["latest_bundle"]["local_path"] == str(latest_bundle_path)
     assert latest_index["archive_bundle"]["local_path"] == str(bundle_path)
     assert latest_index["latest_report"]["local_path"] == str(latest_report_path)
     assert latest_index["archive_report"]["local_path"] == str(report_path)
+
+
+def test_analysis_report_freezes_closed_review_age_at_close_time(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+
+    signal = _signal("excel-review-age-1")
+    result = strategy.process_signals([signal], auto_trade_enabled=True)[0]
+    assert result.position is not None
+    position_id = int(result.position.id)
+    tracker.conn.execute(
+        "UPDATE paper_positions SET created_at = ? WHERE id = ?",
+        ("2026-05-02T10:00:00+00:00", position_id),
+    )
+    tracker.conn.commit()
+
+    tracker.update_paper_position_review(
+        position_id,
+        mark_price=0.72,
+        mark_probability=0.72,
+        edge_abs=0.40,
+        final_score=0.82,
+        reviewed_at="2026-05-02T11:00:00+00:00",
+        reason="test review",
+    )
+    tracker.close_paper_position(
+        position_id,
+        exit_price=0.72,
+        reason="test close",
+        closed_at="2026-05-02T12:00:00+00:00",
+        mark_probability=0.72,
+        edge_abs=0.40,
+        final_score=0.82,
+        mark_reason="test close review",
+    )
+
+    report_path = tmp_path / "analysis_report.xlsx"
+    build_analysis_report(
+        output_path=report_path,
+        label="TEST",
+        created_at=datetime.fromisoformat("2026-05-02T17:00:00+00:00"),
+        snapshot={},
+        tracker=tracker,
+        runtime=runtime,
+    )
+
+    workbook = load_workbook(report_path, data_only=True)
+    worksheet = workbook["Position Ledger"]
+    assert "Review History" in workbook.sheetnames
+    headers = [worksheet.cell(4, column).value for column in range(1, worksheet.max_column + 1)]
+    column_lookup = {str(value): index + 1 for index, value in enumerate(headers)}
+
+    matched_row = None
+    for row_idx in range(5, worksheet.max_row + 1):
+        if worksheet.cell(row_idx, column_lookup["Market Slug"]).value == "market-excel-review-age-1":
+            matched_row = row_idx
+            break
+
+    assert matched_row is not None
+    assert worksheet.cell(matched_row, column_lookup["Status"]).value == "closed"
+    assert worksheet.cell(matched_row, column_lookup["Held"]).value == "2h 0m 0s"
+    assert worksheet.cell(matched_row, column_lookup["Review Age"]).value == "0s"
+    review_sheet = workbook["Review History"]
+    review_headers = [review_sheet.cell(4, column).value for column in range(1, review_sheet.max_column + 1)]
+    review_lookup = {str(value): index + 1 for index, value in enumerate(review_headers)}
+    assert review_sheet.max_row >= 6
+    assert review_sheet.cell(5, review_lookup["Event Kind"]).value in {"close", "review"}
 
 
 def test_dashboard_snapshot_exposes_pnl_analytics(tmp_path: Path):
@@ -577,6 +689,7 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert 'pill("Precip Scan"' not in html
     assert "set_paper_entry_min_edge_abs" in html
     assert "set_temperature_max_no_entry_price" in html
+    assert "NO Stop" in html
     assert "set_temperature_market_scope" in html
     assert "export_analysis_bundle" in html
     assert "setEdgeLimit()" in html

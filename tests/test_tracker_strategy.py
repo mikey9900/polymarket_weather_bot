@@ -340,3 +340,161 @@ def test_tracker_close_paper_position_preserves_explicit_zero_exit_price(tmp_pat
     assert result["realized_pnl"] == -position.cost
     assert latest_trade["status"] == "closed"
     assert latest_trade["exit_reference_price"] == 0.0
+
+
+def test_no_stop_loss_closes_temperature_no_position_at_negative_four_dollars(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    opened = strategy.process_signals(
+        [
+            _make_signal(
+                key="no-stop-loss-1",
+                direction="NO",
+                market_prob=0.30,
+                forecast_prob=0.10,
+                edge=-0.20,
+                edge_abs=0.20,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert opened.position is not None
+    position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+    review_signal = _make_signal(
+        key="no-stop-loss-1-review",
+        direction="NO",
+        market_slug=position["market_slug"],
+        market_prob=0.80,
+        forecast_prob=0.10,
+        edge=-0.70,
+        edge_abs=0.70,
+    )
+
+    decision = strategy.evaluate_position_exit(position, signal=review_signal)
+
+    assert decision.should_close is True
+    assert decision.reason_code == "no_stop_loss"
+    assert "NO stop loss hit" in decision.reason
+
+
+def test_no_stop_loss_ignores_no_entries_below_price_floor(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    opened = strategy.process_signals(
+        [
+            _make_signal(
+                key="no-stop-loss-floor",
+                direction="NO",
+                market_prob=0.70,
+                forecast_prob=0.10,
+                edge=-0.60,
+                edge_abs=0.60,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert opened.position is not None
+    position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+    review_signal = _make_signal(
+        key="no-stop-loss-floor-review",
+        direction="NO",
+        market_slug=position["market_slug"],
+        market_prob=0.90,
+        forecast_prob=0.10,
+        edge=-0.80,
+        edge_abs=0.80,
+    )
+
+    decision = strategy.evaluate_position_exit(position, signal=review_signal)
+
+    assert decision.should_close is False
+    assert decision.reason_code == "hold"
+
+
+def test_no_stop_loss_does_not_apply_to_yes_positions(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    opened = strategy.process_signals(
+        [
+            _make_signal(
+                key="yes-stop-loss-ignore",
+                direction="YES",
+                market_prob=0.70,
+                forecast_prob=0.90,
+                edge=0.20,
+                edge_abs=0.20,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert opened.position is not None
+    position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+    review_signal = _make_signal(
+        key="yes-stop-loss-ignore-review",
+        direction="YES",
+        market_slug=position["market_slug"],
+        market_prob=0.20,
+        forecast_prob=0.90,
+        edge=0.70,
+        edge_abs=0.70,
+    )
+
+    decision = strategy.evaluate_position_exit(position, signal=review_signal)
+
+    assert decision.should_close is False
+    assert decision.reason_code == "hold"
+
+
+def test_tracker_records_position_review_history_for_review_and_close(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    opened = strategy.process_signals([_make_signal(key="review-history-1")], auto_trade_enabled=True)[0]
+    assert opened.position is not None
+    position_id = int(opened.position.id)
+
+    updated = tracker.update_paper_position_review(
+        position_id,
+        mark_price=0.72,
+        mark_probability=0.78,
+        edge_abs=0.18,
+        final_score=0.80,
+        reviewed_at="2026-05-02T10:30:00+00:00",
+        reason="scheduled_open_position_review: Holding test position.",
+        reason_code="hold",
+    )
+    assert updated is True
+
+    closed = tracker.close_paper_position(
+        position_id,
+        exit_price=0.68,
+        reason="NO stop loss hit: mark-to-market P/L -$4.25 is at or below -$4.00.",
+        closed_at="2026-05-02T11:00:00+00:00",
+        mark_probability=0.78,
+        edge_abs=0.18,
+        final_score=0.80,
+        mark_reason="scheduled_open_position_review: NO stop loss hit.",
+        reason_code="no_stop_loss",
+    )
+
+    assert closed is not None
+    history = tracker.get_position_review_history(limit=None, position_id=position_id)
+
+    assert len(history) == 2
+    assert {item["event_kind"] for item in history} == {"review", "close"}
+    assert {item["review_reason_code"] for item in history} == {"hold", "no_stop_loss"}
+    assert all(item["mark_to_market_pnl"] is not None for item in history)

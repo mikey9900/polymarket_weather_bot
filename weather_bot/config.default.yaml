@@ -43,6 +43,8 @@ strategy:
     max_forecast_temp_spread_f: 8.0
     max_no_edge_abs: 0.50
     max_no_entry_price: 0.68
+    no_stop_loss_pnl: -4.0
+    no_stop_loss_min_entry_price: 0.50
     exit_min_score: 0.55
     exit_near_fair_edge_abs: 0.03
     exit_max_source_age_hours: 8.0
@@ -60,6 +62,8 @@ strategy:
     max_forecast_temp_spread_f:
     max_no_edge_abs:
     max_no_entry_price:
+    no_stop_loss_pnl:
+    no_stop_loss_min_entry_price:
     exit_min_score: 0.58
     exit_near_fair_edge_abs: 0.04
     exit_max_source_age_hours: 30.0

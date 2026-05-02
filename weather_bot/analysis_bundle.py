@@ -139,6 +139,7 @@ class AnalysisBundleExporter:
         latest_index_path = self.latest_index_path
         report_path = self.bundle_root / f"{stamp}_{self.bundle_label}_analysis_report.xlsx"
         latest_report_path = self.latest_report_path
+        position_review_history = self.tracker.get_position_review_history(limit=None)
 
         try:
             with tempfile.TemporaryDirectory(prefix="weather-analysis-bundle-") as temp_dir:
@@ -177,6 +178,9 @@ class AnalysisBundleExporter:
                     included_entries.append("analysis_report.xlsx")
                     archive.write(report_path, arcname="analysis_report.xlsx")
 
+                    included_entries.append("position_review_history.json")
+                    archive.writestr("position_review_history.json", json.dumps(position_review_history, indent=2, sort_keys=True))
+
                     for path in scan_files:
                         arcname = f"scan_runs/{path.name}"
                         included_entries.append(arcname)
@@ -191,6 +195,7 @@ class AnalysisBundleExporter:
                         "tracker_db_path": str(self.tracker.db_path),
                         "scan_export_root": str(scan_export_root) if scan_export_root is not None else None,
                         "scan_export_count": len(scan_files),
+                        "position_review_count": len(position_review_history),
                         "temperature_market_scope": runtime_status.get("temperature_market_scope"),
                         "included_entries": [*included_entries, "manifest.json"],
                     }
@@ -208,6 +213,7 @@ class AnalysisBundleExporter:
                 latest_report_path=latest_report_path,
                 scan_export_root=scan_export_root,
                 scan_files=scan_files,
+                position_review_count=len(position_review_history),
                 runtime_status=runtime_status,
                 included_entries=[*included_entries, "manifest.json"],
             )
@@ -234,6 +240,7 @@ class AnalysisBundleExporter:
                 "latest_report_path": str(latest_report_path),
                 "created_at": self._last_created_at,
                 "scan_export_count": len(scan_files),
+                "position_review_count": len(position_review_history),
                 "entry_count": len(included_entries) + 1,
                 "dropbox_enabled": self.dropbox_auth is not None,
                 "dropbox_configuration_error": self._dropbox_configuration_error,
@@ -268,6 +275,7 @@ class AnalysisBundleExporter:
         latest_report_path: Path,
         scan_export_root: Path | None,
         scan_files: list[Path],
+        position_review_count: int,
         runtime_status: dict[str, Any],
         included_entries: list[str],
     ) -> dict[str, Any]:
@@ -302,6 +310,7 @@ class AnalysisBundleExporter:
             "analysis_bundle_root": str(self.bundle_root),
             "scan_export_root": str(scan_export_root) if scan_export_root is not None else None,
             "scan_export_count": len(scan_files),
+            "position_review_count": int(position_review_count),
             "temperature_market_scope": runtime_status.get("temperature_market_scope"),
             "included_entries": included_entries,
             "dropbox": {

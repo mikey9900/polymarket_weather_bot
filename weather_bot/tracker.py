@@ -145,6 +145,32 @@ class WeatherTracker:
             );
 
             CREATE INDEX IF NOT EXISTS idx_resolution_events_resolved_at ON resolution_events(resolved_at);
+
+            CREATE TABLE IF NOT EXISTS paper_position_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id INTEGER NOT NULL,
+                reviewed_at TEXT NOT NULL,
+                event_kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                market_slug TEXT NOT NULL,
+                city_slug TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                reason_code TEXT,
+                mark_price REAL,
+                mark_probability REAL,
+                mark_edge_abs REAL,
+                mark_final_score REAL,
+                mark_to_market_pnl REAL,
+                net_liquidation_value REAL,
+                estimated_exit_price REAL,
+                estimated_exit_fee_paid REAL,
+                payload_json TEXT NOT NULL,
+                FOREIGN KEY(position_id) REFERENCES paper_positions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_position_reviews_position_id ON paper_position_reviews(position_id);
+            CREATE INDEX IF NOT EXISTS idx_position_reviews_reviewed_at ON paper_position_reviews(reviewed_at);
             """
         )
         self._ensure_paper_position_columns()
@@ -350,6 +376,7 @@ class WeatherTracker:
         final_score: float | None,
         reviewed_at: str | None = None,
         reason: str = "",
+        reason_code: str | None = None,
         exit_fee_bps: float | None = None,
         exit_slippage_bps: float | None = None,
     ) -> bool:
@@ -380,8 +407,17 @@ class WeatherTracker:
                     int(position_id),
                 ),
             )
+            updated = bool(cursor.rowcount)
+            if updated:
+                self._record_position_review_snapshot(
+                    int(position_id),
+                    reviewed_at=reviewed_at,
+                    event_kind="review",
+                    reason=reason,
+                    reason_code=reason_code,
+                )
             self.conn.commit()
-            return bool(cursor.rowcount)
+            return updated
 
     def close_paper_position(
         self,
@@ -396,6 +432,7 @@ class WeatherTracker:
         mark_reason: str | None = None,
         exit_fee_bps: float | None = None,
         exit_slippage_bps: float | None = None,
+        reason_code: str | None = None,
     ) -> dict[str, Any] | None:
         closed_at = str(closed_at or iso_now())
         with self._lock:
@@ -453,6 +490,13 @@ class WeatherTracker:
                     closed_at,
                     int(position_id),
                 ),
+            )
+            self._record_position_review_snapshot(
+                int(position_id),
+                reviewed_at=closed_at,
+                event_kind="close",
+                reason=str(mark_reason or reason or ""),
+                reason_code=reason_code,
             )
             self.set_setting(
                 "paper_capital",
@@ -556,6 +600,34 @@ class WeatherTracker:
         with self._lock:
             rows = self.conn.execute("SELECT * FROM paper_positions ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
             return [dict(row) for row in rows]
+
+    def get_position_review_history(
+        self,
+        limit: int | None = 1000,
+        *,
+        position_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if position_id is not None:
+            where = "WHERE position_id = ?"
+            params.append(int(position_id))
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self.conn.execute(
+                f"""
+                SELECT *
+                FROM paper_position_reviews
+                {where}
+                ORDER BY reviewed_at DESC, id DESC
+                {limit_clause}
+                """,
+                tuple(params),
+            ).fetchall()
+        return [_deserialize_position_review_row(row) for row in rows]
 
     def get_dashboard_paper_positions(
         self,
@@ -816,6 +888,98 @@ class WeatherTracker:
             if column in existing:
                 continue
             self.conn.execute(f"ALTER TABLE paper_positions ADD COLUMN {column} {column_type}")
+
+    def _record_position_review_snapshot(
+        self,
+        position_id: int,
+        *,
+        reviewed_at: str,
+        event_kind: str,
+        reason: str,
+        reason_code: str | None = None,
+    ) -> None:
+        snapshot = self._fetch_dashboard_position_snapshot(position_id)
+        if not snapshot:
+            return
+        payload_json = json.dumps(snapshot, sort_keys=True)
+        self.conn.execute(
+            """
+            INSERT INTO paper_position_reviews (
+                position_id,
+                reviewed_at,
+                event_kind,
+                status,
+                market_slug,
+                city_slug,
+                direction,
+                reason,
+                reason_code,
+                mark_price,
+                mark_probability,
+                mark_edge_abs,
+                mark_final_score,
+                mark_to_market_pnl,
+                net_liquidation_value,
+                estimated_exit_price,
+                estimated_exit_fee_paid,
+                payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(position_id),
+                str(reviewed_at or ""),
+                str(event_kind or "review"),
+                str(snapshot.get("status") or ""),
+                str(snapshot.get("market_slug") or ""),
+                str(snapshot.get("city_slug") or ""),
+                str(snapshot.get("direction") or ""),
+                str(reason or ""),
+                None if reason_code is None else str(reason_code),
+                _as_float(snapshot.get("mark_price")),
+                _as_float(snapshot.get("mark_probability")),
+                _as_float(snapshot.get("mark_edge_abs")),
+                _as_float(snapshot.get("mark_final_score")),
+                _as_float(snapshot.get("mark_to_market_pnl")),
+                _as_float(snapshot.get("net_liquidation_value")),
+                _as_float(snapshot.get("estimated_exit_price")),
+                _as_float(snapshot.get("estimated_exit_fee_paid")),
+                payload_json,
+            ),
+        )
+
+    def _fetch_dashboard_position_snapshot(self, position_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT
+                p.*,
+                s.event_title AS signal_event_title,
+                s.market_prob AS signal_market_prob,
+                s.forecast_prob AS signal_forecast_prob,
+                s.edge AS signal_edge,
+                s.edge_abs AS signal_edge_abs,
+                s.edge_size AS signal_edge_size,
+                s.confidence AS signal_confidence,
+                s.source_count AS signal_source_count,
+                s.liquidity AS signal_liquidity,
+                s.time_to_resolution_s AS signal_time_to_resolution_s,
+                s.source_dispersion_pct AS signal_source_dispersion_pct,
+                s.score AS signal_adapter_score,
+                d.final_score AS decision_final_score,
+                d.reason AS decision_reason,
+                d.policy_action AS decision_policy_action,
+                d.metadata_json AS decision_metadata_json
+            FROM paper_positions p
+            LEFT JOIN signals s ON s.id = p.signal_id
+            LEFT JOIN decisions d ON d.id = p.decision_id
+            WHERE p.id = ?
+            LIMIT 1
+            """,
+            (int(position_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return _serialize_dashboard_position(row)
 
     def set_setting(self, key: str, value: dict[str, Any]) -> None:
         payload = json.dumps(value, sort_keys=True)
@@ -1333,6 +1497,45 @@ def _json_object(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _deserialize_position_review_row(row: sqlite3.Row) -> dict[str, Any]:
+    payload = _json_object(row["payload_json"])
+    payload.update(
+        {
+            "review_id": int(row["id"]),
+            "position_id": int(row["position_id"]),
+            "reviewed_at": str(row["reviewed_at"] or ""),
+            "event_kind": str(row["event_kind"] or ""),
+            "status": str(row["status"] or payload.get("status") or ""),
+            "market_slug": str(row["market_slug"] or payload.get("market_slug") or ""),
+            "city_slug": str(row["city_slug"] or payload.get("city_slug") or ""),
+            "direction": str(row["direction"] or payload.get("direction") or ""),
+            "review_reason": str(row["reason"] or ""),
+            "review_reason_code": str(row["reason_code"] or ""),
+            "mark_price": _as_float(row["mark_price"]) if row["mark_price"] is not None else _as_float(payload.get("mark_price")),
+            "mark_probability": _as_float(row["mark_probability"])
+            if row["mark_probability"] is not None
+            else _as_float(payload.get("mark_probability")),
+            "mark_edge_abs": _as_float(row["mark_edge_abs"]) if row["mark_edge_abs"] is not None else _as_float(payload.get("mark_edge_abs")),
+            "mark_final_score": _as_float(row["mark_final_score"])
+            if row["mark_final_score"] is not None
+            else _as_float(payload.get("mark_final_score")),
+            "mark_to_market_pnl": _as_float(row["mark_to_market_pnl"])
+            if row["mark_to_market_pnl"] is not None
+            else _as_float(payload.get("mark_to_market_pnl")),
+            "net_liquidation_value": _as_float(row["net_liquidation_value"])
+            if row["net_liquidation_value"] is not None
+            else _as_float(payload.get("net_liquidation_value")),
+            "estimated_exit_price": _as_float(row["estimated_exit_price"])
+            if row["estimated_exit_price"] is not None
+            else _as_float(payload.get("estimated_exit_price")),
+            "estimated_exit_fee_paid": _as_float(row["estimated_exit_fee_paid"])
+            if row["estimated_exit_fee_paid"] is not None
+            else _as_float(payload.get("estimated_exit_fee_paid")),
+        }
+    )
+    return payload
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:

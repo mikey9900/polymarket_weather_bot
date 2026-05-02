@@ -74,6 +74,7 @@ def build_analysis_report(
     recent_signals = tracker.get_recent_signals(limit=250)
     recent_resolutions = tracker.get_recent_resolutions(limit=250)
     recent_operator_actions = tracker.get_recent_operator_actions(limit=250)
+    review_history = tracker.get_position_review_history(limit=5000)
 
     overview = workbook.active
     overview.title = "Overview"
@@ -90,6 +91,7 @@ def build_analysis_report(
     _build_positions_sheet(workbook.create_sheet("Open Trades"), open_positions, title="Open Trades", status_default="open")
     _build_outcomes_sheet(workbook.create_sheet("Recent Outcomes"), recent_outcomes)
     _build_positions_sheet(workbook.create_sheet("Position Ledger"), recent_positions, title="Position Ledger", status_default="")
+    _build_review_history_sheet(workbook.create_sheet("Review History"), review_history)
     _build_signals_sheet(workbook.create_sheet("Recent Signals"), recent_signals)
     _build_resolutions_sheet(workbook.create_sheet("Resolutions"), recent_resolutions)
     _build_operator_sheet(workbook.create_sheet("Operator Log"), recent_operator_actions)
@@ -103,6 +105,7 @@ def build_analysis_report(
         "open_position_count": len(open_positions),
         "recent_outcome_count": len(recent_outcomes),
         "recent_signal_count": len(recent_signals),
+        "review_history_count": len(review_history),
     }
 
 
@@ -211,6 +214,7 @@ def _build_overview_sheet(
 
 def _build_positions_sheet(ws, rows: list[dict[str, Any]], *, title: str, status_default: str) -> None:
     _sheet_title(ws, title, subtitle=f"{len(rows)} rows")
+    report_rows = [_report_position_row(row) for row in rows]
     columns = [
         ("Event", "event_title", "text"),
         ("City", "city_slug", "text"),
@@ -230,12 +234,12 @@ def _build_positions_sheet(ws, rows: list[dict[str, Any]], *, title: str, status
         ("Confidence", "confidence", "text"),
         ("Sources", "source_count", "int"),
         ("Held", "holding_seconds", "duration"),
-        ("Review Age", "mark_age_seconds", "duration"),
+        ("Review Age", "report_review_age_seconds", "duration"),
         ("Review Note", "mark_reason", "text"),
         ("Market Slug", "market_slug", "text"),
     ]
-    _write_table(ws, start_row=4, columns=columns, rows=rows)
-    _style_position_rows(ws, rows, start_row=5, columns=columns, status_default=status_default)
+    _write_table(ws, start_row=4, columns=columns, rows=report_rows)
+    _style_position_rows(ws, report_rows, start_row=5, columns=columns, status_default=status_default)
 
 
 def _build_signals_sheet(ws, rows: list[dict[str, Any]]) -> None:
@@ -340,6 +344,56 @@ def _build_operator_sheet(ws, rows: list[dict[str, Any]]) -> None:
         elif ok_value == "false":
             ws.cell(row=idx, column=3).fill = BAD_FILL
             ws.cell(row=idx, column=3).font = BAD_FONT
+
+
+def _build_review_history_sheet(ws, rows: list[dict[str, Any]]) -> None:
+    _sheet_title(ws, "Review History", subtitle=f"{len(rows)} rows")
+    columns = [
+        ("Reviewed", "reviewed_at", "datetime"),
+        ("Event Kind", "event_kind", "text"),
+        ("Event Title", "event_title", "text"),
+        ("City", "city_slug", "text"),
+        ("Type", "market_type", "text"),
+        ("Date", "event_date", "text"),
+        ("Direction", "direction", "text"),
+        ("Status", "status", "text"),
+        ("Entry %", "entry_price", "percent"),
+        ("Mark %", "mark_price", "percent"),
+        ("Model %", "mark_probability", "percent"),
+        ("Mark P/L $", "mark_to_market_pnl", "currency"),
+        ("Net Liq $", "net_liquidation_value", "currency"),
+        ("Score", "mark_final_score", "number"),
+        ("Edge %", "mark_edge_abs", "percent"),
+        ("Held", "holding_seconds", "duration"),
+        ("To Resolve", "remaining_to_resolution_s", "duration"),
+        ("Reason Code", "review_reason_code", "text"),
+        ("Review Reason", "review_reason", "text"),
+        ("Position ID", "position_id", "int"),
+        ("Market Slug", "market_slug", "text"),
+    ]
+    _write_table(ws, start_row=4, columns=columns, rows=rows)
+    for idx, row in enumerate(rows, start=5):
+        _fill_if_text(ws.cell(row=idx, column=7), row.get("direction"))
+        _fill_status(ws.cell(row=idx, column=8), row.get("status"))
+        _pnl_style(ws.cell(row=idx, column=12))
+        _pnl_style(ws.cell(row=idx, column=13))
+
+
+def _report_position_row(row: dict[str, Any]) -> dict[str, Any]:
+    shaped = dict(row)
+    shaped["report_review_age_seconds"] = _frozen_review_age_seconds(row)
+    return shaped
+
+
+def _frozen_review_age_seconds(row: dict[str, Any]) -> float | None:
+    status = str(row.get("status") or "").strip().lower()
+    if status not in {"closed", "resolved"}:
+        return _as_float(row.get("mark_age_seconds"))
+    resolved_at = _parse_datetime(row.get("resolved_at"))
+    mark_updated_at = _parse_datetime(row.get("mark_updated_at"))
+    if resolved_at is None or mark_updated_at is None:
+        return _as_float(row.get("mark_age_seconds"))
+    return max(0.0, (resolved_at - mark_updated_at).total_seconds())
 
 
 def _sheet_title(ws, title: str, *, subtitle: str = "") -> None:
@@ -530,13 +584,9 @@ def _fill_confidence(cell, value: Any) -> None:
 
 
 def _format_datetime(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return text
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        return str(value or "").strip()
     return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
@@ -588,3 +638,13 @@ def _bool_label(value: Any) -> str:
     if not text:
         return ""
     return text.upper()
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None

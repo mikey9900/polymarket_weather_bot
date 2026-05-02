@@ -175,6 +175,14 @@ class ControlPlane:
                 "paper_temperature_max_no_entry_price",
                 getattr(self.runtime.strategy_engine, "paper_temperature_max_no_entry_price", None),
             ),
+            "paper_temperature_no_stop_loss_pnl": runtime_status.get(
+                "paper_temperature_no_stop_loss_pnl",
+                getattr(self.runtime.strategy_engine, "paper_temperature_no_stop_loss_pnl", None),
+            ),
+            "paper_temperature_no_stop_loss_min_entry_price": runtime_status.get(
+                "paper_temperature_no_stop_loss_min_entry_price",
+                getattr(self.runtime.strategy_engine, "paper_temperature_no_stop_loss_min_entry_price", None),
+            ),
             "paper_open_positions": paper.get("open_positions", 0),
             "available_actions": {
                 "start": True,

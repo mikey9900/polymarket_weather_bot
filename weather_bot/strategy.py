@@ -100,6 +100,14 @@ class WeatherStrategyEngine:
         return float(normalized)
 
     @property
+    def paper_temperature_no_stop_loss_pnl(self) -> float | None:
+        return _as_float(getattr(self.config.strategy.temperature, "no_stop_loss_pnl", None))
+
+    @property
+    def paper_temperature_no_stop_loss_min_entry_price(self) -> float | None:
+        return _as_float(getattr(self.config.strategy.temperature, "no_stop_loss_min_entry_price", None))
+
+    @property
     def paper_temperature_max_no_entry_price_override(self) -> float | None:
         return None
 
@@ -188,6 +196,19 @@ class WeatherStrategyEngine:
                     mark_probability=mark_probability,
                     edge_abs=edge_abs,
                 )
+
+        stop_loss_decision = self._no_stop_loss_exit_decision(
+            position,
+            thresholds=thresholds,
+            position_direction=position_direction,
+            final_score=final_score,
+            signal_age_hours=signal_age_hours,
+            mark_price=mark_price,
+            mark_probability=mark_probability,
+            edge_abs=edge_abs,
+        )
+        if stop_loss_decision is not None:
+            return stop_loss_decision
 
         if signal is None:
             reason = "No fresh qualifying signal in the latest clean review."
@@ -286,6 +307,53 @@ class WeatherStrategyEngine:
             final_score=final_score,
             signal_age_hours=signal_age_hours,
             mark_price=mark_price,
+            mark_probability=mark_probability,
+            edge_abs=edge_abs,
+        )
+
+    def _no_stop_loss_exit_decision(
+        self,
+        position: dict[str, Any],
+        *,
+        thresholds,
+        position_direction: str,
+        final_score: float | None,
+        signal_age_hours: float | None,
+        mark_price: float | None,
+        mark_probability: float | None,
+        edge_abs: float | None,
+    ) -> PositionExitDecision | None:
+        if str(position.get("market_type") or "").strip().lower() != "temperature":
+            return None
+        if position_direction != "NO":
+            return None
+        stop_loss_pnl = _as_float(getattr(thresholds, "no_stop_loss_pnl", None))
+        min_entry_price = _as_float(getattr(thresholds, "no_stop_loss_min_entry_price", None))
+        entry_price = _as_float(position.get("entry_price"))
+        if stop_loss_pnl is None or entry_price is None:
+            return None
+        if min_entry_price is not None and entry_price < min_entry_price:
+            return None
+        current_mark_price = mark_price
+        if current_mark_price is None:
+            current_mark_price = _as_float(position.get("mark_price"))
+        if current_mark_price is None:
+            current_mark_price = _as_float(position.get("market_probability"))
+        if current_mark_price is None:
+            return None
+        mark_to_market_pnl = _position_mark_to_market_pnl(position, current_mark_price)
+        if mark_to_market_pnl is None or mark_to_market_pnl > stop_loss_pnl:
+            return None
+        return PositionExitDecision(
+            should_close=True,
+            reason=(
+                f"NO stop loss hit: mark-to-market P/L {_signed_usd(mark_to_market_pnl)} "
+                f"is at or below {_signed_usd(stop_loss_pnl)}."
+            ),
+            reason_code="no_stop_loss",
+            final_score=final_score,
+            signal_age_hours=signal_age_hours,
+            mark_price=current_mark_price,
             mark_probability=mark_probability,
             edge_abs=edge_abs,
         )
@@ -462,3 +530,53 @@ def _contract_probability(direction: str, yes_probability: float | None) -> floa
         return None
     raw = max(0.0, min(1.0, raw))
     return raw if str(direction or "").upper() == "YES" else round(1.0 - raw, 6)
+
+
+def _position_mark_to_market_pnl(position: dict[str, Any], mark_price: float | None) -> float | None:
+    reference_price = _as_float(mark_price)
+    shares = _as_float(position.get("shares"))
+    cost = _as_float(position.get("cost"))
+    if reference_price is None or shares is None or cost is None:
+        return None
+    net_exit_value = _estimate_net_exit_value(
+        shares,
+        reference_price,
+        fee_bps=_as_float(position.get("exit_fee_bps")) or 0.0,
+        slippage_bps=_as_float(position.get("exit_slippage_bps")) or 0.0,
+    )
+    if net_exit_value is None:
+        return None
+    return round(net_exit_value - cost, 6)
+
+
+def _estimate_net_exit_value(
+    shares: float,
+    reference_price: float,
+    *,
+    fee_bps: float,
+    slippage_bps: float,
+) -> float | None:
+    fill_exit_price = _apply_exit_slippage(reference_price, slippage_bps)
+    if fill_exit_price is None:
+        return None
+    gross_payout = round(max(0.0, shares) * fill_exit_price, 6)
+    exit_fee_paid = _fee_amount(gross_payout, fee_bps)
+    return round(gross_payout - exit_fee_paid, 6)
+
+
+def _apply_exit_slippage(reference_price: float | None, slippage_bps: float) -> float | None:
+    bounded = _as_float(reference_price)
+    if bounded is None:
+        return None
+    bounded = max(0.0, min(1.0, bounded))
+    adjustment = 1.0 - max(0.0, float(slippage_bps or 0.0)) / 10000.0
+    return round(max(0.0, min(1.0, bounded * adjustment)), 6)
+
+
+def _fee_amount(notional: float, fee_bps: float) -> float:
+    return round(max(0.0, float(notional or 0.0)) * max(0.0, float(fee_bps or 0.0)) / 10000.0, 6)
+
+
+def _signed_usd(value: float) -> str:
+    amount = float(value or 0.0)
+    return f"{amount:+.2f}".replace("+", "+$").replace("-", "-$")

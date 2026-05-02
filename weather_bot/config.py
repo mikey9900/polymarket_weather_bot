@@ -52,6 +52,8 @@ class StrategyThresholds:
     max_forecast_temp_spread_f: float | None = None
     max_no_edge_abs: float | None = None
     max_no_entry_price: float | None = None
+    no_stop_loss_pnl: float | None = None
+    no_stop_loss_min_entry_price: float | None = None
     exit_min_score: float = 0.55
     exit_near_fair_edge_abs: float = 0.03
     exit_max_source_age_hours: float = 8.0
@@ -189,6 +191,14 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("strategy", {}).setdefault("temperature", {})["max_no_entry_price"] = float(
             payload["temperature_max_no_entry_price"]
         )
+    if "temperature_no_stop_loss_pnl" in payload:
+        mapped.setdefault("strategy", {}).setdefault("temperature", {})["no_stop_loss_pnl"] = float(
+            payload["temperature_no_stop_loss_pnl"]
+        )
+    if "temperature_no_stop_loss_min_entry_price" in payload:
+        mapped.setdefault("strategy", {}).setdefault("temperature", {})["no_stop_loss_min_entry_price"] = float(
+            payload["temperature_no_stop_loss_min_entry_price"]
+        )
     if "resolution_check_minutes" in payload:
         mapped.setdefault("app", {})["resolution_check_minutes"] = int(payload["resolution_check_minutes"])
     if "open_position_review_seconds" in payload:
@@ -233,6 +243,14 @@ def _load_env_overrides() -> dict[str, Any]:
     if os.getenv("WEATHER_TEMPERATURE_MAX_NO_ENTRY_PRICE"):
         payload.setdefault("strategy", {}).setdefault("temperature", {})["max_no_entry_price"] = float(
             os.getenv("WEATHER_TEMPERATURE_MAX_NO_ENTRY_PRICE", "0")
+        )
+    if os.getenv("WEATHER_TEMPERATURE_NO_STOP_LOSS_PNL"):
+        payload.setdefault("strategy", {}).setdefault("temperature", {})["no_stop_loss_pnl"] = float(
+            os.getenv("WEATHER_TEMPERATURE_NO_STOP_LOSS_PNL", "0")
+        )
+    if os.getenv("WEATHER_TEMPERATURE_NO_STOP_LOSS_MIN_ENTRY_PRICE"):
+        payload.setdefault("strategy", {}).setdefault("temperature", {})["no_stop_loss_min_entry_price"] = float(
+            os.getenv("WEATHER_TEMPERATURE_NO_STOP_LOSS_MIN_ENTRY_PRICE", "0")
         )
     if os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES"):
         payload.setdefault("app", {})["resolution_check_minutes"] = int(os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES", "15"))
