@@ -497,6 +497,7 @@ def test_dashboard_snapshot_exposes_pnl_analytics(tmp_path: Path):
     state = dashboard.get_state_threadsafe()
 
     assert "pnl_analytics" in state
+    assert state["pnl_analytics"]["windows"]["today"]["closed_count"] == 1
     assert state["pnl_analytics"]["windows"]["24h"]["closed_count"] == 1
     assert "YES" in state["pnl_analytics"]["windows"]["24h"]["by_direction"]
     assert "NO" in state["pnl_analytics"]["windows"]["24h"]["by_direction"]
@@ -707,6 +708,7 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "marketScopeLabel" in html
     assert "noEntryCapOptions" in html
     assert "paper_temperature_max_no_entry_price" in html
+    assert "TODAY" in html
     assert "LAST 24H" in html
     assert "LAST 7D" in html
     assert "LAST 30D" in html

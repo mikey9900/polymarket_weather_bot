@@ -8,6 +8,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .models import ForecastSnapshot, PaperPosition, ResolutionOutcome, WeatherDecision, WeatherSignal, iso_now
 from .paths import TRACKER_DB_PATH, candidate_legacy_tracking_paths
@@ -783,8 +784,16 @@ class WeatherTracker:
                 "win_rate": (wins / total_closed * 100.0) if total_closed else 0.0,
             }
 
-    def get_pnl_analytics(self) -> dict[str, Any]:
+    def get_pnl_analytics(self, *, timezone_name: str | None = None) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
+        analytics_tz = timezone.utc
+        if timezone_name:
+            try:
+                analytics_tz = ZoneInfo(str(timezone_name))
+            except ZoneInfoNotFoundError:
+                analytics_tz = timezone.utc
+        today_start_local = now.astimezone(analytics_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_cutoff = today_start_local.astimezone(timezone.utc)
         windows = (
             ("24h", "Last 24 Hours", timedelta(hours=24)),
             ("7d", "Last 7 Days", timedelta(days=7)),
@@ -796,7 +805,16 @@ class WeatherTracker:
         payload = {
             "generated_at": now.isoformat(),
             "open_book": _summarize_open_book(open_positions),
-            "windows": {},
+            "windows": {
+                "today": _build_pnl_window_payload(
+                    "Today",
+                    [
+                        item
+                        for item in closed_positions
+                        if (_closed_trade_timestamp(item) or datetime.min.replace(tzinfo=timezone.utc)) >= today_cutoff
+                    ],
+                )
+            },
         }
         for key, label, span in windows:
             cutoff = now - span

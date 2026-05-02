@@ -73,6 +73,8 @@ class DashboardStateService:
         analysis_status = self._analysis_export_status()
         stale_after_s = getattr(getattr(self.runtime, "config", None), "paper", None)
         stale_after_s = getattr(stale_after_s, "mark_stale_after_seconds", None)
+        app_timezone = getattr(getattr(self.runtime, "config", None), "app", None)
+        app_timezone = getattr(app_timezone, "timezone", "UTC")
         payload = {
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "controls": self.control_plane.build_controls_payload(),
@@ -89,7 +91,7 @@ class DashboardStateService:
                     "win_rate": paper_stats["win_rate"],
                 }
             },
-            "pnl_analytics": self.tracker.get_pnl_analytics(),
+            "pnl_analytics": self.tracker.get_pnl_analytics(timezone_name=app_timezone),
             "open_positions": self.tracker.get_dashboard_paper_positions(
                 limit=250,
                 status="open",
