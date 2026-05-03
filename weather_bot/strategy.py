@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
 from .config import WeatherBotConfig
+from .execution import (
+    PAPER_EXECUTION_MODE,
+    execution_mode_creates_paper_positions,
+    execution_mode_records_shadow_orders,
+    normalize_execution_mode,
+)
 from .models import PaperPosition, WeatherDecision, WeatherSignal
 from .tracker import WeatherTracker
 
@@ -37,6 +43,7 @@ class WeatherStrategyEngine:
         self.research_provider = research_provider
         self._paper_max_open_positions = max(1, int(self.config.paper.max_open_positions))
         self._paper_entry_min_edge_abs_override: float | None = None
+        self._paper_execution_mode = normalize_execution_mode(getattr(self.config.paper, "execution_mode", PAPER_EXECUTION_MODE))
 
     def process_signals(
         self,
@@ -50,19 +57,41 @@ class WeatherStrategyEngine:
             decision = self.evaluate_signal(signal, auto_trade_enabled=auto_trade_enabled)
             decision_id = self.tracker.log_decision(signal_id, decision)
             position = None
-            if decision.accepted:
-                position = self.tracker.create_paper_position(
+            shadow_intent = None
+            if decision.accepted and execution_mode_records_shadow_orders(self.paper_execution_mode):
+                shadow_intent = self.tracker.preview_shadow_entry_intent(
                     signal_id=signal_id,
                     decision_id=decision_id,
                     signal=signal,
-                    stake_usd=self.config.paper.stake_usd,
+                    execution_mode=self.paper_execution_mode,
                     decision_final_score=decision.final_score,
-                    notes="auto_paper_trade",
+                    reason=decision.reason,
+                    stake_usd=self.config.paper.stake_usd,
                     fee_bps=self.config.paper.fee_bps,
                     entry_slippage_bps=self.config.paper.entry_slippage_bps,
-                    exit_fee_bps=self.config.paper.fee_bps,
-                    exit_slippage_bps=self.config.paper.exit_slippage_bps,
                 )
+            if decision.accepted:
+                if execution_mode_creates_paper_positions(self.paper_execution_mode):
+                    position = self.tracker.create_paper_position(
+                        signal_id=signal_id,
+                        decision_id=decision_id,
+                        signal=signal,
+                        stake_usd=self.config.paper.stake_usd,
+                        decision_final_score=decision.final_score,
+                        notes="auto_paper_trade",
+                        fee_bps=self.config.paper.fee_bps,
+                        entry_slippage_bps=self.config.paper.entry_slippage_bps,
+                        exit_fee_bps=self.config.paper.fee_bps,
+                        exit_slippage_bps=self.config.paper.exit_slippage_bps,
+                    )
+                if position is not None and shadow_intent is not None:
+                    self.tracker.record_shadow_order_intent(
+                        replace(
+                            shadow_intent,
+                            position_id=int(position.id),
+                            status="mirrored",
+                        )
+                    )
                 if position is None:
                     decision = WeatherDecision(
                         signal_key=signal.signal_key,
@@ -93,6 +122,14 @@ class WeatherStrategyEngine:
         if self._paper_entry_min_edge_abs_override is not None:
             return float(self._paper_entry_min_edge_abs_override)
         return float(self.config.strategy.temperature.min_edge_abs)
+
+    @property
+    def paper_execution_mode(self) -> str:
+        return normalize_execution_mode(self._paper_execution_mode)
+
+    def set_paper_execution_mode(self, value: str) -> str:
+        self._paper_execution_mode = normalize_execution_mode(value)
+        return self.paper_execution_mode
 
     def set_paper_entry_min_edge_abs(self, value: float) -> float:
         normalized = max(0.05, min(0.40, float(value)))

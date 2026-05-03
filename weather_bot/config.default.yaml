@@ -26,6 +26,7 @@ paper:
   stake_usd: 10.0
   max_open_positions: 20
   max_positions_per_market: 1
+  execution_mode: "paper"
   fee_bps: 50.0
   entry_slippage_bps: 15.0
   exit_slippage_bps: 15.0

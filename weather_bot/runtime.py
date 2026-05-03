@@ -23,6 +23,7 @@ from precipitation.precip_parser import parse_precip_bucket
 from parser.weather_parser import parse_temperature_bucket
 from scanner.weather_event_scanner import normalize_temperature_market_scope
 
+from .execution import execution_mode_records_shadow_orders, normalize_execution_mode
 from .messages import format_resolution_message, format_scan_summary, format_signal_message
 from .models import ResolutionOutcome, ScanBatch, WeatherSignal
 from .precipitation_signals import _build_precip_signal, scan_precipitation_signals
@@ -83,6 +84,9 @@ class WeatherRuntime:
             "precipitation_enabled": bool(self.config.precipitation.enabled),
             "paper_auto_trade": True,
             "paper_max_open_positions": int(getattr(self.strategy_engine, "paper_max_open_positions", self.config.paper.max_open_positions)),
+            "paper_execution_mode": normalize_execution_mode(
+                getattr(self.strategy_engine, "paper_execution_mode", getattr(self.config.paper, "execution_mode", "paper"))
+            ),
             "auto_temperature_scan_interval_seconds": self._configured_temperature_scan_interval_seconds(),
             "auto_precipitation_scan_interval_seconds": self._configured_precipitation_scan_interval_seconds(),
             "paper_entry_min_edge_abs": float(
@@ -160,6 +164,14 @@ class WeatherRuntime:
         if hasattr(self.strategy_engine, "set_paper_max_open_positions"):
             limit = self.strategy_engine.set_paper_max_open_positions(int(self._state.get("paper_max_open_positions") or self.config.paper.max_open_positions))
             self._state["paper_max_open_positions"] = int(limit)
+        if hasattr(self.strategy_engine, "set_paper_execution_mode"):
+            self._state["paper_execution_mode"] = self.strategy_engine.set_paper_execution_mode(
+                self._state.get("paper_execution_mode") or getattr(self.config.paper, "execution_mode", "paper")
+            )
+        else:
+            self._state["paper_execution_mode"] = normalize_execution_mode(
+                self._state.get("paper_execution_mode") or getattr(self.config.paper, "execution_mode", "paper")
+            )
         edge_override = self._state.get("paper_entry_min_edge_abs_override")
         if edge_override is not None and hasattr(self.strategy_engine, "set_paper_entry_min_edge_abs"):
             edge_floor = self.strategy_engine.set_paper_entry_min_edge_abs(float(edge_override))
@@ -256,6 +268,13 @@ class WeatherRuntime:
     def set_paper_auto_trade(self, enabled: bool) -> bool:
         self._update_state(paper_auto_trade=bool(enabled))
         return bool(enabled)
+
+    def set_paper_execution_mode(self, value: str) -> str:
+        mode = normalize_execution_mode(value)
+        if hasattr(self.strategy_engine, "set_paper_execution_mode"):
+            mode = str(self.strategy_engine.set_paper_execution_mode(mode))
+        self._update_state(paper_execution_mode=mode)
+        return str(mode)
 
     def set_paper_max_open_positions(self, value: int) -> int:
         limit = max(1, min(100, int(value)))
@@ -453,6 +472,18 @@ class WeatherRuntime:
             if fresh_mark is not None
             else (position.get("mark_price") or position.get("market_probability") or position.get("entry_price"))
         )
+        shadow_exit_intent = None
+        if execution_mode_records_shadow_orders(self.get_status_snapshot().get("paper_execution_mode")):
+            shadow_exit_intent = self.tracker.preview_shadow_exit_intent(
+                int(position_id),
+                execution_mode=str(self.get_status_snapshot().get("paper_execution_mode") or "paper"),
+                exit_price=exit_price,
+                reason=str(reason or "manual_dashboard_sell"),
+                reason_code=str(reason or "manual_dashboard_sell"),
+                decision_final_score=_as_float(position.get("mark_final_score") or position.get("decision_final_score")),
+                exit_fee_bps=self.config.paper.fee_bps,
+                exit_slippage_bps=self.config.paper.exit_slippage_bps,
+            )
         result = self.tracker.close_paper_position(
             int(position_id),
             exit_price=exit_price,
@@ -467,6 +498,8 @@ class WeatherRuntime:
         )
         if result is None:
             return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
+        if shadow_exit_intent is not None:
+            self.tracker.record_shadow_order_intent(replace(shadow_exit_intent, status="mirrored"))
         return {
             "ok": True,
             "status": 200,
@@ -731,6 +764,18 @@ class WeatherRuntime:
             reviewed += 1
             if not decision.should_close:
                 continue
+            shadow_exit_intent = None
+            if execution_mode_records_shadow_orders(self.get_status_snapshot().get("paper_execution_mode")):
+                shadow_exit_intent = self.tracker.preview_shadow_exit_intent(
+                    int(position["id"]),
+                    execution_mode=str(self.get_status_snapshot().get("paper_execution_mode") or "paper"),
+                    exit_price=mark_price,
+                    reason=decision.reason,
+                    reason_code=decision.reason_code,
+                    decision_final_score=decision.final_score,
+                    exit_fee_bps=self.config.paper.fee_bps,
+                    exit_slippage_bps=self.config.paper.exit_slippage_bps,
+                )
             result = self.tracker.close_paper_position(
                 int(position["id"]),
                 exit_price=mark_price,
@@ -743,6 +788,8 @@ class WeatherRuntime:
                 reason_code=decision.reason_code,
             )
             if result is not None:
+                if shadow_exit_intent is not None:
+                    self.tracker.record_shadow_order_intent(replace(shadow_exit_intent, status="mirrored"))
                 closed += 1
 
         return {"reviewed": reviewed, "closed": closed}

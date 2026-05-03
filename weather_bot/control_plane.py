@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .execution import normalize_execution_mode
 from .models import iso_now
 
 OPEN_POSITION_CAP_KEYS = (
@@ -64,6 +65,14 @@ NO_ENTRY_CAP_KEYS = (
     "noEntryCap",
 )
 NO_ENTRY_CAP_VALUE_KEYS = ("value", *NO_ENTRY_CAP_KEYS)
+PAPER_EXECUTION_MODE_KEYS = (
+    "paper_execution_mode",
+    "execution_mode",
+    "mode",
+    "paperExecutionMode",
+    "executionMode",
+)
+PAPER_EXECUTION_MODE_VALUE_KEYS = ("value", *PAPER_EXECUTION_MODE_KEYS)
 
 
 @dataclass(frozen=True)
@@ -118,6 +127,7 @@ class ControlPlane:
     def build_controls_payload(self) -> dict[str, Any]:
         runtime_status = self.runtime.get_status_snapshot()
         paper = self.tracker.get_paper_stats()
+        shadow_summary = self.tracker.get_shadow_order_summary()
         temperature_scan_interval_seconds = runtime_status.get(
             "auto_temperature_scan_interval_seconds",
             _scheduled_interval_seconds(
@@ -167,6 +177,10 @@ class ControlPlane:
             "paper_equity": paper.get("current_equity", 0.0),
             "paper_initial_capital": paper.get("initial_capital", 0.0),
             "paper_max_open_positions": runtime_status.get("paper_max_open_positions", getattr(self.runtime.strategy_engine, "paper_max_open_positions", 0)),
+            "paper_execution_mode": runtime_status.get(
+                "paper_execution_mode",
+                getattr(self.runtime.strategy_engine, "paper_execution_mode", getattr(self.runtime.config.paper, "execution_mode", "paper")),
+            ),
             "paper_entry_min_edge_abs": runtime_status.get(
                 "paper_entry_min_edge_abs",
                 getattr(self.runtime.strategy_engine, "paper_entry_min_edge_abs", 0.0),
@@ -183,6 +197,10 @@ class ControlPlane:
                 "paper_temperature_no_stop_loss_min_entry_price",
                 getattr(self.runtime.strategy_engine, "paper_temperature_no_stop_loss_min_entry_price", None),
             ),
+            "shadow_order_count": shadow_summary.get("total_count", 0),
+            "shadow_entry_count": shadow_summary.get("entry_count", 0),
+            "shadow_exit_count": shadow_summary.get("exit_count", 0),
+            "last_shadow_order_at": shadow_summary.get("last_created_at"),
             "paper_open_positions": paper.get("open_positions", 0),
             "available_actions": {
                 "start": True,
@@ -194,6 +212,7 @@ class ControlPlane:
                 "set_temperature_market_scope": True,
                 "set_paper_capital": True,
                 "set_paper_max_open_positions": True,
+                "set_paper_execution_mode": True,
                 "set_paper_entry_min_edge_abs": True,
                 "set_temperature_max_no_entry_price": False,
                 "close_position": True,
@@ -332,6 +351,25 @@ class ControlPlane:
                     True,
                     200,
                     f"Global open-position cap set to {limit}. Existing open positions stay open; this only gates future entries.",
+                    action,
+                )
+            )
+        if action == "set_paper_execution_mode":
+            try:
+                value = _coerce_mapping(
+                    request.value,
+                    fallback_key="paper_execution_mode",
+                    nested_keys=("value", "payload", "data"),
+                )
+                mode = _coerce_text(value, keys=PAPER_EXECUTION_MODE_VALUE_KEYS)
+            except (TypeError, ValueError):
+                return self._record(ControlResult(False, 400, "Execution mode is required.", action))
+            applied = self.runtime.set_paper_execution_mode(mode)
+            return self._record(
+                ControlResult(
+                    True,
+                    200,
+                    f"Execution mode set to {_execution_mode_label(applied)}. Paper trading stays active; shadow-live mirrors accepted entries and closes when enabled.",
                     action,
                 )
             )
@@ -553,6 +591,8 @@ def _infer_action_from_payload(payload: dict[str, Any]) -> str:
             return "set_temperature_market_scope"
         if any(key in source for key in ("precipitation_scan_minutes", "precipitation_scan_interval_minutes", "rain_scan_minutes", "rain_scan_interval_minutes")):
             return "set_precipitation_scan_interval_minutes"
+        if any(key in source for key in PAPER_EXECUTION_MODE_KEYS):
+            return "set_paper_execution_mode"
         if any(key in source for key in ENTRY_EDGE_LIMIT_KEYS):
             return "set_paper_entry_min_edge_abs"
         if any(key in source for key in NO_ENTRY_CAP_KEYS):
@@ -590,6 +630,13 @@ def _temperature_market_scope_label(value: Any) -> str:
     if scope == "international":
         return "International"
     return "Both"
+
+
+def _execution_mode_label(value: Any) -> str:
+    mode = normalize_execution_mode(value)
+    if mode == "paper_shadow":
+        return "Paper + Shadow-Live"
+    return "Paper"
 
 
 def _coerce_percent_as_probability(value: Any, *, keys: tuple[str, ...] = ()) -> float:

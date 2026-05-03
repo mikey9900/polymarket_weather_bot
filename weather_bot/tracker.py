@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .execution.models import ShadowOrderIntent
 from .models import ForecastSnapshot, PaperPosition, ResolutionOutcome, WeatherDecision, WeatherSignal, iso_now
 from .paths import TRACKER_DB_PATH, candidate_legacy_tracking_paths
 
@@ -172,6 +173,47 @@ class WeatherTracker:
 
             CREATE INDEX IF NOT EXISTS idx_position_reviews_position_id ON paper_position_reviews(position_id);
             CREATE INDEX IF NOT EXISTS idx_position_reviews_reviewed_at ON paper_position_reviews(reviewed_at);
+
+            CREATE TABLE IF NOT EXISTS shadow_order_intents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER,
+                decision_id INTEGER,
+                position_id INTEGER,
+                intent_kind TEXT NOT NULL,
+                execution_mode TEXT NOT NULL,
+                signal_key TEXT NOT NULL,
+                market_type TEXT NOT NULL,
+                market_slug TEXT NOT NULL,
+                event_slug TEXT NOT NULL,
+                city_slug TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                label TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                order_action TEXT NOT NULL,
+                outcome_side TEXT NOT NULL,
+                order_intent TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                time_in_force TEXT NOT NULL,
+                manual_order_indicator TEXT NOT NULL,
+                target_price REAL NOT NULL,
+                reference_price REAL NOT NULL,
+                shares REAL NOT NULL,
+                notional_usd REAL NOT NULL,
+                estimated_fee_paid REAL NOT NULL,
+                decision_final_score REAL,
+                reason TEXT NOT NULL,
+                reason_code TEXT,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(signal_id) REFERENCES signals(id),
+                FOREIGN KEY(decision_id) REFERENCES decisions(id),
+                FOREIGN KEY(position_id) REFERENCES paper_positions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shadow_order_intents_created_at ON shadow_order_intents(created_at);
+            CREATE INDEX IF NOT EXISTS idx_shadow_order_intents_market_slug ON shadow_order_intents(market_slug);
+            CREATE INDEX IF NOT EXISTS idx_shadow_order_intents_kind ON shadow_order_intents(intent_kind);
             """
         )
         self._ensure_paper_position_columns()
@@ -298,6 +340,203 @@ class WeatherTracker:
                 (market_slug,),
             ).fetchone()
             return int(row["count"] or 0)
+
+    def preview_shadow_entry_intent(
+        self,
+        *,
+        signal_id: int,
+        decision_id: int,
+        signal: WeatherSignal,
+        execution_mode: str,
+        decision_final_score: float | None = None,
+        reason: str = "",
+        reason_code: str | None = None,
+        stake_usd: float,
+        fee_bps: float = 0.0,
+        entry_slippage_bps: float = 0.0,
+    ) -> ShadowOrderIntent | None:
+        entry_context = _paper_entry_context(signal, entry_slippage_bps)
+        if entry_context is None:
+            return None
+        with self._lock:
+            _, available = self.get_paper_capital()
+            position_size = _paper_entry_position_size(stake_usd, available, entry_context["entry_price"], fee_bps)
+        if position_size is None:
+            return None
+        return ShadowOrderIntent(
+            signal_id=int(signal_id),
+            decision_id=int(decision_id),
+            intent_kind="entry",
+            execution_mode=str(execution_mode or "paper"),
+            signal_key=signal.signal_key,
+            market_type=signal.market_type,
+            market_slug=signal.market_slug,
+            event_slug=signal.event_slug,
+            city_slug=signal.city_slug,
+            event_date=signal.event_date,
+            label=signal.label,
+            direction=signal.direction,
+            order_action="BUY",
+            outcome_side=str(signal.direction or "").upper(),
+            order_intent="BUY_SHORT" if str(signal.direction or "").upper() == "NO" else "BUY_LONG",
+            order_type="LIMIT",
+            time_in_force="GTC",
+            manual_order_indicator="AUTOMATIC",
+            target_price=float(entry_context["entry_price"] or 0.0),
+            reference_price=float(entry_context["entry_reference_price"] or 0.0),
+            shares=float(position_size["shares"] or 0.0),
+            notional_usd=float(position_size["cost"] or 0.0),
+            estimated_fee_paid=float(position_size["entry_fee_paid"] or 0.0),
+            decision_final_score=_as_float(decision_final_score),
+            reason=str(reason or ""),
+            reason_code=reason_code,
+            payload={
+                "signal_score": _as_float(signal.score),
+                "market_prob": _as_float(signal.market_prob),
+                "forecast_prob": _as_float(signal.forecast_prob),
+                "edge_abs": _as_float(signal.edge_abs),
+                "source_count": int(signal.source_count or 0),
+                "liquidity": _as_float(signal.liquidity),
+                "requested_stake_usd": float(stake_usd or 0.0),
+                "available_capital": float(available or 0.0),
+                "entry_fee_bps": _bps(fee_bps),
+                "entry_slippage_bps": _bps(entry_slippage_bps),
+            },
+        )
+
+    def preview_shadow_exit_intent(
+        self,
+        position_id: int,
+        *,
+        execution_mode: str,
+        exit_price: float | None = None,
+        reason: str = "",
+        reason_code: str | None = None,
+        decision_final_score: float | None = None,
+        exit_fee_bps: float | None = None,
+        exit_slippage_bps: float | None = None,
+    ) -> ShadowOrderIntent | None:
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM paper_positions WHERE id = ? AND status = 'open'", (int(position_id),)).fetchone()
+            if row is None:
+                return None
+            exit_context = _paper_position_exit_context(
+                row,
+                exit_price=exit_price,
+                exit_fee_bps=exit_fee_bps,
+                exit_slippage_bps=exit_slippage_bps,
+            )
+        direction = str(row["direction"] or "").upper()
+        return ShadowOrderIntent(
+            signal_id=int(row["signal_id"]) if row["signal_id"] is not None else None,
+            decision_id=int(row["decision_id"]) if row["decision_id"] is not None else None,
+            position_id=int(row["id"]),
+            intent_kind="exit",
+            execution_mode=str(execution_mode or "paper"),
+            signal_key=str(row["signal_key"] or ""),
+            market_type=str(row["market_type"] or ""),
+            market_slug=str(row["market_slug"] or ""),
+            event_slug=str(row["event_slug"] or ""),
+            city_slug=str(row["city_slug"] or ""),
+            event_date=str(row["event_date"] or ""),
+            label=str(row["label"] or ""),
+            direction=direction,
+            order_action="SELL",
+            outcome_side=direction,
+            order_intent="SELL_SHORT" if direction == "NO" else "SELL_LONG",
+            order_type="LIMIT",
+            time_in_force="IOC",
+            manual_order_indicator="AUTOMATIC",
+            target_price=float(exit_context["fill_exit_price"] or 0.0),
+            reference_price=float(exit_context["reference_price"] or 0.0),
+            shares=float(row["shares"] or 0.0),
+            notional_usd=float(exit_context["net_payout"] or 0.0),
+            estimated_fee_paid=float(exit_context["exit_fee_paid"] or 0.0),
+            decision_final_score=_as_float(decision_final_score),
+            reason=str(reason or ""),
+            reason_code=reason_code,
+            payload={
+                "entry_price": _as_float(row["entry_price"]),
+                "cost": _as_float(row["cost"]),
+                "mark_price": _as_float(row["mark_price"]),
+                "mark_probability": _as_float(row["mark_probability"]),
+                "mark_reason": str(row["mark_reason"] or ""),
+                "exit_fee_bps": exit_context["applied_exit_fee_bps"],
+                "exit_slippage_bps": exit_context["applied_exit_slippage_bps"],
+                "gross_payout": float(exit_context["gross_payout"] or 0.0),
+            },
+        )
+
+    def record_shadow_order_intent(self, intent: ShadowOrderIntent) -> int:
+        payload_json = json.dumps(intent.payload, sort_keys=True)
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                INSERT INTO shadow_order_intents (
+                    signal_id, decision_id, position_id, intent_kind, execution_mode, signal_key,
+                    market_type, market_slug, event_slug, city_slug, event_date, label, direction,
+                    order_action, outcome_side, order_intent, order_type, time_in_force,
+                    manual_order_indicator, target_price, reference_price, shares, notional_usd,
+                    estimated_fee_paid, decision_final_score, reason, reason_code, status,
+                    payload_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    intent.signal_id,
+                    intent.decision_id,
+                    intent.position_id,
+                    intent.intent_kind,
+                    intent.execution_mode,
+                    intent.signal_key,
+                    intent.market_type,
+                    intent.market_slug,
+                    intent.event_slug,
+                    intent.city_slug,
+                    intent.event_date,
+                    intent.label,
+                    intent.direction,
+                    intent.order_action,
+                    intent.outcome_side,
+                    intent.order_intent,
+                    intent.order_type,
+                    intent.time_in_force,
+                    intent.manual_order_indicator,
+                    intent.target_price,
+                    intent.reference_price,
+                    intent.shares,
+                    intent.notional_usd,
+                    intent.estimated_fee_paid,
+                    intent.decision_final_score,
+                    intent.reason,
+                    intent.reason_code,
+                    intent.status,
+                    payload_json,
+                    intent.created_at,
+                ),
+            )
+            self.conn.commit()
+            return int(cursor.lastrowid)
+
+    def get_recent_shadow_order_intents(self, *, limit: int = 20, intent_kind: str | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if intent_kind:
+            where = "WHERE intent_kind = ?"
+            params.append(str(intent_kind))
+        params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self.conn.execute(
+                f"""
+                SELECT *
+                FROM shadow_order_intents
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [_serialize_shadow_order_intent(row) for row in rows]
 
     def create_paper_position(
         self,
@@ -824,6 +1063,25 @@ class WeatherTracker:
             payload["windows"][key] = _build_pnl_window_payload(label, window_positions)
         return payload
 
+    def get_shadow_order_summary(self) -> dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_count,
+                    SUM(CASE WHEN intent_kind = 'entry' THEN 1 ELSE 0 END) AS entry_count,
+                    SUM(CASE WHEN intent_kind = 'exit' THEN 1 ELSE 0 END) AS exit_count,
+                    MAX(created_at) AS last_created_at
+                FROM shadow_order_intents
+                """
+            ).fetchone()
+        return {
+            "total_count": int(row["total_count"] or 0),
+            "entry_count": int(row["entry_count"] or 0),
+            "exit_count": int(row["exit_count"] or 0),
+            "last_created_at": row["last_created_at"],
+        }
+
     def _query_dashboard_paper_positions(
         self,
         *,
@@ -1225,6 +1483,48 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": str(payload.get("created_at") or ""),
         "resolved_at": str(payload.get("resolved_at") or ""),
         "resolution": str(payload.get("resolution") or ""),
+    }
+
+
+def _serialize_shadow_order_intent(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    created_at = _parse_iso_datetime(payload.get("created_at"))
+    age_seconds = None
+    if created_at is not None:
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - created_at).total_seconds())
+    return {
+        "id": int(payload["id"]),
+        "signal_id": int(payload["signal_id"]) if payload.get("signal_id") is not None else None,
+        "decision_id": int(payload["decision_id"]) if payload.get("decision_id") is not None else None,
+        "position_id": int(payload["position_id"]) if payload.get("position_id") is not None else None,
+        "intent_kind": str(payload.get("intent_kind") or ""),
+        "execution_mode": str(payload.get("execution_mode") or ""),
+        "signal_key": str(payload.get("signal_key") or ""),
+        "market_type": str(payload.get("market_type") or ""),
+        "market_slug": str(payload.get("market_slug") or ""),
+        "event_slug": str(payload.get("event_slug") or ""),
+        "city_slug": str(payload.get("city_slug") or ""),
+        "event_date": str(payload.get("event_date") or ""),
+        "label": str(payload.get("label") or ""),
+        "direction": str(payload.get("direction") or ""),
+        "order_action": str(payload.get("order_action") or ""),
+        "outcome_side": str(payload.get("outcome_side") or ""),
+        "order_intent": str(payload.get("order_intent") or ""),
+        "order_type": str(payload.get("order_type") or ""),
+        "time_in_force": str(payload.get("time_in_force") or ""),
+        "manual_order_indicator": str(payload.get("manual_order_indicator") or ""),
+        "target_price": _as_float(payload.get("target_price")),
+        "reference_price": _as_float(payload.get("reference_price")),
+        "shares": _as_float(payload.get("shares")),
+        "notional_usd": _as_float(payload.get("notional_usd")),
+        "estimated_fee_paid": _as_float(payload.get("estimated_fee_paid")),
+        "decision_final_score": _as_float(payload.get("decision_final_score")),
+        "reason": str(payload.get("reason") or ""),
+        "reason_code": str(payload.get("reason_code") or ""),
+        "status": str(payload.get("status") or ""),
+        "created_at": payload.get("created_at"),
+        "age_seconds": age_seconds,
+        "payload": _json_object(payload.get("payload_json")),
     }
 
 

@@ -122,6 +122,42 @@ def test_strategy_opens_paper_position(tmp_path: Path):
     assert available < initial
 
 
+def test_strategy_default_paper_mode_does_not_record_shadow_entries(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    result = strategy.process_signals([_make_signal(key="plain-paper")], auto_trade_enabled=True)[0]
+
+    assert result.position is not None
+    assert tracker.get_shadow_order_summary()["total_count"] == 0
+    assert tracker.get_recent_shadow_order_intents(limit=5) == []
+
+
+def test_strategy_paper_shadow_mode_records_shadow_entry_and_keeps_paper_flow(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    object.__setattr__(config.paper, "execution_mode", "paper_shadow")
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    result = strategy.process_signals([_make_signal(key="paper-shadow-entry")], auto_trade_enabled=True)[0]
+
+    assert result.position is not None
+    intents = tracker.get_recent_shadow_order_intents(limit=5)
+    assert len(intents) == 1
+    assert intents[0]["intent_kind"] == "entry"
+    assert intents[0]["execution_mode"] == "paper_shadow"
+    assert intents[0]["position_id"] == int(result.position.id)
+    assert intents[0]["order_action"] == "BUY"
+    assert intents[0]["status"] == "mirrored"
+    summary = tracker.get_shadow_order_summary()
+    assert summary["total_count"] == 1
+    assert summary["entry_count"] == 1
+    assert summary["exit_count"] == 0
+
+
 def test_strategy_uses_final_score_after_research_adjustment(tmp_path: Path):
     class ResearchProvider:
         @staticmethod

@@ -68,6 +68,7 @@ class PaperSettings:
     stake_usd: float
     max_open_positions: int
     max_positions_per_market: int
+    execution_mode: str = "paper"
     fee_bps: float = 50.0
     entry_slippage_bps: float = 15.0
     exit_slippage_bps: float = 15.0
@@ -211,6 +212,8 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("paper", {})["stake_usd"] = float(payload["paper_stake_usd"])
     if "paper_initial_capital" in payload:
         mapped.setdefault("paper", {})["initial_capital"] = float(payload["paper_initial_capital"])
+    if "paper_execution_mode" in payload:
+        mapped.setdefault("paper", {})["execution_mode"] = str(payload["paper_execution_mode"])
     if "dashboard_port" in payload:
         mapped.setdefault("dashboard", {})["port"] = int(payload["dashboard_port"])
     return mapped
@@ -260,6 +263,8 @@ def _load_env_overrides() -> dict[str, Any]:
         payload.setdefault("app", {})["open_position_weather_refresh_minutes"] = int(
             os.getenv("WEATHER_OPEN_POSITION_WEATHER_REFRESH_MINUTES", "60")
         )
+    if os.getenv("WEATHER_PAPER_EXECUTION_MODE"):
+        payload.setdefault("paper", {})["execution_mode"] = os.getenv("WEATHER_PAPER_EXECUTION_MODE")
     return payload
 
 

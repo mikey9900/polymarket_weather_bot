@@ -109,6 +109,7 @@ class DashboardStateService:
             ),
             "recent_resolutions": self.tracker.get_recent_resolutions(limit=12),
             "recent_operator_actions": self.tracker.get_recent_operator_actions(limit=12),
+            "recent_shadow_orders": self.tracker.get_recent_shadow_order_intents(limit=12),
             "signal_summary_24h": self.tracker.get_signal_summary(),
             "exports": {
                 "dashboard_state_path": str(self.state_export_path) if self.state_export_path is not None else None,
@@ -189,6 +190,7 @@ class DashboardStateService:
                 "recent_outcomes": [],
                 "recent_resolutions": [],
                 "recent_operator_actions": [],
+                "recent_shadow_orders": [],
                 "signal_summary_24h": {},
                 "exports": {
                     "dashboard_state_path": str(self.state_export_path) if self.state_export_path is not None else None,

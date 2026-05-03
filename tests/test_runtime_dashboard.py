@@ -77,6 +77,16 @@ def test_load_config_accepts_temperature_forecast_spread_ha_override(tmp_path: P
     assert config.strategy.temperature.max_forecast_temp_spread_f == 6.5
 
 
+def test_load_config_accepts_paper_execution_mode_ha_override(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(json.dumps({"paper_execution_mode": "paper_shadow"}), encoding="utf-8")
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.paper.execution_mode == "paper_shadow"
+
+
 def test_load_config_accepts_temperature_no_edge_cap_ha_override(tmp_path: Path):
     config_path = _write_config(tmp_path)
     options_path = tmp_path / "options.json"
@@ -689,10 +699,15 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert 'pill("Temp Scan"' not in html
     assert 'pill("Precip Scan"' not in html
     assert "set_paper_entry_min_edge_abs" in html
+    assert "set_paper_execution_mode" in html
     assert "set_temperature_max_no_entry_price" in html
     assert "NO Stop" in html
     assert "set_temperature_market_scope" in html
     assert "export_analysis_bundle" in html
+    assert 'id="execution-mode-input"' in html
+    assert "setExecutionMode()" in html
+    assert "Paper + Shadow-Live" in html
+    assert "Shadow intents" in html
     assert "setEdgeLimit()" in html
     assert "setNoEntryCap()" in html
     assert "set_temperature_scan_interval_minutes" in html
@@ -1064,7 +1079,11 @@ def test_control_payload_exposes_paper_metrics(tmp_path: Path):
     assert payload["paper_balance"] == 750.0
     assert payload["paper_initial_capital"] == 750.0
     assert payload["paper_max_open_positions"] == 20
+    assert payload["paper_execution_mode"] == "paper"
     assert payload["paper_entry_min_edge_abs"] == config.strategy.temperature.min_edge_abs
+    assert payload["shadow_order_count"] == 0
+    assert payload["shadow_entry_count"] == 0
+    assert payload["shadow_exit_count"] == 0
     assert payload["temperature_scan_interval_minutes"] == config.app.auto_temperature_scan_minutes
     assert payload["precipitation_scan_interval_minutes"] == config.app.auto_precipitation_scan_minutes
     assert payload["next_temperature_scan_at"] is not None
@@ -1212,6 +1231,25 @@ def test_control_updates_open_position_cap(tmp_path: Path):
     assert response["state"]["controls"]["paper_max_open_positions"] == 40
     assert runtime.get_status_snapshot()["paper_max_open_positions"] == 40
     assert strategy.paper_max_open_positions == 40
+
+
+def test_control_updates_paper_execution_mode(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe(
+        {"action": "set_paper_execution_mode", "value": {"paper_execution_mode": "paper_shadow"}}
+    )
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["paper_execution_mode"] == "paper_shadow"
+    assert runtime.get_status_snapshot()["paper_execution_mode"] == "paper_shadow"
+    assert strategy.paper_execution_mode == "paper_shadow"
 
 
 def test_control_updates_temperature_scan_interval_minutes(tmp_path: Path):
@@ -1378,6 +1416,23 @@ def test_control_infers_open_cap_action_from_open_position_cap_alias_payload(tmp
     assert strategy.paper_max_open_positions == 85
 
 
+def test_control_infers_paper_execution_mode_from_actionless_payload(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+
+    response = dashboard.apply_control_threadsafe({"paper_execution_mode": "paper_shadow"})
+
+    assert response["ok"] is True
+    assert response["state"]["controls"]["paper_execution_mode"] == "paper_shadow"
+    assert runtime.get_status_snapshot()["paper_execution_mode"] == "paper_shadow"
+    assert strategy.paper_execution_mode == "paper_shadow"
+
+
 def test_runtime_respects_live_open_position_cap_override(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
@@ -1419,6 +1474,32 @@ def test_dashboard_exports_snapshot_and_control_queue_state(tmp_path: Path):
     assert state["controls"]["pending_scan_types"] == ["temperature"]
     assert payload["exports"]["dashboard_state_error"] is None
     assert payload["controls"]["scan_queue_depth"] == 1
+
+
+def test_dashboard_snapshot_exposes_recent_shadow_orders(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    object.__setattr__(config.paper, "execution_mode", "paper_shadow")
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(
+        tracker=tracker,
+        runtime=runtime,
+        control_plane=control_plane,
+        state_export_path=tmp_path / "dashboard_state.json",
+    )
+
+    strategy.process_signals([_signal("shadow-snapshot-1")], auto_trade_enabled=True)
+    dashboard.refresh_once()
+    state = dashboard.get_state_threadsafe()
+
+    assert state["controls"]["paper_execution_mode"] == "paper_shadow"
+    assert state["controls"]["shadow_order_count"] == 1
+    assert len(state["recent_shadow_orders"]) == 1
+    assert state["recent_shadow_orders"][0]["intent_kind"] == "entry"
+    assert state["recent_shadow_orders"][0]["status"] == "mirrored"
 
 
 def test_dashboard_export_failure_is_non_fatal(tmp_path: Path):
@@ -1917,6 +1998,33 @@ def test_dashboard_manual_close_action_accepts_nested_id_alias_payload(tmp_path:
     assert response["ok"] is True
     assert latest_trade["status"] == "closed"
     assert latest_trade["exit_reason"] == "manual_test_close_nested_alias"
+
+
+def test_dashboard_manual_close_action_records_shadow_exit_in_paper_shadow_mode(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    object.__setattr__(config.paper, "execution_mode", "paper_shadow")
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("manual-shadow-close-1")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+    open_positions = tracker.get_dashboard_paper_positions(limit=12, status="open")
+
+    response = dashboard.apply_control_threadsafe(
+        {"action": "close_position", "value": {"position_id": open_positions[0]["id"], "reason": "manual_shadow_close"}}
+    )
+
+    assert response["ok"] is True
+    intents = tracker.get_recent_shadow_order_intents(limit=5)
+    assert len(intents) == 2
+    assert {item["intent_kind"] for item in intents} == {"entry", "exit"}
+    assert intents[0]["intent_kind"] == "exit"
+    assert intents[0]["status"] == "mirrored"
+    assert intents[0]["execution_mode"] == "paper_shadow"
+    assert response["state"]["controls"]["shadow_exit_count"] == 1
+    assert response["state"]["recent_shadow_orders"][0]["intent_kind"] == "exit"
 
 
 def _stale_open_position(tmp_path: Path):
