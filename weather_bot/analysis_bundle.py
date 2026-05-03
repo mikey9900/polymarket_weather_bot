@@ -140,6 +140,7 @@ class AnalysisBundleExporter:
         report_path = self.bundle_root / f"{stamp}_{self.bundle_label}_analysis_report.xlsx"
         latest_report_path = self.latest_report_path
         position_review_history = self.tracker.get_position_review_history(limit=None)
+        shadow_order_intents = self.tracker.get_recent_shadow_order_intents(limit=None)
 
         try:
             with tempfile.TemporaryDirectory(prefix="weather-analysis-bundle-") as temp_dir:
@@ -181,6 +182,9 @@ class AnalysisBundleExporter:
                     included_entries.append("position_review_history.json")
                     archive.writestr("position_review_history.json", json.dumps(position_review_history, indent=2, sort_keys=True))
 
+                    included_entries.append("shadow_order_intents.json")
+                    archive.writestr("shadow_order_intents.json", json.dumps(shadow_order_intents, indent=2, sort_keys=True))
+
                     for path in scan_files:
                         arcname = f"scan_runs/{path.name}"
                         included_entries.append(arcname)
@@ -196,6 +200,7 @@ class AnalysisBundleExporter:
                         "scan_export_root": str(scan_export_root) if scan_export_root is not None else None,
                         "scan_export_count": len(scan_files),
                         "position_review_count": len(position_review_history),
+                        "shadow_order_count": len(shadow_order_intents),
                         "temperature_market_scope": runtime_status.get("temperature_market_scope"),
                         "included_entries": [*included_entries, "manifest.json"],
                     }
@@ -214,6 +219,7 @@ class AnalysisBundleExporter:
                 scan_export_root=scan_export_root,
                 scan_files=scan_files,
                 position_review_count=len(position_review_history),
+                shadow_order_count=len(shadow_order_intents),
                 runtime_status=runtime_status,
                 included_entries=[*included_entries, "manifest.json"],
             )
@@ -241,6 +247,7 @@ class AnalysisBundleExporter:
                 "created_at": self._last_created_at,
                 "scan_export_count": len(scan_files),
                 "position_review_count": len(position_review_history),
+                "shadow_order_count": len(shadow_order_intents),
                 "entry_count": len(included_entries) + 1,
                 "dropbox_enabled": self.dropbox_auth is not None,
                 "dropbox_configuration_error": self._dropbox_configuration_error,
@@ -276,6 +283,7 @@ class AnalysisBundleExporter:
         scan_export_root: Path | None,
         scan_files: list[Path],
         position_review_count: int,
+        shadow_order_count: int,
         runtime_status: dict[str, Any],
         included_entries: list[str],
     ) -> dict[str, Any]:
@@ -311,6 +319,7 @@ class AnalysisBundleExporter:
             "scan_export_root": str(scan_export_root) if scan_export_root is not None else None,
             "scan_export_count": len(scan_files),
             "position_review_count": int(position_review_count),
+            "shadow_order_count": int(shadow_order_count),
             "temperature_market_scope": runtime_status.get("temperature_market_scope"),
             "included_entries": included_entries,
             "dropbox": {

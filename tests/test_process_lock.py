@@ -43,3 +43,16 @@ def test_acquire_pid_lock_blocks_active_instance(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="Another weather bot instance is already running"):
         acquire_pid_lock(lock_path)
+
+
+def test_pid_lock_release_is_idempotent(tmp_path, monkeypatch):
+    lock_path = tmp_path / "weatherbot.pid.lock"
+    lock = acquire_pid_lock(lock_path)
+
+    lock.release()
+    close_calls = []
+    monkeypatch.setattr("weather_bot.process_lock.os.close", lambda fd: close_calls.append(fd))
+
+    lock.release()
+
+    assert close_calls == []

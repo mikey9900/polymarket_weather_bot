@@ -75,6 +75,7 @@ def build_analysis_report(
     recent_resolutions = tracker.get_recent_resolutions(limit=250)
     recent_operator_actions = tracker.get_recent_operator_actions(limit=250)
     review_history = tracker.get_position_review_history(limit=5000)
+    shadow_order_intents = tracker.get_recent_shadow_order_intents(limit=5000)
 
     overview = workbook.active
     overview.title = "Overview"
@@ -86,12 +87,14 @@ def build_analysis_report(
         open_positions=open_positions,
         recent_outcomes=recent_outcomes,
         recent_signals=recent_signals,
+        shadow_order_intents=shadow_order_intents,
         recent_operator_actions=recent_operator_actions,
     )
     _build_positions_sheet(workbook.create_sheet("Open Trades"), open_positions, title="Open Trades", status_default="open")
     _build_outcomes_sheet(workbook.create_sheet("Recent Outcomes"), recent_outcomes)
     _build_positions_sheet(workbook.create_sheet("Position Ledger"), recent_positions, title="Position Ledger", status_default="")
     _build_review_history_sheet(workbook.create_sheet("Review History"), review_history)
+    _build_shadow_orders_sheet(workbook.create_sheet("Shadow Orders"), shadow_order_intents)
     _build_signals_sheet(workbook.create_sheet("Recent Signals"), recent_signals)
     _build_resolutions_sheet(workbook.create_sheet("Resolutions"), recent_resolutions)
     _build_operator_sheet(workbook.create_sheet("Operator Log"), recent_operator_actions)
@@ -106,6 +109,7 @@ def build_analysis_report(
         "recent_outcome_count": len(recent_outcomes),
         "recent_signal_count": len(recent_signals),
         "review_history_count": len(review_history),
+        "shadow_order_count": len(shadow_order_intents),
     }
 
 
@@ -118,6 +122,7 @@ def _build_overview_sheet(
     open_positions: list[dict[str, Any]],
     recent_outcomes: list[dict[str, Any]],
     recent_signals: list[dict[str, Any]],
+    shadow_order_intents: list[dict[str, Any]],
     recent_operator_actions: list[dict[str, Any]],
 ) -> None:
     ws.merge_cells("A1:H1")
@@ -185,6 +190,7 @@ def _build_overview_sheet(
             ("Cloud Link", exports.get("last_analysis_report_dropbox_url") or exports.get("last_analysis_bundle_dropbox_url"), "text"),
             ("Mirror JSON", exports.get("dashboard_state_path"), "text"),
             ("Recent Signals", len(recent_signals), "int"),
+            ("Shadow Intents", controls.get("shadow_order_count", len(shadow_order_intents)), "int"),
             ("Open Cards", len(open_positions), "int"),
             ("Closed/Resolved", len(recent_outcomes), "int"),
         ],
@@ -196,7 +202,7 @@ def _build_overview_sheet(
     ws.cell(row=preview_row, column=1).font = SECTION_FONT
     ws.cell(row=preview_row, column=1).alignment = Alignment(horizontal="center")
     quick_lines = [
-        f"Open positions: {len(open_positions)} | Recent outcomes: {len(recent_outcomes)} | Recent signals: {len(recent_signals)}",
+        f"Open positions: {len(open_positions)} | Recent outcomes: {len(recent_outcomes)} | Recent signals: {len(recent_signals)} | Shadow intents: {len(shadow_order_intents)}",
         f"Last operator action: {recent_operator_actions[0]['action'] if recent_operator_actions else 'none'}",
         f"Latest cloud report: {exports.get('last_analysis_report_dropbox_url') or 'not uploaded yet'}",
     ]
@@ -377,6 +383,50 @@ def _build_review_history_sheet(ws, rows: list[dict[str, Any]]) -> None:
         _fill_status(ws.cell(row=idx, column=8), row.get("status"))
         _pnl_style(ws.cell(row=idx, column=12))
         _pnl_style(ws.cell(row=idx, column=13))
+
+
+def _build_shadow_orders_sheet(ws, rows: list[dict[str, Any]]) -> None:
+    _sheet_title(ws, "Shadow Orders", subtitle=f"{len(rows)} rows")
+    shaped = []
+    for row in rows:
+        shaped.append(
+            {
+                **row,
+                "payload_json": json.dumps(row.get("payload") or {}, sort_keys=True),
+            }
+        )
+    columns = [
+        ("When", "created_at", "datetime"),
+        ("Kind", "intent_kind", "text"),
+        ("Mode", "execution_mode", "text"),
+        ("Status", "status", "text"),
+        ("City", "city_slug", "text"),
+        ("Type", "market_type", "text"),
+        ("Date", "event_date", "text"),
+        ("Direction", "direction", "text"),
+        ("Action", "order_action", "text"),
+        ("Outcome", "outcome_side", "text"),
+        ("Intent", "order_intent", "text"),
+        ("Order Type", "order_type", "text"),
+        ("TIF", "time_in_force", "text"),
+        ("Manual", "manual_order_indicator", "text"),
+        ("Target %", "target_price", "percent"),
+        ("Reference %", "reference_price", "percent"),
+        ("Shares", "shares", "number"),
+        ("Notional $", "notional_usd", "currency_plain"),
+        ("Fee $", "estimated_fee_paid", "currency_plain"),
+        ("Score", "decision_final_score", "number"),
+        ("Reason Code", "reason_code", "text"),
+        ("Reason", "reason", "text"),
+        ("Position ID", "position_id", "int"),
+        ("Market Slug", "market_slug", "text"),
+        ("Payload", "payload_json", "text"),
+    ]
+    _write_table(ws, start_row=4, columns=columns, rows=shaped)
+    for idx, row in enumerate(shaped, start=5):
+        _fill_if_text(ws.cell(row=idx, column=8), row.get("direction"))
+        _fill_if_text(ws.cell(row=idx, column=10), row.get("outcome_side"))
+        _fill_shadow_status(ws.cell(row=idx, column=4), row.get("status"))
 
 
 def _report_position_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -571,6 +621,18 @@ def _fill_status(cell, value: Any) -> None:
         cell.fill = RESOLVED_FILL
     elif status == "closed":
         cell.fill = CLOSED_FILL
+
+
+def _fill_shadow_status(cell, value: Any) -> None:
+    status = str(value or "").strip().lower()
+    if status == "mirrored":
+        cell.fill = GOOD_FILL
+        cell.font = GOOD_FONT
+    elif status in {"failed", "rejected", "error"}:
+        cell.fill = BAD_FILL
+        cell.font = BAD_FONT
+    elif status:
+        cell.fill = WARN_FILL
 
 
 def _fill_confidence(cell, value: Any) -> None:

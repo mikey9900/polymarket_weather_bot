@@ -337,6 +337,7 @@ def test_dashboard_control_no_entry_cap_is_legacy_noop(tmp_path: Path):
 
 def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
+    object.__setattr__(config.paper, "execution_mode", "paper_shadow")
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     tracker.ensure_paper_capital(500.0)
     strategy = WeatherStrategyEngine(config, tracker)
@@ -405,20 +406,34 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert "weather_cache.db" in names
     assert "analysis_report.xlsx" in names
     assert "position_review_history.json" in names
+    assert "shadow_order_intents.json" in names
     assert "manifest.json" in names
     assert "scan_runs/20260427T120000_temperature_completed.json" in names
     with zipfile.ZipFile(bundle_path) as archive:
         review_history = json.loads(archive.read("position_review_history.json").decode("utf-8"))
+        shadow_orders = json.loads(archive.read("shadow_order_intents.json").decode("utf-8"))
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
     assert review_history
     assert review_history[0]["event_kind"] in {"review", "close"}
+    assert len(shadow_orders) == 1
+    assert shadow_orders[0]["intent_kind"] == "entry"
+    assert shadow_orders[0]["execution_mode"] == "paper_shadow"
+    assert shadow_orders[0]["status"] == "mirrored"
+    assert manifest["shadow_order_count"] == 1
     workbook = load_workbook(report_path, data_only=True)
     assert "Review History" in workbook.sheetnames
+    assert "Shadow Orders" in workbook.sheetnames
+    shadow_sheet = workbook["Shadow Orders"]
+    assert shadow_sheet["B5"].value == "entry"
+    assert shadow_sheet["C5"].value == "paper_shadow"
+    assert shadow_sheet["D5"].value == "mirrored"
     latest_index = json.loads(latest_index_path.read_text(encoding="utf-8"))
     assert latest_index["label"] == "WEATHER-BOT"
     assert latest_index["latest_bundle"]["local_path"] == str(latest_bundle_path)
     assert latest_index["archive_bundle"]["local_path"] == str(bundle_path)
     assert latest_index["latest_report"]["local_path"] == str(latest_report_path)
     assert latest_index["archive_report"]["local_path"] == str(report_path)
+    assert latest_index["shadow_order_count"] == 1
 
 
 def test_analysis_report_freezes_closed_review_age_at_close_time(tmp_path: Path):
@@ -708,6 +723,11 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "setExecutionMode()" in html
     assert "Paper + Shadow-Live" in html
     assert "Shadow intents" in html
+    assert 'data-cell-id="shadow-orders"' in html
+    assert "SHADOW ORDERS" in html
+    assert "shadowOrderCard" in html
+    assert "renderShadowOrders" in html
+    assert "recent_shadow_orders" in html
     assert "setEdgeLimit()" in html
     assert "setNoEntryCap()" in html
     assert "set_temperature_scan_interval_minutes" in html

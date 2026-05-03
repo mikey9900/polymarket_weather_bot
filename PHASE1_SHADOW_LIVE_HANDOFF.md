@@ -107,6 +107,12 @@ Dashboard state now includes:
 - `controls.last_shadow_order_at`
 - `recent_shadow_orders`
 
+Analysis exports now include:
+
+- `shadow_order_intents.json` in the analysis bundle
+- `shadow_order_count` in the bundle manifest and latest index
+- a `Shadow Orders` sheet in `analysis_report.xlsx`
+
 ## Dashboard / HA Changes
 
 In the `STRATEGIES` block:
@@ -115,6 +121,8 @@ In the `STRATEGIES` block:
 - current execution-mode readout
 - shadow intent counts
 
+The dashboard now also has a dedicated `SHADOW ORDERS` panel showing recent mirrored entry/exit intents.
+
 This is phase one only. It is still not a live executor.
 
 ## Verification
@@ -122,19 +130,19 @@ This is phase one only. It is still not a live executor.
 Passed before push:
 
 ```text
-python -m pytest -q tests/test_tracker_strategy.py tests/test_runtime_dashboard.py
-92 passed in 11.98s
+python -m pytest -q
+131 passed in 18.73s
 
-python -m pytest -q tests/test_ha_version_guard.py
-6 passed in 0.20s
+python -m compileall -q weather_bot tests
+passed
 ```
 
 ## Add-on Versions
 
-This handoff ships with:
+This handoff now ships with:
 
-- weather bot add-on: `3.3.7`
-- weather codex add-on: `0.3.7`
+- weather bot add-on: `3.3.8`
+- weather codex add-on: `0.3.8`
 
 ## What Did Not Ship Yet
 
@@ -145,8 +153,6 @@ Not in this phase:
 - manual-confirm live mode
 - auto-live mode
 - reconciliation against a real trading account
-- dedicated shadow-order card/panel in the UI
-- bundle/report export sections specifically for shadow intents
 
 ## Recommended Next Steps
 
@@ -155,9 +161,7 @@ Best next steps after this pull:
 1. Update both add-ons in HA.
 2. Switch execution mode to `paper_shadow`.
 3. Let it run and collect shadow intent telemetry.
-4. Add a dedicated shadow-order dashboard panel.
-5. Add bundle/report export coverage for `shadow_order_intents`.
-6. Build Phase 2 manual-confirm live scaffolding after that.
+4. Build Phase 2 manual-confirm live scaffolding after that.
 
 ## Pull-On-Other-PC Notes
 

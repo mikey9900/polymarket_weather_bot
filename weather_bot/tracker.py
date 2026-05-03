@@ -518,13 +518,16 @@ class WeatherTracker:
             self.conn.commit()
             return int(cursor.lastrowid)
 
-    def get_recent_shadow_order_intents(self, *, limit: int = 20, intent_kind: str | None = None) -> list[dict[str, Any]]:
+    def get_recent_shadow_order_intents(self, *, limit: int | None = 20, intent_kind: str | None = None) -> list[dict[str, Any]]:
         params: list[Any] = []
         where = ""
         if intent_kind:
             where = "WHERE intent_kind = ?"
             params.append(str(intent_kind))
-        params.append(max(1, int(limit)))
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ?"
+            params.append(max(1, int(limit)))
         with self._lock:
             rows = self.conn.execute(
                 f"""
@@ -532,7 +535,7 @@ class WeatherTracker:
                 FROM shadow_order_intents
                 {where}
                 ORDER BY created_at DESC, id DESC
-                LIMIT ?
+                {limit_clause}
                 """,
                 tuple(params),
             ).fetchall()

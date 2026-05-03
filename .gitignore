@@ -1,4 +1,5 @@
 ﻿.env
+.venv/
 __pycache__/
 *.pyc
 scanner/seen_events.json
