@@ -436,6 +436,54 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert latest_index["shadow_order_count"] == 1
 
 
+def test_live_api_serves_latest_analysis_report_download(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    signal = _signal("report-download-1")
+    result = strategy.process_signals([signal], auto_trade_enabled=True)[0]
+    assert result.position is not None
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    analysis_exporter = AnalysisBundleExporter(
+        tracker=tracker,
+        runtime=runtime,
+        bundle_root=tmp_path / "analysis_bundle",
+    )
+    control_plane = ControlPlane(runtime, tracker, analysis_exporter=analysis_exporter)
+    dashboard = DashboardStateService(
+        tracker=tracker,
+        runtime=runtime,
+        control_plane=control_plane,
+        state_export_path=tmp_path / "dashboard_state.json",
+        analysis_exporter=analysis_exporter,
+    )
+    analysis_exporter.bind_dashboard_state(
+        snapshot_refresher=dashboard.refresh_once,
+        snapshot_getter=dashboard.get_state_threadsafe,
+    )
+
+    export_response = dashboard.apply_control_threadsafe({"action": "export_analysis_bundle"})
+    assert export_response["ok"] is True
+
+    server = LiveApiServer(dashboard, host="127.0.0.1", port=0)
+    server.start_threaded()
+    try:
+        port = int(server._server.server_address[1])  # type: ignore[union-attr]
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/export/latest/report", timeout=5) as response:
+            status = response.status
+            content_type = response.headers.get("Content-Type")
+            disposition = response.headers.get("Content-Disposition")
+            payload_prefix = response.read(4)
+    finally:
+        server.stop_threaded()
+
+    assert status == 200
+    assert payload_prefix == b"PK\x03\x04"
+    assert content_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert disposition == 'attachment; filename="WEATHER-BOT_latest_report.xlsx"'
+
+
 def test_analysis_report_freezes_closed_review_age_at_close_time(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
@@ -703,6 +751,9 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "copyExportPath" in html
     assert "copyBundlePath" in html
     assert "copyCloudLink" in html
+    assert "latestExportUrl" in html
+    assert "downloadLatestExport" in html
+    assert "./api/export/latest/" in html
     assert "Showing ${shownStart}-${shownEnd} of ${total} open trades" in html
     assert "shiftOpenTradePage" in html
     assert 'id="trade-pager-top"' in html
@@ -748,7 +799,9 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "LAST 7D" in html
     assert "LAST 30D" in html
     assert "YES / NO WIN-LOSS BARS" in html
-    assert "EXPORT BUNDLE" in html
+    assert "EXPORT XLSX" in html
+    assert "DOWNLOAD XLSX" in html
+    assert "DOWNLOAD ZIP" in html
     assert "COPY BUNDLE PATH" in html
     assert "COPY CLOUD LINK" in html
 

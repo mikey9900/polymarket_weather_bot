@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,6 +12,36 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 
 _DASHBOARD_PATH = Path(__file__).with_name("live_api_dashboard.html")
+_LATEST_EXPORTS = {
+    "bundle": (
+        "latest_analysis_bundle_path",
+        "application/zip",
+    ),
+    "zip": (
+        "latest_analysis_bundle_path",
+        "application/zip",
+    ),
+    "report": (
+        "latest_analysis_report_path",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
+    "xlsx": (
+        "latest_analysis_report_path",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
+    "excel": (
+        "latest_analysis_report_path",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
+    "index": (
+        "latest_analysis_index_path",
+        "application/json; charset=utf-8",
+    ),
+    "json": (
+        "latest_analysis_index_path",
+        "application/json; charset=utf-8",
+    ),
+}
 
 
 def render_dashboard_html() -> str:
@@ -62,6 +93,12 @@ class LiveApiServer:
                     return
                 if route == "/api/history":
                     self._send_json(dashboard_state.get_history_threadsafe())
+                    return
+                if route == "/api/export/latest":
+                    self._send_latest_export("report")
+                    return
+                if route.startswith("/api/export/latest/"):
+                    self._send_latest_export(route.rsplit("/", 1)[-1])
                     return
                 self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -119,6 +156,55 @@ class LiveApiServer:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _send_latest_export(self, kind: str) -> None:
+                normalized = unquote(str(kind or "report")).strip().lower()
+                spec = _LATEST_EXPORTS.get(normalized)
+                if spec is None:
+                    self._send_json(
+                        {
+                            "error": "unknown_export",
+                            "message": "Unknown export type. Use report, bundle, or index.",
+                        },
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                export_key, content_type = spec
+                exports = _current_export_status(dashboard_state)
+                path_value = exports.get(export_key)
+                if not path_value:
+                    self._send_json(
+                        {
+                            "error": "export_missing",
+                            "message": f"No latest {normalized} export path is available yet. Run Export XLSX first.",
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                path = Path(str(path_value))
+                if not path.exists() or not path.is_file():
+                    self._send_json(
+                        {
+                            "error": "export_missing",
+                            "message": f"Latest {normalized} export file is missing on disk. Run Export XLSX again.",
+                            "path": str(path),
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                self._send_file(path, content_type=content_type)
+
+            def _send_file(self, path: Path, *, content_type: str) -> None:
+                filename = _attachment_filename(path.name)
+                size = path.stat().st_size
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(size))
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self._send_cache_headers()
+                self.end_headers()
+                with path.open("rb") as handle:
+                    shutil.copyfileobj(handle, self.wfile)
+
             def _send_cache_headers(self) -> None:
                 self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
                 self.send_header("Pragma", "no-cache")
@@ -132,3 +218,18 @@ def _control_action_from_path(path: str) -> str:
     if not path.startswith(prefix):
         return ""
     return unquote(path[len(prefix):]).strip().lower()
+
+
+def _current_export_status(dashboard_state) -> dict:
+    state = dashboard_state.get_state_threadsafe()
+    exports = dict((state or {}).get("exports") or {})
+    if exports:
+        return exports
+    analysis_exporter = getattr(dashboard_state, "analysis_exporter", None)
+    if analysis_exporter is not None:
+        return dict(analysis_exporter.status())
+    return {}
+
+
+def _attachment_filename(filename: str) -> str:
+    return "".join(ch for ch in str(filename or "export") if ch.isalnum() or ch in {" ", ".", "_", "-"}).strip() or "export"
