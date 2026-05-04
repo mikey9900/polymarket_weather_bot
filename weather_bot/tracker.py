@@ -1435,6 +1435,9 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
         "decision_metadata": decision_metadata,
         "entry_price": pricing_metrics["entry_price"],
         "entry_reference_price": pricing_metrics["entry_reference_price"],
+        "entry_market_probability": pricing_metrics["entry_reference_price"],
+        "entry_model_probability": pricing_metrics["entry_model_probability"],
+        "entry_yes_forecast_probability": _bounded_probability(payload.get("signal_forecast_prob")),
         "entry_fee_paid": pricing_metrics["entry_fee_paid"],
         "entry_fee_bps": pricing_metrics["entry_fee_bps"],
         "entry_slippage_bps": pricing_metrics["entry_slippage_bps"],
@@ -1784,6 +1787,7 @@ def _dashboard_pricing_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     mark_to_market_pnl = round((net_liquidation_value or 0.0) - cost, 6) if mark_price is not None else None
     return {
         "entry_reference_price": entry_reference_price,
+        "entry_model_probability": default_outcome_probability,
         "entry_price": entry_price,
         "entry_fee_paid": entry_fee_paid,
         "entry_fee_bps": entry_fee_bps,

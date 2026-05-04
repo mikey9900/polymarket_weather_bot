@@ -378,7 +378,7 @@ def test_tracker_close_paper_position_preserves_explicit_zero_exit_price(tmp_pat
     assert latest_trade["exit_reference_price"] == 0.0
 
 
-def test_no_stop_loss_closes_temperature_no_position_at_negative_four_dollars(tmp_path: Path):
+def test_no_stop_loss_holds_temperature_no_when_model_still_supports_position(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     tracker.ensure_paper_capital(1000.0)
@@ -412,9 +412,47 @@ def test_no_stop_loss_closes_temperature_no_position_at_negative_four_dollars(tm
 
     decision = strategy.evaluate_position_exit(position, signal=review_signal)
 
+    assert decision.should_close is False
+    assert decision.reason_code == "hold"
+
+
+def test_no_stop_loss_closes_temperature_no_when_price_bad_and_model_deteriorates(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    opened = strategy.process_signals(
+        [
+            _make_signal(
+                key="no-stop-loss-deteriorated",
+                direction="NO",
+                market_prob=0.30,
+                forecast_prob=0.10,
+                edge=-0.20,
+                edge_abs=0.20,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert opened.position is not None
+    position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+    review_signal = _make_signal(
+        key="no-stop-loss-deteriorated-review",
+        direction="NO",
+        market_slug=position["market_slug"],
+        market_prob=0.80,
+        forecast_prob=0.35,
+        edge=-0.45,
+        edge_abs=0.45,
+    )
+
+    decision = strategy.evaluate_position_exit(position, signal=review_signal)
+
     assert decision.should_close is True
     assert decision.reason_code == "no_stop_loss"
-    assert "NO stop loss hit" in decision.reason
+    assert "model probability fell" in decision.reason
 
 
 def test_no_stop_loss_ignores_no_entries_below_price_floor(tmp_path: Path):
@@ -491,6 +529,66 @@ def test_no_stop_loss_does_not_apply_to_yes_positions(tmp_path: Path):
 
     assert decision.should_close is False
     assert decision.reason_code == "hold"
+
+
+def test_missing_signal_holds_until_forecast_aware_review(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    opened = strategy.process_signals([_make_signal(key="missing-review-hold")], auto_trade_enabled=True)[0]
+
+    assert opened.position is not None
+    position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+
+    decision = strategy.evaluate_position_exit(position, signal=None, allow_close_on_missing_signal=True)
+
+    assert decision.should_close is False
+    assert decision.reason_code == "missing_signal"
+    assert "forecast-aware review" in decision.reason
+
+
+def test_forecast_aware_exit_requires_two_consecutive_bad_reviews(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+
+    opened = strategy.process_signals([_make_signal(key="two-bad-review")], auto_trade_enabled=True)[0]
+
+    assert opened.position is not None
+    position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+    review_signal = _make_signal(
+        key="two-bad-review-review",
+        market_slug=position["market_slug"],
+        market_prob=0.50,
+        forecast_prob=0.52,
+        edge=0.02,
+        edge_abs=0.02,
+    )
+
+    first = strategy.evaluate_position_exit(position, signal=review_signal)
+    assert first.should_close is False
+    assert first.reason_code == "edge_near_fair"
+    assert "First bad review" in first.reason
+
+    tracker.update_paper_position_review(
+        int(position["id"]),
+        mark_price=first.mark_price,
+        mark_probability=first.mark_probability,
+        edge_abs=first.edge_abs,
+        final_score=first.final_score,
+        reason=first.reason,
+        reason_code=first.reason_code,
+    )
+    reviewed_position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+
+    second = strategy.evaluate_position_exit(reviewed_position, signal=review_signal)
+
+    assert second.should_close is True
+    assert second.reason_code == "edge_near_fair"
+    assert "Remaining model edge" in second.reason
 
 
 def test_tracker_records_position_review_history_for_review_and_close(tmp_path: Path):

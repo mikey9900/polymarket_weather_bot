@@ -197,6 +197,10 @@ class ControlPlane:
                 "paper_temperature_no_stop_loss_min_entry_price",
                 getattr(self.runtime.strategy_engine, "paper_temperature_no_stop_loss_min_entry_price", None),
             ),
+            "paper_temperature_no_stop_loss_min_probability_drop": runtime_status.get(
+                "paper_temperature_no_stop_loss_min_probability_drop",
+                getattr(self.runtime.strategy_engine, "paper_temperature_no_stop_loss_min_probability_drop", None),
+            ),
             "shadow_order_count": shadow_summary.get("total_count", 0),
             "shadow_entry_count": shadow_summary.get("entry_count", 0),
             "shadow_exit_count": shadow_summary.get("exit_count", 0),

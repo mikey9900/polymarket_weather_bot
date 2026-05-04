@@ -127,6 +127,16 @@ def test_load_config_accepts_temperature_no_stop_loss_min_entry_price_ha_overrid
     assert config.strategy.temperature.no_stop_loss_min_entry_price == 0.50
 
 
+def test_load_config_accepts_temperature_no_stop_loss_min_probability_drop_ha_override(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(json.dumps({"temperature_no_stop_loss_min_probability_drop": 0.20}), encoding="utf-8")
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.strategy.temperature.no_stop_loss_min_probability_drop == 0.20
+
+
 def test_temperature_market_scope_city_groups_are_split_cleanly():
     north_america = set(cities_for_temperature_market_scope("north_america"))
     international = set(cities_for_temperature_market_scope("international"))
@@ -1727,13 +1737,60 @@ def test_runtime_review_closes_position_when_targeted_refresh_loses_edge(tmp_pat
         },
     )
 
-    summary = runtime.review_open_positions(reason="test_review_close")
+    first = runtime.review_open_positions(reason="test_review_close_first")
+    first_positions = tracker.get_dashboard_paper_positions(limit=12)
+    second = runtime.review_open_positions(reason="test_review_close_second")
+    positions = tracker.get_dashboard_paper_positions(limit=12)
+
+    assert first["reviewed"] == 1
+    assert first["closed"] == 0
+    assert first_positions[0]["status"] == "open"
+    assert "First bad review" in first_positions[0]["mark_reason"]
+    assert second["reviewed"] == 1
+    assert second["closed"] == 1
+    assert positions[0]["status"] == "closed"
+    assert "Remaining model edge" in positions[0]["exit_reason"]
+
+
+def test_runtime_review_holds_position_when_review_edge_is_below_entry_size_but_still_positive(tmp_path: Path, monkeypatch):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.process_signals([_signal("review-hold-small-edge")], auto_trade_enabled=True)
+    runtime = WeatherRuntime(
+        config=config,
+        tracker=tracker,
+        strategy_engine=strategy,
+        telegram=TelegramClient(),
+        temperature_scanner=lambda *, limit=300: (_ for _ in ()).throw(AssertionError("temperature scanner should not run")),
+        price_fetcher=lambda slug: 0.50,
+    )
+
+    monkeypatch.setattr(
+        "weather_bot.runtime.get_both_bucket_probabilities",
+        lambda city_slug, target_date, buckets, provider_context="scheduled": {
+            "wu": None,
+            "openmeteo": {buckets[0]["label"]: 0.58},
+            "vc": None,
+            "noaa": None,
+            "weatherapi": None,
+            "wu_temp": None,
+            "om_temp": 72.0,
+            "vc_temp": None,
+            "noaa_temp": None,
+            "weatherapi_temp": None,
+            "unit": "F",
+        },
+    )
+
+    summary = runtime.review_open_positions(reason="test_review_hold_small_edge")
     positions = tracker.get_dashboard_paper_positions(limit=12)
 
     assert summary["reviewed"] == 1
-    assert summary["closed"] == 1
-    assert positions[0]["status"] == "closed"
-    assert "No fresh qualifying signal" in positions[0]["exit_reason"]
+    assert summary["closed"] == 0
+    assert positions[0]["status"] == "open"
+    assert positions[0]["mark_edge_abs"] == 0.08
 
 
 def test_runtime_review_reuses_cached_provider_payload_but_refreshes_market_price(tmp_path: Path, monkeypatch):
@@ -1743,7 +1800,7 @@ def test_runtime_review_reuses_cached_provider_payload_but_refreshes_market_pric
     strategy = WeatherStrategyEngine(config, tracker)
     strategy.process_signals([_signal("cached-review-1")], auto_trade_enabled=True)
     provider_calls: list[tuple[str, str, tuple[str, ...]]] = []
-    market_probs = iter([0.50, 0.79])
+    market_probs = iter([0.50, 0.79, 0.79])
 
     runtime = WeatherRuntime(
         config=config,
@@ -1774,12 +1831,15 @@ def test_runtime_review_reuses_cached_provider_payload_but_refreshes_market_pric
 
     first = runtime.review_open_positions(reason="test_cached_review_first")
     second = runtime.review_open_positions(reason="test_cached_review_second")
+    third = runtime.review_open_positions(reason="test_cached_review_third")
     latest_trade = tracker.get_dashboard_paper_positions(limit=12)[0]
 
     assert first["reviewed"] == 1
     assert first["closed"] == 0
     assert second["reviewed"] == 1
-    assert second["closed"] == 1
+    assert second["closed"] == 0
+    assert third["reviewed"] == 1
+    assert third["closed"] == 1
     assert latest_trade["status"] == "closed"
     assert provider_calls == [("nyc", "2026-04-25", ("70-71F",))]
 
@@ -1874,9 +1934,11 @@ def test_runtime_review_batch_reuses_cached_payload_when_positions_change_and_re
     fallback_batch, fallback_refresh = runtime._get_review_weather_batch("temperature", expanded_positions)
 
     assert seeded_refresh is False
-    assert len(seeded_batch.signals) == 1
+    assert len(seeded_batch.signals) == 2
+    assert any(item.raw_payload.get("review_only") for item in seeded_batch.signals)
     assert fallback_refresh is False
-    assert len(fallback_batch.signals) == 1
+    assert len(fallback_batch.signals) == 2
+    assert any(item.raw_payload.get("review_only") for item in fallback_batch.signals)
     assert requested_labels == [("70-71F",), ("70-71F", "72-73F")]
     assert runtime._open_position_weather_cache["temperature"]["scope"] == "review"
 

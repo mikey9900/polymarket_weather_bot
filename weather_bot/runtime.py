@@ -25,7 +25,7 @@ from scanner.weather_event_scanner import normalize_temperature_market_scope
 
 from .execution import execution_mode_records_shadow_orders, normalize_execution_mode
 from .messages import format_resolution_message, format_scan_summary, format_signal_message
-from .models import ResolutionOutcome, ScanBatch, WeatherSignal
+from .models import ForecastSnapshot, ResolutionOutcome, ScanBatch, WeatherSignal
 from .precipitation_signals import _build_precip_signal, scan_precipitation_signals
 from .temperature import _build_temperature_signal, scan_temperature_signals
 
@@ -112,6 +112,11 @@ class WeatherRuntime:
                 self.strategy_engine,
                 "paper_temperature_no_stop_loss_min_entry_price",
                 getattr(self.config.strategy.temperature, "no_stop_loss_min_entry_price", None),
+            ),
+            "paper_temperature_no_stop_loss_min_probability_drop": getattr(
+                self.strategy_engine,
+                "paper_temperature_no_stop_loss_min_probability_drop",
+                getattr(self.config.strategy.temperature, "no_stop_loss_min_probability_drop", None),
             ),
             "scan_in_progress": False,
             "scan_queue_depth": 0,
@@ -211,6 +216,11 @@ class WeatherRuntime:
             self.strategy_engine,
             "paper_temperature_no_stop_loss_min_entry_price",
             getattr(self.config.strategy.temperature, "no_stop_loss_min_entry_price", None),
+        )
+        self._state["paper_temperature_no_stop_loss_min_probability_drop"] = getattr(
+            self.strategy_engine,
+            "paper_temperature_no_stop_loss_min_probability_drop",
+            getattr(self.config.strategy.temperature, "no_stop_loss_min_probability_drop", None),
         )
         if self._reconcile_boot_state():
             self.tracker.set_runtime_state("runtime_status", dict(self._state))
@@ -1002,32 +1012,39 @@ class WeatherRuntime:
         if not active_markets or not signals:
             return {}
 
-        base_signals: dict[str, WeatherSignal] = {}
+        base_signals: dict[tuple[str, str], WeatherSignal] = {}
         for signal in signals:
             market_slug = str(signal.market_slug or "").strip()
             if not market_slug or market_slug not in active_markets:
                 continue
-            current = base_signals.get(market_slug)
+            direction = str(signal.direction or "").upper()
+            if direction not in {"YES", "NO"}:
+                continue
+            key = (market_slug, direction)
+            current = base_signals.get(key)
             if current is None or float(signal.edge_abs or 0.0) > float(current.edge_abs or 0.0):
-                base_signals[market_slug] = signal
+                base_signals[key] = signal
         if not base_signals:
             return {}
 
         signal_map: dict[tuple[str, str], WeatherSignal] = {}
         if not refresh_market_prices:
-            for market_slug, base_signal in base_signals.items():
+            for (market_slug, _direction), base_signal in base_signals.items():
                 signal_map[(market_slug, str(base_signal.direction or "").upper())] = base_signal
             return signal_map
 
-        market_probs = self._fetch_review_market_probs(base_signals.keys())
-        for market_slug, base_signal in base_signals.items():
+        market_probs = self._fetch_review_market_probs({market_slug for market_slug, _direction in base_signals})
+        for (market_slug, _direction), base_signal in base_signals.items():
             market_prob = market_probs.get(market_slug)
             if market_prob is None:
                 market_prob = _as_probability(base_signal.market_prob)
             if market_prob is None:
                 continue
             review_signal = _build_review_signal(base_signal, market_prob)
-            signal_map[(market_slug, str(review_signal.direction or "").upper())] = review_signal
+            key = (market_slug, str(review_signal.direction or "").upper())
+            current = signal_map.get(key)
+            if current is None or float(review_signal.edge_abs or 0.0) > float(current.edge_abs or 0.0):
+                signal_map[key] = review_signal
         return signal_map
 
     def _fetch_review_market_probs(self, market_slugs) -> dict[str, float | None]:
@@ -1180,6 +1197,7 @@ class WeatherRuntime:
             "city_slug": str(city_slug or ""),
             "event_date": str(event_date or ""),
             "label": label,
+            "position_direction": str(position.get("direction") or "").upper(),
             "bucket": dict(bucket),
             "liquidity": float(position.get("liquidity") or 0.0),
             "fallback_market_prob": self._review_fallback_market_prob(position),
@@ -1252,6 +1270,14 @@ class WeatherRuntime:
                         created_at=created_at,
                     )
                 )
+            review_signal = self._build_temperature_position_review_signal(
+                item,
+                market_prob=market_prob,
+                created_at=created_at,
+                event_end=event_end,
+            )
+            if review_signal is not None:
+                signals.append(review_signal)
 
         signals.sort(key=lambda signal: signal.score, reverse=True)
         finished_at = datetime.now(timezone.utc).isoformat()
@@ -1309,6 +1335,13 @@ class WeatherRuntime:
             )
             for discrepancy in discrepancies:
                 signals.append(_build_precip_signal(discrepancy, created_at))
+            review_signal = self._build_precipitation_position_review_signal(
+                item,
+                market_prob=market_prob,
+                created_at=created_at,
+            )
+            if review_signal is not None:
+                signals.append(review_signal)
 
         signals.sort(key=lambda signal: signal.score, reverse=True)
         finished_at = datetime.now(timezone.utc).isoformat()
@@ -1323,6 +1356,75 @@ class WeatherRuntime:
             finished_at=finished_at,
             error_count=error_count,
             error_samples=error_samples,
+        )
+
+    def _build_temperature_position_review_signal(
+        self,
+        item: dict[str, Any],
+        *,
+        market_prob: float,
+        created_at: datetime,
+        event_end: datetime | None,
+    ) -> WeatherSignal | None:
+        forecast_data = item.get("forecast_data")
+        if not isinstance(forecast_data, dict):
+            return None
+        probabilities = _review_source_probabilities(
+            forecast_data,
+            str(item.get("label") or ""),
+            (
+                ("wu", "wu"),
+                ("openmeteo", "openmeteo"),
+                ("visual_crossing", "vc"),
+                ("noaa", "noaa"),
+                ("weatherapi", "weatherapi"),
+            ),
+        )
+        return _build_position_review_signal(
+            item,
+            market_type="temperature",
+            market_prob=market_prob,
+            probabilities=probabilities,
+            unit=str(forecast_data.get("unit") or "F"),
+            created_at=created_at,
+            event_end=event_end,
+            observed_value=None,
+            om_temp=_as_float(forecast_data.get("om_temp")),
+            vc_temp=_as_float(forecast_data.get("vc_temp")),
+            wu_temp=_as_float(forecast_data.get("wu_temp")),
+            noaa_temp=_as_float(forecast_data.get("noaa_temp")),
+            weatherapi_temp=_as_float(forecast_data.get("weatherapi_temp")),
+        )
+
+    def _build_precipitation_position_review_signal(
+        self,
+        item: dict[str, Any],
+        *,
+        market_prob: float,
+        created_at: datetime,
+    ) -> WeatherSignal | None:
+        forecast_data = item.get("forecast_data")
+        if not isinstance(forecast_data, dict):
+            return None
+        probabilities = _review_source_probabilities(
+            forecast_data,
+            str(item.get("label") or ""),
+            (
+                ("openmeteo", "openmeteo"),
+                ("visual_crossing", "vc"),
+            ),
+        )
+        return _build_position_review_signal(
+            item,
+            market_type="precipitation",
+            market_prob=market_prob,
+            probabilities=probabilities,
+            unit=str(forecast_data.get("unit") or "in"),
+            created_at=created_at,
+            event_end=None,
+            observed_value=_as_float(forecast_data.get("observed")),
+            om_temp=_as_float(forecast_data.get("om_temp")),
+            vc_temp=_as_float(forecast_data.get("vc_temp")),
         )
 
     def _review_batch_market_probability(
@@ -1641,23 +1743,133 @@ def _normalize_scan_interval_minutes(value: Any) -> int:
 
 def _build_review_signal(signal: WeatherSignal, market_prob: float) -> WeatherSignal:
     bounded_market_prob = max(0.0, min(1.0, float(market_prob)))
-    yes_edge = float(signal.forecast_prob or 0.0) - bounded_market_prob
-    direction = "YES" if yes_edge >= 0 else "NO"
-    edge_abs = abs(yes_edge)
     raw_payload = dict(signal.raw_payload)
+    forced_direction = str(raw_payload.get("review_position_direction") or "").upper()
+    if forced_direction in {"YES", "NO"}:
+        direction = forced_direction
+        position_edge = _contract_edge(direction, bounded_market_prob, signal.forecast_prob)
+        edge = position_edge if position_edge is not None else 0.0
+        edge_abs = max(0.0, edge)
+    else:
+        yes_edge = float(signal.forecast_prob or 0.0) - bounded_market_prob
+        direction = "YES" if yes_edge >= 0 else "NO"
+        edge = abs(yes_edge)
+        edge_abs = abs(yes_edge)
     raw_payload["market_prob"] = bounded_market_prob
     raw_payload["direction"] = direction
-    raw_payload["discrepancy"] = edge_abs
+    raw_payload["discrepancy"] = edge
     return replace(
         signal,
         direction=direction,
         market_prob=bounded_market_prob,
-        edge=edge_abs,
+        edge=edge,
         edge_abs=edge_abs,
         edge_size=_edge_size_label(edge_abs),
         score=_review_signal_score(signal, edge_abs=edge_abs),
         raw_payload=raw_payload,
     )
+
+
+def _review_source_probabilities(
+    forecast_data: dict[str, Any],
+    label: str,
+    source_keys: tuple[tuple[str, str], ...],
+) -> dict[str, float | None]:
+    probabilities: dict[str, float | None] = {}
+    for output_key, provider_key in source_keys:
+        provider_payload = forecast_data.get(provider_key)
+        probability = None
+        if isinstance(provider_payload, dict):
+            probability = _as_probability(provider_payload.get(label))
+        probabilities[output_key] = probability
+    return probabilities
+
+
+def _build_position_review_signal(
+    item: dict[str, Any],
+    *,
+    market_type: str,
+    market_prob: float,
+    probabilities: dict[str, float | None],
+    unit: str,
+    created_at: datetime,
+    event_end: datetime | None,
+    observed_value: float | None,
+    wu_temp: float | None = None,
+    om_temp: float | None = None,
+    vc_temp: float | None = None,
+    noaa_temp: float | None = None,
+    weatherapi_temp: float | None = None,
+) -> WeatherSignal | None:
+    available = [float(value) for value in probabilities.values() if value is not None]
+    if not available:
+        return None
+    forecast_prob = round(sum(available) / len(available), 6)
+    market_prob = max(0.0, min(1.0, float(market_prob)))
+    position_direction = str(item.get("position_direction") or "").upper()
+    if position_direction not in {"YES", "NO"}:
+        return None
+    position_edge = _contract_edge(position_direction, market_prob, forecast_prob)
+    if position_edge is None:
+        return None
+    positive_edge = max(0.0, position_edge)
+    dispersion = max(available) - min(available) if len(available) >= 2 else 0.0
+    time_to_resolution_s = None
+    if event_end is not None:
+        time_to_resolution_s = max(0.0, (event_end - created_at).total_seconds())
+    raw_payload = {
+        "review_only": True,
+        "review_position_direction": position_direction,
+        "event_title": item.get("event_title"),
+        "label": item.get("label"),
+        "direction": position_direction,
+        "market_prob": round(market_prob, 6),
+        "forecast_prob": forecast_prob,
+        "discrepancy": round(position_edge, 6),
+        "position_edge": round(position_edge, 6),
+    }
+    snapshot = ForecastSnapshot(
+        market_type=market_type,
+        city_slug=str(item.get("city_slug") or ""),
+        event_date=str(item.get("event_date") or ""),
+        unit=unit,
+        observed_value=observed_value,
+        wu_temp=wu_temp,
+        om_temp=om_temp,
+        vc_temp=vc_temp,
+        noaa_temp=noaa_temp,
+        weatherapi_temp=weatherapi_temp,
+        source_probabilities=probabilities,
+    )
+    signal = WeatherSignal(
+        signal_key=(
+            f"{market_type}:review:{item.get('market_slug') or item.get('event_slug')}:"
+            f"{position_direction}:{created_at.strftime('%Y%m%dT%H%M%S')}"
+        ),
+        market_type=market_type,
+        event_title=str(item.get("event_title") or "Unknown"),
+        market_slug=str(item.get("market_slug") or ""),
+        event_slug=str(item.get("event_slug") or ""),
+        city_slug=str(item.get("city_slug") or ""),
+        event_date=str(item.get("event_date") or ""),
+        label=str(item.get("label") or ""),
+        direction=position_direction,
+        market_prob=market_prob,
+        forecast_prob=forecast_prob,
+        edge=round(position_edge, 6),
+        edge_abs=round(positive_edge, 6),
+        edge_size=_edge_size_label(positive_edge),
+        confidence="review",
+        source_count=len(available),
+        liquidity=float(item.get("liquidity") or 0.0),
+        time_to_resolution_s=time_to_resolution_s,
+        source_dispersion_pct=round(dispersion, 6),
+        score=0.0,
+        forecast_snapshot=snapshot,
+        raw_payload=raw_payload,
+        created_at=created_at.isoformat(),
+    )
+    return replace(signal, score=_review_signal_score(signal, edge_abs=positive_edge))
 
 
 def _review_signal_score(signal: WeatherSignal, *, edge_abs: float) -> float:
@@ -1694,6 +1906,21 @@ def _edge_size_label(edge_abs: float) -> str:
     if edge_abs >= 0.1:
         return "medium"
     return "small"
+
+
+def _contract_probability(direction: str, yes_probability: float | None) -> float | None:
+    raw = _as_probability(yes_probability)
+    if raw is None:
+        return None
+    return raw if str(direction or "").upper() == "YES" else round(1.0 - raw, 6)
+
+
+def _contract_edge(direction: str, yes_market_probability: float | None, yes_forecast_probability: float | None) -> float | None:
+    mark = _contract_probability(direction, yes_market_probability)
+    model = _contract_probability(direction, yes_forecast_probability)
+    if mark is None or model is None:
+        return None
+    return round(model - mark, 6)
 
 
 def _as_float(value: Any) -> float | None:

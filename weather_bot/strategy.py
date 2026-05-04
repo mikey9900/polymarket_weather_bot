@@ -36,6 +36,15 @@ class PositionExitDecision:
     edge_abs: float | None
 
 
+CONFIRMED_REVIEW_EXIT_CODES = {
+    "edge_near_fair",
+    "score_breakdown",
+    "stale_signal",
+    "dispersion_risk",
+    "time_risk",
+}
+
+
 class WeatherStrategyEngine:
     def __init__(self, config: WeatherBotConfig, tracker: WeatherTracker, research_provider=None):
         self.config = config
@@ -145,6 +154,10 @@ class WeatherStrategyEngine:
         return _as_float(getattr(self.config.strategy.temperature, "no_stop_loss_min_entry_price", None))
 
     @property
+    def paper_temperature_no_stop_loss_min_probability_drop(self) -> float | None:
+        return _as_float(getattr(self.config.strategy.temperature, "no_stop_loss_min_probability_drop", None))
+
+    @property
     def paper_temperature_max_no_entry_price_override(self) -> float | None:
         return None
 
@@ -243,6 +256,7 @@ class WeatherStrategyEngine:
             mark_price=mark_price,
             mark_probability=mark_probability,
             edge_abs=edge_abs,
+            current_signal_available=signal is not None,
         )
         if stop_loss_decision is not None:
             return stop_loss_decision
@@ -250,14 +264,29 @@ class WeatherStrategyEngine:
         if signal is None:
             reason = "No fresh qualifying signal in the latest clean review."
             return PositionExitDecision(
-                should_close=allow_close_on_missing_signal,
-                reason=reason if allow_close_on_missing_signal else "No matching signal; holding until a clean review confirms the edge is gone.",
+                should_close=False,
+                reason=f"{reason} Holding until a forecast-aware review confirms the edge is gone.",
                 reason_code="missing_signal",
                 final_score=final_score,
                 signal_age_hours=signal_age_hours,
                 mark_price=mark_price,
                 mark_probability=mark_probability,
                 edge_abs=edge_abs,
+            )
+
+        if edge_abs is not None and edge_abs <= thresholds.exit_near_fair_edge_abs:
+            return self._confirm_review_exit(
+                position,
+                PositionExitDecision(
+                    should_close=True,
+                    reason=f"Remaining model edge {edge_abs:.2%} is at or below the near-fair threshold {thresholds.exit_near_fair_edge_abs:.2%}.",
+                    reason_code="edge_near_fair",
+                    final_score=final_score,
+                    signal_age_hours=signal_age_hours,
+                    mark_price=mark_price,
+                    mark_probability=mark_probability,
+                    edge_abs=edge_abs,
+                ),
             )
 
         if profile is not None and str(profile["policy_action"] or "") == "paper_blocked":
@@ -273,51 +302,48 @@ class WeatherStrategyEngine:
             )
 
         if final_score is not None and final_score < thresholds.exit_min_score:
-            return PositionExitDecision(
-                should_close=True,
-                reason=f"Final score {final_score:.2f} dropped below the exit floor {thresholds.exit_min_score:.2f}.",
-                reason_code="score_breakdown",
-                final_score=final_score,
-                signal_age_hours=signal_age_hours,
-                mark_price=mark_price,
-                mark_probability=mark_probability,
-                edge_abs=edge_abs,
-            )
-
-        if edge_abs is not None and edge_abs <= thresholds.exit_near_fair_edge_abs:
-            return PositionExitDecision(
-                should_close=True,
-                reason=f"Remaining edge {edge_abs:.2%} is at or below the near-fair threshold {thresholds.exit_near_fair_edge_abs:.2%}.",
-                reason_code="edge_near_fair",
-                final_score=final_score,
-                signal_age_hours=signal_age_hours,
-                mark_price=mark_price,
-                mark_probability=mark_probability,
-                edge_abs=edge_abs,
+            return self._confirm_review_exit(
+                position,
+                PositionExitDecision(
+                    should_close=True,
+                    reason=f"Final score {final_score:.2f} dropped below the exit floor {thresholds.exit_min_score:.2f}.",
+                    reason_code="score_breakdown",
+                    final_score=final_score,
+                    signal_age_hours=signal_age_hours,
+                    mark_price=mark_price,
+                    mark_probability=mark_probability,
+                    edge_abs=edge_abs,
+                ),
             )
 
         if signal_age_hours is not None and signal_age_hours > thresholds.exit_max_source_age_hours:
-            return PositionExitDecision(
-                should_close=True,
-                reason=f"Live signal aged past the exit freshness guardrail ({signal_age_hours:.1f}h > {thresholds.exit_max_source_age_hours:.1f}h).",
-                reason_code="stale_signal",
-                final_score=final_score,
-                signal_age_hours=signal_age_hours,
-                mark_price=mark_price,
-                mark_probability=mark_probability,
-                edge_abs=edge_abs,
+            return self._confirm_review_exit(
+                position,
+                PositionExitDecision(
+                    should_close=True,
+                    reason=f"Live signal aged past the exit freshness guardrail ({signal_age_hours:.1f}h > {thresholds.exit_max_source_age_hours:.1f}h).",
+                    reason_code="stale_signal",
+                    final_score=final_score,
+                    signal_age_hours=signal_age_hours,
+                    mark_price=mark_price,
+                    mark_probability=mark_probability,
+                    edge_abs=edge_abs,
+                ),
             )
 
         if signal.source_dispersion_pct > thresholds.exit_max_source_dispersion_pct:
-            return PositionExitDecision(
-                should_close=True,
-                reason=f"Source dispersion {signal.source_dispersion_pct:.1%} breached the exit ceiling {thresholds.exit_max_source_dispersion_pct:.1%}.",
-                reason_code="dispersion_risk",
-                final_score=final_score,
-                signal_age_hours=signal_age_hours,
-                mark_price=mark_price,
-                mark_probability=mark_probability,
-                edge_abs=edge_abs,
+            return self._confirm_review_exit(
+                position,
+                PositionExitDecision(
+                    should_close=True,
+                    reason=f"Source dispersion {signal.source_dispersion_pct:.1%} breached the exit ceiling {thresholds.exit_max_source_dispersion_pct:.1%}.",
+                    reason_code="dispersion_risk",
+                    final_score=final_score,
+                    signal_age_hours=signal_age_hours,
+                    mark_price=mark_price,
+                    mark_probability=mark_probability,
+                    edge_abs=edge_abs,
+                ),
             )
 
         if signal.time_to_resolution_s is not None:
@@ -325,15 +351,18 @@ class WeatherStrategyEngine:
             if hours < thresholds.exit_min_hours_to_event and (
                 (final_score or 0.0) < thresholds.min_score or (edge_abs or 0.0) < thresholds.min_edge_abs
             ):
-                return PositionExitDecision(
-                    should_close=True,
-                    reason=f"Only {hours:.1f}h remain and the edge no longer clears the entry-quality bar.",
-                    reason_code="time_risk",
-                    final_score=final_score,
-                    signal_age_hours=signal_age_hours,
-                    mark_price=mark_price,
-                    mark_probability=mark_probability,
-                    edge_abs=edge_abs,
+                return self._confirm_review_exit(
+                    position,
+                    PositionExitDecision(
+                        should_close=True,
+                        reason=f"Only {hours:.1f}h remain and the edge no longer clears the entry-quality bar.",
+                        reason_code="time_risk",
+                        final_score=final_score,
+                        signal_age_hours=signal_age_hours,
+                        mark_price=mark_price,
+                        mark_probability=mark_probability,
+                        edge_abs=edge_abs,
+                    ),
                 )
 
         hold_reason = f"Holding: score {final_score:.2f} and edge {(edge_abs or 0.0):.2%} still clear the exit rails."
@@ -348,6 +377,30 @@ class WeatherStrategyEngine:
             edge_abs=edge_abs,
         )
 
+    def _confirm_review_exit(self, position: dict[str, Any], decision: PositionExitDecision) -> PositionExitDecision:
+        if not decision.should_close or decision.reason_code not in CONFIRMED_REVIEW_EXIT_CODES:
+            return decision
+        if self._has_prior_consecutive_bad_review(position):
+            return decision
+        return replace(
+            decision,
+            should_close=False,
+            reason=f"{decision.reason} First bad review; waiting for one more consecutive bad review before closing.",
+        )
+
+    def _has_prior_consecutive_bad_review(self, position: dict[str, Any]) -> bool:
+        position_id = _as_int(position.get("id"))
+        if position_id is None:
+            return False
+        try:
+            history = self.tracker.get_position_review_history(limit=1, position_id=position_id)
+        except Exception:
+            return False
+        if not history:
+            return False
+        reason_code = str(history[0].get("review_reason_code") or "").strip()
+        return reason_code in CONFIRMED_REVIEW_EXIT_CODES
+
     def _no_stop_loss_exit_decision(
         self,
         position: dict[str, Any],
@@ -359,6 +412,7 @@ class WeatherStrategyEngine:
         mark_price: float | None,
         mark_probability: float | None,
         edge_abs: float | None,
+        current_signal_available: bool,
     ) -> PositionExitDecision | None:
         if str(position.get("market_type") or "").strip().lower() != "temperature":
             return None
@@ -381,11 +435,25 @@ class WeatherStrategyEngine:
         mark_to_market_pnl = _position_mark_to_market_pnl(position, current_mark_price)
         if mark_to_market_pnl is None or mark_to_market_pnl > stop_loss_pnl:
             return None
+        if not current_signal_available:
+            return None
+        current_model_probability = _as_float(mark_probability)
+        entry_model_probability = _entry_model_probability(position)
+        min_probability_drop = _as_float(getattr(thresholds, "no_stop_loss_min_probability_drop", None))
+        if min_probability_drop is None:
+            min_probability_drop = 0.15
+        min_probability_drop = max(0.0, min(1.0, min_probability_drop))
+        if current_model_probability is None or entry_model_probability is None:
+            return None
+        probability_drop = round(entry_model_probability - current_model_probability, 6)
+        if probability_drop < min_probability_drop:
+            return None
         return PositionExitDecision(
             should_close=True,
             reason=(
                 f"NO stop loss hit: mark-to-market P/L {_signed_usd(mark_to_market_pnl)} "
-                f"is at or below {_signed_usd(stop_loss_pnl)}."
+                f"is at or below {_signed_usd(stop_loss_pnl)} and model probability fell "
+                f"{probability_drop:.2%} from entry ({entry_model_probability:.2%} to {current_model_probability:.2%})."
             ),
             reason_code="no_stop_loss",
             final_score=final_score,
@@ -561,12 +629,32 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def _as_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _contract_probability(direction: str, yes_probability: float | None) -> float | None:
     raw = _as_float(yes_probability)
     if raw is None:
         return None
     raw = max(0.0, min(1.0, raw))
     return raw if str(direction or "").upper() == "YES" else round(1.0 - raw, 6)
+
+
+def _entry_model_probability(position: dict[str, Any]) -> float | None:
+    value = _as_float(position.get("entry_model_probability"))
+    if value is not None:
+        return max(0.0, min(1.0, value))
+    if not str(position.get("mark_updated_at") or "").strip():
+        value = _as_float(position.get("mark_probability"))
+        if value is not None:
+            return max(0.0, min(1.0, value))
+    return None
 
 
 def _position_mark_to_market_pnl(position: dict[str, Any], mark_price: float | None) -> float | None:
