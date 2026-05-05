@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python always has zoneinfo in supported runtimes.
+    ZoneInfo = None
 
 from .config import WeatherBotConfig
 from .execution import (
@@ -175,6 +180,37 @@ class WeatherStrategyEngine:
         final_score = float(profile["final_score"] or 0.0)
         policy_action = str(profile["policy_action"] or "advisory")
         metadata = dict(profile["metadata"])
+        app_timezone = _app_timezone(self.config)
+        base_entry_edge_floor = (
+            float(thresholds.min_edge_abs)
+            if self._paper_entry_min_edge_abs_override is None
+            else float(self._paper_entry_min_edge_abs_override)
+        )
+        same_day_min_edge_abs = _as_float(getattr(thresholds, "same_day_min_edge_abs", None))
+        same_day_temperature_entry = _is_same_day_temperature_signal(signal, app_timezone)
+        entry_edge_floor = self._entry_edge_floor(signal.market_type, thresholds, signal=signal)
+        if same_day_temperature_entry:
+            floor_source = "base"
+            if same_day_min_edge_abs is not None and same_day_min_edge_abs >= base_entry_edge_floor:
+                floor_source = "same_day_min_edge_abs"
+            if self._paper_entry_min_edge_abs_override is not None and base_entry_edge_floor > (same_day_min_edge_abs or 0.0):
+                floor_source = "manual_override"
+            metadata.update(
+                {
+                    "same_day_temperature_entry": True,
+                    "same_day_min_edge_abs": same_day_min_edge_abs,
+                    "base_entry_edge_floor": base_entry_edge_floor,
+                    "entry_edge_floor": entry_edge_floor,
+                    "same_day_entry_floor_source": floor_source,
+                    "same_day_entry_floor_applied": same_day_min_edge_abs is not None,
+                    "manual_entry_floor_override_active": self._paper_entry_min_edge_abs_override is not None,
+                }
+            )
+            if signal.edge_abs < entry_edge_floor:
+                metadata["same_day_low_edge_blocked"] = True
+                metadata["entry_block_reason_code"] = "same_day_low_edge"
+        else:
+            metadata["entry_edge_floor"] = entry_edge_floor
         if policy_action == "paper_blocked":
             reasons.append("Runtime policy blocked this signal.")
         if not auto_trade_enabled:
@@ -187,7 +223,7 @@ class WeatherStrategyEngine:
                 thresholds,
                 final_score,
                 profile["signal_age_hours"],
-                entry_edge_floor=self._entry_edge_floor(signal.market_type, thresholds),
+                entry_edge_floor=entry_edge_floor,
             )
         )
         if self.tracker.count_open_positions() >= self.paper_max_open_positions:
@@ -246,6 +282,18 @@ class WeatherStrategyEngine:
                     mark_probability=mark_probability,
                     edge_abs=edge_abs,
                 )
+
+        same_day_collapse_decision = self._same_day_price_collapse_exit_decision(
+            position,
+            thresholds=thresholds,
+            final_score=final_score,
+            signal_age_hours=signal_age_hours,
+            mark_price=mark_price,
+            mark_probability=mark_probability,
+            edge_abs=edge_abs,
+        )
+        if same_day_collapse_decision is not None:
+            return same_day_collapse_decision
 
         stop_loss_decision = self._no_stop_loss_exit_decision(
             position,
@@ -401,6 +449,53 @@ class WeatherStrategyEngine:
         reason_code = str(history[0].get("review_reason_code") or "").strip()
         return reason_code in CONFIRMED_REVIEW_EXIT_CODES
 
+    def _same_day_price_collapse_exit_decision(
+        self,
+        position: dict[str, Any],
+        *,
+        thresholds,
+        final_score: float | None,
+        signal_age_hours: float | None,
+        mark_price: float | None,
+        mark_probability: float | None,
+        edge_abs: float | None,
+    ) -> PositionExitDecision | None:
+        if str(position.get("market_type") or "").strip().lower() != "temperature":
+            return None
+        if not _position_opened_on_event_date(position, _app_timezone(self.config)):
+            return None
+        collapse_pnl = _as_float(getattr(thresholds, "same_day_collapse_pnl", None))
+        price_ratio = _as_float(getattr(thresholds, "same_day_collapse_price_ratio", None))
+        entry_price = _as_float(position.get("entry_price"))
+        if collapse_pnl is None or price_ratio is None or entry_price is None or entry_price <= 0:
+            return None
+        current_mark_price = mark_price
+        if current_mark_price is None:
+            current_mark_price = _as_float(position.get("mark_price"))
+        if current_mark_price is None:
+            return None
+        mark_to_market_pnl = _position_mark_to_market_pnl(position, current_mark_price)
+        if mark_to_market_pnl is None or mark_to_market_pnl > collapse_pnl:
+            return None
+        price_ratio = max(0.0, min(1.0, price_ratio))
+        collapse_price = round(entry_price * price_ratio, 6)
+        if current_mark_price > collapse_price:
+            return None
+        return PositionExitDecision(
+            should_close=True,
+            reason=(
+                f"Same-day price collapse: mark-to-market P/L {_signed_usd(mark_to_market_pnl)} "
+                f"is at or below {_signed_usd(collapse_pnl)} and mark price {current_mark_price:.3f} "
+                f"is at or below {price_ratio:.0%} of entry price {entry_price:.3f}."
+            ),
+            reason_code="same_day_price_collapse",
+            final_score=final_score,
+            signal_age_hours=signal_age_hours,
+            mark_price=current_mark_price,
+            mark_probability=mark_probability,
+            edge_abs=edge_abs,
+        )
+
     def _no_stop_loss_exit_decision(
         self,
         position: dict[str, Any],
@@ -497,10 +592,16 @@ class WeatherStrategyEngine:
             "signal_age_hours": signal_age_hours,
         }
 
-    def _entry_edge_floor(self, market_type: str, thresholds) -> float:
+    def _entry_edge_floor(self, market_type: str, thresholds, *, signal: WeatherSignal | None = None) -> float:
         if self._paper_entry_min_edge_abs_override is None:
-            return float(thresholds.min_edge_abs)
-        return float(self._paper_entry_min_edge_abs_override)
+            edge_floor = float(thresholds.min_edge_abs)
+        else:
+            edge_floor = float(self._paper_entry_min_edge_abs_override)
+        if signal is not None and _is_same_day_temperature_signal(signal, _app_timezone(self.config)):
+            same_day_edge_floor = _as_float(getattr(thresholds, "same_day_min_edge_abs", None))
+            if same_day_edge_floor is not None:
+                edge_floor = max(edge_floor, same_day_edge_floor)
+        return edge_floor
 
     def _entry_gate_reasons(
         self,
@@ -512,7 +613,11 @@ class WeatherStrategyEngine:
         entry_edge_floor: float | None = None,
     ) -> list[str]:
         reasons: list[str] = []
-        edge_floor = float(thresholds.min_edge_abs if entry_edge_floor is None else entry_edge_floor)
+        edge_floor = float(
+            self._entry_edge_floor(signal.market_type, thresholds, signal=signal)
+            if entry_edge_floor is None
+            else entry_edge_floor
+        )
         if final_score < thresholds.min_score:
             reasons.append(f"Final score {final_score:.2f} below minimum {thresholds.min_score:.2f}.")
         if signal.edge_abs < edge_floor:
@@ -618,6 +723,63 @@ def _timing_score(
     center = (min_hours_to_event + max_hours_to_event) / 2.0
     span = max((max_hours_to_event - min_hours_to_event) / 2.0, 1.0)
     return max(0.2, 1.0 - abs(hours - center) / span)
+
+
+def _app_timezone(config: WeatherBotConfig):
+    raw_timezone = str(getattr(getattr(config, "app", None), "timezone", "") or "").strip()
+    if ZoneInfo is not None and raw_timezone:
+        try:
+            return ZoneInfo(raw_timezone)
+        except Exception:
+            pass
+    return timezone.utc
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _local_date_from_timestamp(value: Any, app_timezone) -> date | None:
+    parsed = _parse_iso_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(app_timezone).date()
+
+
+def _is_same_day_temperature_signal(signal: WeatherSignal, app_timezone) -> bool:
+    if str(signal.market_type or "").strip().lower() != "temperature":
+        return False
+    event_date = _parse_iso_date(signal.event_date)
+    if event_date is None:
+        return False
+    return event_date == datetime.now(app_timezone).date()
+
+
+def _position_opened_on_event_date(position: dict[str, Any], app_timezone) -> bool:
+    event_date = _parse_iso_date(position.get("event_date"))
+    opened_date = _local_date_from_timestamp(position.get("created_at"), app_timezone)
+    return event_date is not None and opened_date == event_date
 
 
 def _as_float(value: Any) -> float | None:

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python always has zoneinfo in supported runtimes.
+    ZoneInfo = None
 
 import yaml
 
@@ -31,11 +35,13 @@ def _make_signal(
     forecast_prob: float = 0.75,
     edge: float = 0.45,
     edge_abs: float = 0.45,
+    event_date: str = "2026-04-25",
+    time_to_resolution_s: float | None = 8 * 3600.0,
 ) -> WeatherSignal:
     snapshot = ForecastSnapshot(
         market_type="temperature",
         city_slug="nyc",
-        event_date="2026-04-25",
+        event_date=event_date,
         unit="F",
         om_temp=71.0,
         vc_temp=72.0,
@@ -48,7 +54,7 @@ def _make_signal(
         market_slug=market_slug or f"market-{key}",
         event_slug=f"event-{key}",
         city_slug="nyc",
-        event_date="2026-04-25",
+        event_date=event_date,
         label="70-71F",
         direction=direction,
         market_prob=market_prob,
@@ -59,13 +65,24 @@ def _make_signal(
         confidence="confirmed",
         source_count=3,
         liquidity=500.0,
-        time_to_resolution_s=8 * 3600.0,
+        time_to_resolution_s=time_to_resolution_s,
         source_dispersion_pct=source_dispersion_pct,
         score=score,
         forecast_snapshot=snapshot,
         raw_payload={"event_title": "Highest temperature in NYC on April 25", "label": "70-71F", "direction": direction},
         created_at=created_at or datetime.now(timezone.utc).isoformat(),
     )
+
+
+def _today_for_config(config) -> str:
+    timezone_name = str(getattr(config.app, "timezone", "") or "").strip()
+    tzinfo = timezone.utc
+    if ZoneInfo is not None and timezone_name:
+        try:
+            tzinfo = ZoneInfo(timezone_name)
+        except Exception:
+            tzinfo = timezone.utc
+    return datetime.now(tzinfo).date().isoformat()
 
 
 def test_tracker_migrates_legacy_edges(tmp_path: Path):
@@ -120,6 +137,129 @@ def test_strategy_opens_paper_position(tmp_path: Path):
     initial, available = tracker.get_paper_capital()
     assert initial == 1000.0
     assert available < initial
+
+
+def test_same_day_temperature_entry_requires_twenty_percent_edge(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    today = _today_for_config(config)
+
+    result = strategy.process_signals(
+        [
+            _make_signal(
+                key="same-day-low-edge",
+                event_date=today,
+                market_prob=0.30,
+                forecast_prob=0.499,
+                edge=0.199,
+                edge_abs=0.199,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert config.strategy.temperature.same_day_min_edge_abs == 0.20
+    assert result.decision.accepted is False
+    assert result.position is None
+    assert "Edge 19.90% below minimum 20.00%" in result.decision.reason
+    assert result.decision.metadata["same_day_temperature_entry"] is True
+    assert result.decision.metadata["same_day_low_edge_blocked"] is True
+    assert result.decision.metadata["entry_block_reason_code"] == "same_day_low_edge"
+    assert result.decision.metadata["entry_edge_floor"] == 0.20
+    tracking = tracker.get_same_day_risk_tracking(limit=None)
+    assert len(tracking) == 1
+    assert tracking[0]["same_day_low_edge_blocked"] is True
+    assert tracking[0]["entry_edge_floor"] == 0.20
+
+
+def test_same_day_temperature_entry_accepts_twenty_percent_edge(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    today = _today_for_config(config)
+
+    result = strategy.process_signals(
+        [
+            _make_signal(
+                key="same-day-edge-floor",
+                event_date=today,
+                market_prob=0.30,
+                forecast_prob=0.50,
+                edge=0.20,
+                edge_abs=0.20,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert result.decision.accepted is True
+    assert result.position is not None
+    assert result.decision.metadata["same_day_temperature_entry"] is True
+    assert result.decision.metadata.get("same_day_low_edge_blocked") is not True
+    tracking = tracker.get_same_day_risk_tracking(limit=None)
+    assert len(tracking) == 1
+    assert tracking[0]["accepted"] is True
+    assert tracking[0]["same_day_entry_floor_source"] == "same_day_min_edge_abs"
+
+
+def test_future_temperature_entry_still_uses_normal_edge_floor(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    future_date = (datetime.fromisoformat(_today_for_config(config)) + timedelta(days=1)).date().isoformat()
+
+    result = strategy.process_signals(
+        [
+            _make_signal(
+                key="future-normal-floor",
+                event_date=future_date,
+                market_prob=0.30,
+                forecast_prob=0.42,
+                edge=0.12,
+                edge_abs=0.12,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert result.decision.accepted is True
+    assert result.position is not None
+    assert result.decision.metadata["entry_edge_floor"] == config.strategy.temperature.min_edge_abs
+    assert tracker.get_same_day_risk_tracking(limit=None) == []
+
+
+def test_manual_entry_floor_override_beats_same_day_floor(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.set_paper_entry_min_edge_abs(0.25)
+    today = _today_for_config(config)
+
+    result = strategy.process_signals(
+        [
+            _make_signal(
+                key="same-day-manual-floor",
+                event_date=today,
+                market_prob=0.30,
+                forecast_prob=0.50,
+                edge=0.20,
+                edge_abs=0.20,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert result.decision.accepted is False
+    assert result.position is None
+    assert "Edge 20.00% below minimum 25.00%" in result.decision.reason
+    assert result.decision.metadata["same_day_low_edge_blocked"] is True
+    assert result.decision.metadata["same_day_entry_floor_source"] == "manual_override"
+    assert result.decision.metadata["entry_edge_floor"] == 0.25
 
 
 def test_strategy_default_paper_mode_does_not_record_shadow_entries(tmp_path: Path):
@@ -408,6 +548,129 @@ def test_no_stop_loss_holds_temperature_no_when_model_still_supports_position(tm
         forecast_prob=0.10,
         edge=-0.70,
         edge_abs=0.70,
+    )
+
+    decision = strategy.evaluate_position_exit(position, signal=review_signal)
+
+    assert decision.should_close is False
+    assert decision.reason_code == "hold"
+
+
+def test_same_day_price_collapse_closes_same_day_temperature_position(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    today = _today_for_config(config)
+
+    opened = strategy.process_signals(
+        [
+            _make_signal(
+                key="same-day-collapse-entry",
+                event_date=today,
+                market_prob=0.60,
+                forecast_prob=0.85,
+                edge=0.25,
+                edge_abs=0.25,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert opened.position is not None
+    position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+    review_signal = _make_signal(
+        key="same-day-collapse-review",
+        event_date=today,
+        market_slug=position["market_slug"],
+        market_prob=0.25,
+        forecast_prob=0.70,
+        edge=0.45,
+        edge_abs=0.45,
+    )
+
+    decision = strategy.evaluate_position_exit(position, signal=review_signal)
+
+    assert decision.should_close is True
+    assert decision.reason_code == "same_day_price_collapse"
+    assert "Same-day price collapse" in decision.reason
+
+
+def test_same_day_price_collapse_holds_when_only_pnl_condition_is_met(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    today = _today_for_config(config)
+
+    opened = strategy.process_signals(
+        [
+            _make_signal(
+                key="same-day-collapse-one-condition",
+                event_date=today,
+                market_prob=0.60,
+                forecast_prob=0.85,
+                edge=0.25,
+                edge_abs=0.25,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert opened.position is not None
+    position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+    review_signal = _make_signal(
+        key="same-day-collapse-one-condition-review",
+        event_date=today,
+        market_slug=position["market_slug"],
+        market_prob=0.35,
+        forecast_prob=0.70,
+        edge=0.35,
+        edge_abs=0.35,
+    )
+
+    decision = strategy.evaluate_position_exit(position, signal=review_signal)
+
+    assert decision.should_close is False
+    assert decision.reason_code == "hold"
+
+
+def test_same_day_price_collapse_does_not_close_carry_in_position(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    today = _today_for_config(config)
+
+    opened = strategy.process_signals(
+        [
+            _make_signal(
+                key="same-day-collapse-carry-in",
+                event_date=today,
+                market_prob=0.60,
+                forecast_prob=0.85,
+                edge=0.25,
+                edge_abs=0.25,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+
+    assert opened.position is not None
+    tracker.conn.execute(
+        "UPDATE paper_positions SET created_at = ? WHERE id = ?",
+        ("2026-01-01T00:00:00+00:00", int(opened.position.id)),
+    )
+    tracker.conn.commit()
+    position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+    review_signal = _make_signal(
+        key="same-day-collapse-carry-in-review",
+        event_date=today,
+        market_slug=position["market_slug"],
+        market_prob=0.25,
+        forecast_prob=0.70,
+        edge=0.45,
+        edge_abs=0.45,
     )
 
     decision = strategy.evaluate_position_exit(position, signal=review_signal)

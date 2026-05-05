@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .analysis_report import build_analysis_report
+from .analysis_report import build_analysis_report, summarize_same_day_risk
 from .dropbox_exports import (
     build_dropbox_auth,
     dropbox_create_or_get_shared_link,
@@ -141,6 +141,8 @@ class AnalysisBundleExporter:
         latest_report_path = self.latest_report_path
         position_review_history = self.tracker.get_position_review_history(limit=None)
         shadow_order_intents = self.tracker.get_recent_shadow_order_intents(limit=None)
+        same_day_risk_tracking = self.tracker.get_same_day_risk_tracking(limit=None)
+        same_day_risk_summary = summarize_same_day_risk(same_day_risk_tracking, position_review_history)
 
         try:
             with tempfile.TemporaryDirectory(prefix="weather-analysis-bundle-") as temp_dir:
@@ -185,6 +187,19 @@ class AnalysisBundleExporter:
                     included_entries.append("shadow_order_intents.json")
                     archive.writestr("shadow_order_intents.json", json.dumps(shadow_order_intents, indent=2, sort_keys=True))
 
+                    included_entries.append("same_day_risk_tracking.json")
+                    archive.writestr(
+                        "same_day_risk_tracking.json",
+                        json.dumps(
+                            {
+                                "summary": same_day_risk_summary,
+                                "decisions": same_day_risk_tracking,
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        ),
+                    )
+
                     for path in scan_files:
                         arcname = f"scan_runs/{path.name}"
                         included_entries.append(arcname)
@@ -201,6 +216,10 @@ class AnalysisBundleExporter:
                         "scan_export_count": len(scan_files),
                         "position_review_count": len(position_review_history),
                         "shadow_order_count": len(shadow_order_intents),
+                        "same_day_risk": same_day_risk_summary,
+                        "same_day_risk_decision_count": same_day_risk_summary["same_day_decision_count"],
+                        "same_day_low_edge_block_count": same_day_risk_summary["same_day_low_edge_block_count"],
+                        "same_day_price_collapse_exit_count": same_day_risk_summary["same_day_price_collapse_exit_count"],
                         "temperature_market_scope": runtime_status.get("temperature_market_scope"),
                         "included_entries": [*included_entries, "manifest.json"],
                     }
@@ -220,6 +239,7 @@ class AnalysisBundleExporter:
                 scan_files=scan_files,
                 position_review_count=len(position_review_history),
                 shadow_order_count=len(shadow_order_intents),
+                same_day_risk_summary=same_day_risk_summary,
                 runtime_status=runtime_status,
                 included_entries=[*included_entries, "manifest.json"],
             )
@@ -248,6 +268,9 @@ class AnalysisBundleExporter:
                 "scan_export_count": len(scan_files),
                 "position_review_count": len(position_review_history),
                 "shadow_order_count": len(shadow_order_intents),
+                "same_day_risk_decision_count": same_day_risk_summary["same_day_decision_count"],
+                "same_day_low_edge_block_count": same_day_risk_summary["same_day_low_edge_block_count"],
+                "same_day_price_collapse_exit_count": same_day_risk_summary["same_day_price_collapse_exit_count"],
                 "entry_count": len(included_entries) + 1,
                 "dropbox_enabled": self.dropbox_auth is not None,
                 "dropbox_configuration_error": self._dropbox_configuration_error,
@@ -284,6 +307,7 @@ class AnalysisBundleExporter:
         scan_files: list[Path],
         position_review_count: int,
         shadow_order_count: int,
+        same_day_risk_summary: dict[str, int],
         runtime_status: dict[str, Any],
         included_entries: list[str],
     ) -> dict[str, Any]:
@@ -320,6 +344,10 @@ class AnalysisBundleExporter:
             "scan_export_count": len(scan_files),
             "position_review_count": int(position_review_count),
             "shadow_order_count": int(shadow_order_count),
+            "same_day_risk": dict(same_day_risk_summary),
+            "same_day_risk_decision_count": int(same_day_risk_summary.get("same_day_decision_count", 0)),
+            "same_day_low_edge_block_count": int(same_day_risk_summary.get("same_day_low_edge_block_count", 0)),
+            "same_day_price_collapse_exit_count": int(same_day_risk_summary.get("same_day_price_collapse_exit_count", 0)),
             "temperature_market_scope": runtime_status.get("temperature_market_scope"),
             "included_entries": included_entries,
             "dropbox": {

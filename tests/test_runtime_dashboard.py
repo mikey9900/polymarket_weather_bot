@@ -6,6 +6,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from openpyxl import load_workbook
 import pytest
@@ -135,6 +136,27 @@ def test_load_config_accepts_temperature_no_stop_loss_min_probability_drop_ha_ov
     config = load_config(config_path, ha_options_path=options_path)
 
     assert config.strategy.temperature.no_stop_loss_min_probability_drop == 0.20
+
+
+def test_load_config_accepts_temperature_same_day_risk_ha_overrides(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(
+        json.dumps(
+            {
+                "temperature_same_day_min_edge_abs": 0.25,
+                "temperature_same_day_collapse_pnl": -6.0,
+                "temperature_same_day_collapse_price_ratio": 0.40,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.strategy.temperature.same_day_min_edge_abs == 0.25
+    assert config.strategy.temperature.same_day_collapse_pnl == -6.0
+    assert config.strategy.temperature.same_day_collapse_price_ratio == 0.40
 
 
 def test_temperature_market_scope_city_groups_are_split_cleanly():
@@ -354,6 +376,25 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     signal = _signal("bundle-review-history-1", direction="NO", market_prob=0.30, forecast_prob=0.10, edge=-0.20, edge_abs=0.20)
     result = strategy.process_signals([signal], auto_trade_enabled=True)[0]
     assert result.position is not None
+    try:
+        app_timezone = ZoneInfo(config.app.timezone)
+    except ZoneInfoNotFoundError:
+        app_timezone = timezone.utc
+    today = datetime.now(app_timezone).date().isoformat()
+    blocked = strategy.process_signals(
+        [
+            _signal(
+                "bundle-same-day-low-edge",
+                event_date=today,
+                market_prob=0.30,
+                forecast_prob=0.499,
+                edge=0.199,
+                edge_abs=0.199,
+            )
+        ],
+        auto_trade_enabled=True,
+    )[0]
+    assert blocked.decision.accepted is False
     tracker.update_paper_position_review(
         int(result.position.id),
         mark_price=0.22,
@@ -417,11 +458,13 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert "analysis_report.xlsx" in names
     assert "position_review_history.json" in names
     assert "shadow_order_intents.json" in names
+    assert "same_day_risk_tracking.json" in names
     assert "manifest.json" in names
     assert "scan_runs/20260427T120000_temperature_completed.json" in names
     with zipfile.ZipFile(bundle_path) as archive:
         review_history = json.loads(archive.read("position_review_history.json").decode("utf-8"))
         shadow_orders = json.loads(archive.read("shadow_order_intents.json").decode("utf-8"))
+        same_day_risk = json.loads(archive.read("same_day_risk_tracking.json").decode("utf-8"))
         manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
     assert review_history
     assert review_history[0]["event_kind"] in {"review", "close"}
@@ -430,13 +473,19 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert shadow_orders[0]["execution_mode"] == "paper_shadow"
     assert shadow_orders[0]["status"] == "mirrored"
     assert manifest["shadow_order_count"] == 1
+    assert manifest["same_day_low_edge_block_count"] == 1
+    assert same_day_risk["summary"]["same_day_low_edge_block_count"] == 1
+    assert same_day_risk["decisions"][0]["same_day_low_edge_blocked"] is True
     workbook = load_workbook(report_path, data_only=True)
     assert "Review History" in workbook.sheetnames
     assert "Shadow Orders" in workbook.sheetnames
+    assert "Same-Day Risk" in workbook.sheetnames
     shadow_sheet = workbook["Shadow Orders"]
     assert shadow_sheet["B5"].value == "entry"
     assert shadow_sheet["C5"].value == "paper_shadow"
     assert shadow_sheet["D5"].value == "mirrored"
+    same_day_sheet = workbook["Same-Day Risk"]
+    assert same_day_sheet["C5"].value == "YES"
     latest_index = json.loads(latest_index_path.read_text(encoding="utf-8"))
     assert latest_index["label"] == "WEATHER-BOT"
     assert latest_index["latest_bundle"]["local_path"] == str(latest_bundle_path)
@@ -444,6 +493,7 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert latest_index["latest_report"]["local_path"] == str(latest_report_path)
     assert latest_index["archive_report"]["local_path"] == str(report_path)
     assert latest_index["shadow_order_count"] == 1
+    assert latest_index["same_day_low_edge_block_count"] == 1
 
 
 def test_live_api_serves_latest_analysis_report_download(tmp_path: Path):
@@ -809,7 +859,7 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "LAST 7D" in html
     assert "LAST 30D" in html
     assert "YES / NO WIN-LOSS BARS" in html
-    assert "EXPORT XLSX" in html
+    assert "BUNDLE DATA" in html
     assert "DOWNLOAD XLSX" in html
     assert "DOWNLOAD ZIP" in html
     assert "COPY BUNDLE PATH" in html

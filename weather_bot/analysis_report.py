@@ -76,6 +76,8 @@ def build_analysis_report(
     recent_operator_actions = tracker.get_recent_operator_actions(limit=250)
     review_history = tracker.get_position_review_history(limit=5000)
     shadow_order_intents = tracker.get_recent_shadow_order_intents(limit=5000)
+    same_day_risk_tracking = tracker.get_same_day_risk_tracking(limit=5000)
+    same_day_risk_summary = summarize_same_day_risk(same_day_risk_tracking, review_history)
 
     overview = workbook.active
     overview.title = "Overview"
@@ -89,12 +91,14 @@ def build_analysis_report(
         recent_signals=recent_signals,
         shadow_order_intents=shadow_order_intents,
         recent_operator_actions=recent_operator_actions,
+        same_day_risk_summary=same_day_risk_summary,
     )
     _build_positions_sheet(workbook.create_sheet("Open Trades"), open_positions, title="Open Trades", status_default="open")
     _build_outcomes_sheet(workbook.create_sheet("Recent Outcomes"), recent_outcomes)
     _build_positions_sheet(workbook.create_sheet("Position Ledger"), recent_positions, title="Position Ledger", status_default="")
     _build_review_history_sheet(workbook.create_sheet("Review History"), review_history)
     _build_shadow_orders_sheet(workbook.create_sheet("Shadow Orders"), shadow_order_intents)
+    _build_same_day_risk_sheet(workbook.create_sheet("Same-Day Risk"), same_day_risk_tracking, same_day_risk_summary)
     _build_signals_sheet(workbook.create_sheet("Recent Signals"), recent_signals)
     _build_resolutions_sheet(workbook.create_sheet("Resolutions"), recent_resolutions)
     _build_operator_sheet(workbook.create_sheet("Operator Log"), recent_operator_actions)
@@ -110,6 +114,38 @@ def build_analysis_report(
         "recent_signal_count": len(recent_signals),
         "review_history_count": len(review_history),
         "shadow_order_count": len(shadow_order_intents),
+        "same_day_risk_decision_count": len(same_day_risk_tracking),
+        "same_day_low_edge_block_count": same_day_risk_summary["same_day_low_edge_block_count"],
+        "same_day_price_collapse_exit_count": same_day_risk_summary["same_day_price_collapse_exit_count"],
+    }
+
+
+def summarize_same_day_risk(
+    decisions: list[dict[str, Any]],
+    review_history: list[dict[str, Any]],
+) -> dict[str, int]:
+    low_edge_blocks = sum(1 for item in decisions if item.get("same_day_low_edge_blocked"))
+    accepted = sum(1 for item in decisions if item.get("accepted"))
+    total = len(decisions)
+    collapse_exits = sum(
+        1
+        for item in review_history
+        if str(item.get("event_kind") or "").strip().lower() == "close"
+        and str(item.get("review_reason_code") or "").strip() == "same_day_price_collapse"
+    )
+    collapse_reviews = sum(
+        1
+        for item in review_history
+        if str(item.get("review_reason_code") or "").strip() == "same_day_price_collapse"
+    )
+    return {
+        "same_day_decision_count": int(total),
+        "same_day_accepted_count": int(accepted),
+        "same_day_blocked_count": int(max(0, total - accepted)),
+        "same_day_low_edge_block_count": int(low_edge_blocks),
+        "same_day_other_block_count": int(max(0, total - accepted - low_edge_blocks)),
+        "same_day_price_collapse_exit_count": int(collapse_exits),
+        "same_day_price_collapse_review_count": int(collapse_reviews),
     }
 
 
@@ -124,6 +160,7 @@ def _build_overview_sheet(
     recent_signals: list[dict[str, Any]],
     shadow_order_intents: list[dict[str, Any]],
     recent_operator_actions: list[dict[str, Any]],
+    same_day_risk_summary: dict[str, int],
 ) -> None:
     ws.merge_cells("A1:H1")
     ws["A1"] = f"{label} Analysis Report"
@@ -203,6 +240,11 @@ def _build_overview_sheet(
     ws.cell(row=preview_row, column=1).alignment = Alignment(horizontal="center")
     quick_lines = [
         f"Open positions: {len(open_positions)} | Recent outcomes: {len(recent_outcomes)} | Recent signals: {len(recent_signals)} | Shadow intents: {len(shadow_order_intents)}",
+        (
+            f"Same-day temp decisions: {same_day_risk_summary.get('same_day_decision_count', 0)} | "
+            f"low-edge blocked: {same_day_risk_summary.get('same_day_low_edge_block_count', 0)} | "
+            f"collapse exits: {same_day_risk_summary.get('same_day_price_collapse_exit_count', 0)}"
+        ),
         f"Last operator action: {recent_operator_actions[0]['action'] if recent_operator_actions else 'none'}",
         f"Latest cloud report: {exports.get('last_analysis_report_dropbox_url') or 'not uploaded yet'}",
     ]
@@ -427,6 +469,71 @@ def _build_shadow_orders_sheet(ws, rows: list[dict[str, Any]]) -> None:
         _fill_if_text(ws.cell(row=idx, column=8), row.get("direction"))
         _fill_if_text(ws.cell(row=idx, column=10), row.get("outcome_side"))
         _fill_shadow_status(ws.cell(row=idx, column=4), row.get("status"))
+
+
+def _build_same_day_risk_sheet(
+    ws,
+    rows: list[dict[str, Any]],
+    summary: dict[str, int],
+) -> None:
+    _sheet_title(
+        ws,
+        "Same-Day Risk",
+        subtitle=(
+            f"{len(rows)} decisions | "
+            f"{summary.get('same_day_low_edge_block_count', 0)} low-edge blocks | "
+            f"{summary.get('same_day_price_collapse_exit_count', 0)} collapse exits"
+        ),
+    )
+    shaped = []
+    for row in rows:
+        shaped.append(
+            {
+                **row,
+                "accepted_label": _bool_label(row.get("accepted")),
+                "low_edge_blocked_label": _bool_label(row.get("same_day_low_edge_blocked")),
+                "manual_override_label": _bool_label(row.get("manual_entry_floor_override_active")),
+                "reason_code": row.get("entry_block_reason_code") or ("accepted" if row.get("accepted") else ""),
+            }
+        )
+    columns = [
+        ("Decision Time", "decision_created_at", "datetime"),
+        ("Accepted", "accepted_label", "text"),
+        ("Low-Edge Block", "low_edge_blocked_label", "text"),
+        ("Floor Source", "same_day_entry_floor_source", "text"),
+        ("Manual Override", "manual_override_label", "text"),
+        ("Event", "event_title", "text"),
+        ("City", "city_slug", "text"),
+        ("Date", "event_date", "text"),
+        ("Direction", "direction", "text"),
+        ("Label", "label", "text"),
+        ("Market %", "market_prob", "percent"),
+        ("Forecast %", "forecast_prob", "percent"),
+        ("Edge %", "edge_abs", "percent"),
+        ("Entry Floor %", "entry_edge_floor", "percent"),
+        ("Same-Day Floor %", "same_day_min_edge_abs", "percent"),
+        ("Base Floor %", "base_entry_edge_floor", "percent"),
+        ("Score", "signal_score", "number"),
+        ("Final Score", "final_score", "number"),
+        ("Reason Code", "reason_code", "text"),
+        ("Reason", "reason", "text"),
+        ("Market Slug", "market_slug", "text"),
+    ]
+    _write_table(ws, start_row=4, columns=columns, rows=shaped)
+    column_lookup = {name: idx + 1 for idx, (name, _, _) in enumerate(columns)}
+    for idx, row in enumerate(shaped, start=5):
+        _fill_if_text(ws.cell(row=idx, column=column_lookup["Direction"]), row.get("direction"))
+        accepted_cell = ws.cell(row=idx, column=column_lookup["Accepted"])
+        if row.get("accepted"):
+            accepted_cell.fill = GOOD_FILL
+            accepted_cell.font = GOOD_FONT
+        else:
+            accepted_cell.fill = BAD_FILL
+            accepted_cell.font = BAD_FONT
+        if row.get("same_day_low_edge_blocked"):
+            blocked_cell = ws.cell(row=idx, column=column_lookup["Low-Edge Block"])
+            blocked_cell.fill = BAD_FILL
+            blocked_cell.font = BAD_FONT
 
 
 def _report_position_row(row: dict[str, Any]) -> dict[str, Any]:

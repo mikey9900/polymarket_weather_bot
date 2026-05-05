@@ -1,6 +1,6 @@
 name: "Polymarket Weather Bot"
 description: "Weather-market paper trader with HA ingress, research artifacts, and Telegram backup controls"
-version: "3.3.10"
+version: "3.3.11"
 slug: "polymarket_weather_bot"
 startup: application
 boot: auto
@@ -40,6 +40,9 @@ options:
   temperature_max_no_entry_price: 0.68
   temperature_no_stop_loss_pnl: -4.0
   temperature_no_stop_loss_min_entry_price: 0.50
+  temperature_same_day_min_edge_abs: 0.20
+  temperature_same_day_collapse_pnl: -4.0
+  temperature_same_day_collapse_price_ratio: 0.50
   temperature_scan_minutes: 120
   temperature_scan_seconds: 0
   precipitation_scan_minutes: 360
@@ -71,6 +74,9 @@ schema:
   temperature_max_no_entry_price: float(0,1)
   temperature_no_stop_loss_pnl: float(-1000,0)
   temperature_no_stop_loss_min_entry_price: float(0,1)
+  temperature_same_day_min_edge_abs: float(0,1)
+  temperature_same_day_collapse_pnl: float(-1000,0)
+  temperature_same_day_collapse_price_ratio: float(0,1)
   temperature_scan_minutes: int(15,720)
   temperature_scan_seconds: int(0,3600)
   precipitation_scan_minutes: int(30,1440)

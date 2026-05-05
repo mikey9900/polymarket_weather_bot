@@ -55,6 +55,9 @@ class StrategyThresholds:
     no_stop_loss_pnl: float | None = None
     no_stop_loss_min_entry_price: float | None = None
     no_stop_loss_min_probability_drop: float = 0.15
+    same_day_min_edge_abs: float | None = None
+    same_day_collapse_pnl: float | None = None
+    same_day_collapse_price_ratio: float | None = None
     exit_min_score: float = 0.55
     exit_near_fair_edge_abs: float = 0.03
     exit_max_source_age_hours: float = 8.0
@@ -205,6 +208,18 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("strategy", {}).setdefault("temperature", {})["no_stop_loss_min_probability_drop"] = float(
             payload["temperature_no_stop_loss_min_probability_drop"]
         )
+    if "temperature_same_day_min_edge_abs" in payload:
+        mapped.setdefault("strategy", {}).setdefault("temperature", {})["same_day_min_edge_abs"] = float(
+            payload["temperature_same_day_min_edge_abs"]
+        )
+    if "temperature_same_day_collapse_pnl" in payload:
+        mapped.setdefault("strategy", {}).setdefault("temperature", {})["same_day_collapse_pnl"] = float(
+            payload["temperature_same_day_collapse_pnl"]
+        )
+    if "temperature_same_day_collapse_price_ratio" in payload:
+        mapped.setdefault("strategy", {}).setdefault("temperature", {})["same_day_collapse_price_ratio"] = float(
+            payload["temperature_same_day_collapse_price_ratio"]
+        )
     if "resolution_check_minutes" in payload:
         mapped.setdefault("app", {})["resolution_check_minutes"] = int(payload["resolution_check_minutes"])
     if "open_position_review_seconds" in payload:
@@ -263,6 +278,18 @@ def _load_env_overrides() -> dict[str, Any]:
     if os.getenv("WEATHER_TEMPERATURE_NO_STOP_LOSS_MIN_PROBABILITY_DROP"):
         payload.setdefault("strategy", {}).setdefault("temperature", {})["no_stop_loss_min_probability_drop"] = float(
             os.getenv("WEATHER_TEMPERATURE_NO_STOP_LOSS_MIN_PROBABILITY_DROP", "0")
+        )
+    if os.getenv("WEATHER_TEMPERATURE_SAME_DAY_MIN_EDGE_ABS"):
+        payload.setdefault("strategy", {}).setdefault("temperature", {})["same_day_min_edge_abs"] = float(
+            os.getenv("WEATHER_TEMPERATURE_SAME_DAY_MIN_EDGE_ABS", "0")
+        )
+    if os.getenv("WEATHER_TEMPERATURE_SAME_DAY_COLLAPSE_PNL"):
+        payload.setdefault("strategy", {}).setdefault("temperature", {})["same_day_collapse_pnl"] = float(
+            os.getenv("WEATHER_TEMPERATURE_SAME_DAY_COLLAPSE_PNL", "0")
+        )
+    if os.getenv("WEATHER_TEMPERATURE_SAME_DAY_COLLAPSE_PRICE_RATIO"):
+        payload.setdefault("strategy", {}).setdefault("temperature", {})["same_day_collapse_price_ratio"] = float(
+            os.getenv("WEATHER_TEMPERATURE_SAME_DAY_COLLAPSE_PRICE_RATIO", "0")
         )
     if os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES"):
         payload.setdefault("app", {})["resolution_check_minutes"] = int(os.getenv("WEATHER_RESOLUTION_CHECK_MINUTES", "15"))

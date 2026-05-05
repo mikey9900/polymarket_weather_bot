@@ -541,6 +541,56 @@ class WeatherTracker:
             ).fetchall()
         return [_serialize_shadow_order_intent(row) for row in rows]
 
+    def get_same_day_risk_tracking(self, *, limit: int | None = 5000) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT
+                    d.id AS decision_id,
+                    d.signal_id AS signal_id,
+                    d.signal_key AS signal_key,
+                    d.accepted AS accepted,
+                    d.reason AS reason,
+                    d.final_score AS final_score,
+                    d.policy_action AS policy_action,
+                    d.metadata_json AS metadata_json,
+                    d.created_at AS decision_created_at,
+                    s.market_type AS market_type,
+                    s.event_title AS event_title,
+                    s.market_slug AS market_slug,
+                    s.event_slug AS event_slug,
+                    s.city_slug AS city_slug,
+                    s.event_date AS event_date,
+                    s.label AS label,
+                    s.direction AS direction,
+                    s.market_prob AS market_prob,
+                    s.forecast_prob AS forecast_prob,
+                    s.edge AS edge,
+                    s.edge_abs AS edge_abs,
+                    s.edge_size AS edge_size,
+                    s.confidence AS confidence,
+                    s.source_count AS source_count,
+                    s.liquidity AS liquidity,
+                    s.time_to_resolution_s AS time_to_resolution_s,
+                    s.source_dispersion_pct AS source_dispersion_pct,
+                    s.score AS signal_score,
+                    s.created_at AS signal_created_at
+                FROM decisions d
+                LEFT JOIN signals s ON s.id = d.signal_id
+                ORDER BY d.created_at DESC, d.id DESC
+                """
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        max_items = None if limit is None else max(0, int(limit))
+        for row in rows:
+            item = _serialize_same_day_risk_tracking_row(row)
+            if not (item["same_day_temperature_entry"] or item["same_day_low_edge_blocked"]):
+                continue
+            items.append(item)
+            if max_items is not None and len(items) >= max_items:
+                break
+        return items
+
     def create_paper_position(
         self,
         *,
@@ -1531,6 +1581,51 @@ def _serialize_shadow_order_intent(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": payload.get("created_at"),
         "age_seconds": age_seconds,
         "payload": _json_object(payload.get("payload_json")),
+    }
+
+
+def _serialize_same_day_risk_tracking_row(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    metadata = _json_object(payload.get("metadata_json"))
+    return {
+        "decision_id": int(payload["decision_id"]),
+        "signal_id": int(payload["signal_id"]) if payload.get("signal_id") is not None else None,
+        "signal_key": str(payload.get("signal_key") or ""),
+        "accepted": bool(payload.get("accepted")),
+        "decision_created_at": str(payload.get("decision_created_at") or ""),
+        "reason": str(payload.get("reason") or ""),
+        "policy_action": str(payload.get("policy_action") or ""),
+        "final_score": _as_float(payload.get("final_score")),
+        "market_type": str(payload.get("market_type") or ""),
+        "event_title": str(payload.get("event_title") or ""),
+        "market_slug": str(payload.get("market_slug") or ""),
+        "event_slug": str(payload.get("event_slug") or ""),
+        "city_slug": str(payload.get("city_slug") or ""),
+        "event_date": str(payload.get("event_date") or ""),
+        "label": str(payload.get("label") or ""),
+        "direction": str(payload.get("direction") or ""),
+        "market_prob": _as_float(payload.get("market_prob")),
+        "forecast_prob": _as_float(payload.get("forecast_prob")),
+        "edge": _as_float(payload.get("edge")),
+        "edge_abs": _as_float(payload.get("edge_abs")),
+        "edge_size": str(payload.get("edge_size") or ""),
+        "confidence": str(payload.get("confidence") or ""),
+        "source_count": int(payload.get("source_count") or 0),
+        "liquidity": _as_float(payload.get("liquidity")),
+        "time_to_resolution_s": _as_float(payload.get("time_to_resolution_s")),
+        "source_dispersion_pct": _as_float(payload.get("source_dispersion_pct")),
+        "signal_score": _as_float(payload.get("signal_score")),
+        "signal_created_at": str(payload.get("signal_created_at") or ""),
+        "same_day_temperature_entry": bool(metadata.get("same_day_temperature_entry")),
+        "same_day_entry_floor_applied": bool(metadata.get("same_day_entry_floor_applied")),
+        "same_day_low_edge_blocked": bool(metadata.get("same_day_low_edge_blocked")),
+        "same_day_entry_floor_source": str(metadata.get("same_day_entry_floor_source") or ""),
+        "entry_block_reason_code": str(metadata.get("entry_block_reason_code") or ""),
+        "entry_edge_floor": _as_float(metadata.get("entry_edge_floor")),
+        "base_entry_edge_floor": _as_float(metadata.get("base_entry_edge_floor")),
+        "same_day_min_edge_abs": _as_float(metadata.get("same_day_min_edge_abs")),
+        "manual_entry_floor_override_active": bool(metadata.get("manual_entry_floor_override_active")),
+        "metadata": metadata,
     }
 
 

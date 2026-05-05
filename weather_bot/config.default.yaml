@@ -47,6 +47,9 @@ strategy:
     no_stop_loss_pnl: -4.0
     no_stop_loss_min_entry_price: 0.50
     no_stop_loss_min_probability_drop: 0.15
+    same_day_min_edge_abs: 0.20
+    same_day_collapse_pnl: -4.0
+    same_day_collapse_price_ratio: 0.50
     exit_min_score: 0.55
     exit_near_fair_edge_abs: 0.03
     exit_max_source_age_hours: 8.0
