@@ -231,6 +231,108 @@ class WeatherTracker:
                 backup_conn.close()
         return str(target)
 
+    def backup_compact_database(
+        self,
+        destination: str | Path,
+        *,
+        signal_limit: int = 20000,
+        decision_limit: int = 20000,
+        review_limit: int = 5000,
+        shadow_order_limit: int = 5000,
+        operator_event_limit: int = 1000,
+        resolution_event_limit: int = 1000,
+    ) -> str:
+        target = Path(self.backup_database(destination))
+        conn = sqlite3.connect(str(target))
+        try:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute(
+                """
+                DELETE FROM paper_position_reviews
+                WHERE id NOT IN (
+                    SELECT id FROM paper_position_reviews
+                    ORDER BY reviewed_at DESC, id DESC
+                    LIMIT ?
+                )
+                """,
+                (max(0, int(review_limit)),),
+            )
+            conn.execute(
+                """
+                DELETE FROM shadow_order_intents
+                WHERE id NOT IN (
+                    SELECT id FROM shadow_order_intents
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                )
+                """,
+                (max(0, int(shadow_order_limit)),),
+            )
+            conn.execute(
+                """
+                DELETE FROM operator_events
+                WHERE id NOT IN (
+                    SELECT id FROM operator_events
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                )
+                """,
+                (max(0, int(operator_event_limit)),),
+            )
+            conn.execute(
+                """
+                DELETE FROM resolution_events
+                WHERE id NOT IN (
+                    SELECT id FROM resolution_events
+                    ORDER BY resolved_at DESC, id DESC
+                    LIMIT ?
+                )
+                """,
+                (max(0, int(resolution_event_limit)),),
+            )
+            conn.execute(
+                """
+                DELETE FROM decisions
+                WHERE id NOT IN (
+                    SELECT id FROM decisions
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                )
+                AND id NOT IN (
+                    SELECT decision_id FROM paper_positions WHERE decision_id IS NOT NULL
+                )
+                AND id NOT IN (
+                    SELECT decision_id FROM shadow_order_intents WHERE decision_id IS NOT NULL
+                )
+                """,
+                (max(0, int(decision_limit)),),
+            )
+            conn.execute(
+                """
+                DELETE FROM signals
+                WHERE id NOT IN (
+                    SELECT id FROM signals
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                )
+                AND id NOT IN (
+                    SELECT signal_id FROM decisions WHERE signal_id IS NOT NULL
+                )
+                AND id NOT IN (
+                    SELECT signal_id FROM paper_positions WHERE signal_id IS NOT NULL
+                )
+                AND id NOT IN (
+                    SELECT signal_id FROM shadow_order_intents WHERE signal_id IS NOT NULL
+                )
+                """,
+                (max(0, int(signal_limit)),),
+            )
+            conn.commit()
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+        return str(target)
+
     def close(self) -> None:
         with self._lock:
             self.conn.close()

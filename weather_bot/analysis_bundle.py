@@ -26,6 +26,12 @@ from .persistent_weather_cache import backup_weather_cache
 DEFAULT_ANALYSIS_BUNDLE_LABEL = "WEATHER-BOT"
 POSITION_REVIEW_HISTORY_EXPORT_LIMIT = 5000
 SAME_DAY_RISK_EXPORT_LIMIT = 5000
+COMPACT_DB_SIGNAL_LIMIT = 20000
+COMPACT_DB_DECISION_LIMIT = 20000
+COMPACT_DB_REVIEW_LIMIT = 5000
+COMPACT_DB_SHADOW_ORDER_LIMIT = 5000
+COMPACT_DB_OPERATOR_EVENT_LIMIT = 1000
+COMPACT_DB_RESOLUTION_EVENT_LIMIT = 1000
 
 
 class AnalysisBundleExporter:
@@ -222,7 +228,18 @@ class AnalysisBundleExporter:
                 temp_root = Path(temp_dir)
                 tracker_backup_path = temp_root / "weatherbot.db"
                 weather_cache_backup_path = temp_root / "weather_cache.db"
-                self.tracker.backup_database(tracker_backup_path)
+                if hasattr(self.tracker, "backup_compact_database"):
+                    self.tracker.backup_compact_database(
+                        tracker_backup_path,
+                        signal_limit=COMPACT_DB_SIGNAL_LIMIT,
+                        decision_limit=COMPACT_DB_DECISION_LIMIT,
+                        review_limit=COMPACT_DB_REVIEW_LIMIT,
+                        shadow_order_limit=COMPACT_DB_SHADOW_ORDER_LIMIT,
+                        operator_event_limit=COMPACT_DB_OPERATOR_EVENT_LIMIT,
+                        resolution_event_limit=COMPACT_DB_RESOLUTION_EVENT_LIMIT,
+                    )
+                else:
+                    self.tracker.backup_database(tracker_backup_path)
                 backup_weather_cache(weather_cache_backup_path)
                 build_analysis_report(
                     output_path=report_path,
@@ -287,6 +304,8 @@ class AnalysisBundleExporter:
                         "tracker_db_path": str(self.tracker.db_path),
                         "scan_export_root": str(scan_export_root) if scan_export_root is not None else None,
                         "scan_export_count": len(scan_files),
+                        "tracker_db_export_mode": "compact_recent",
+                        "tracker_db_compact_limits": _compact_db_limits(),
                         "position_review_count": position_review_count,
                         "position_review_export_count": len(position_review_history),
                         "position_review_export_limit": POSITION_REVIEW_HISTORY_EXPORT_LIMIT,
@@ -427,6 +446,8 @@ class AnalysisBundleExporter:
             "analysis_bundle_root": str(self.bundle_root),
             "scan_export_root": str(scan_export_root) if scan_export_root is not None else None,
             "scan_export_count": len(scan_files),
+            "tracker_db_export_mode": "compact_recent",
+            "tracker_db_compact_limits": _compact_db_limits(),
             "position_review_count": int(position_review_count),
             "position_review_export_count": int(position_review_export_count),
             "position_review_export_limit": int(position_review_export_limit),
@@ -499,21 +520,24 @@ class AnalysisBundleExporter:
         latest_index_remote_path = self._dropbox_path("latest", latest_index_path.name)
         latest_report_remote_path = self._dropbox_path("latest", latest_report_path.name)
         errors: list[str] = []
+        upload_ok: dict[str, bool] = {}
 
-        for local_path, remote_path, error_label in (
-            (bundle_path, archive_remote_path, "archive upload"),
-            (report_path, archive_report_remote_path, "archive report upload"),
-            (latest_bundle_path, latest_bundle_remote_path, "latest bundle upload"),
-            (latest_report_path, latest_report_remote_path, "latest report upload"),
+        for upload_key, local_path, remote_path, error_label in (
+            ("archive_bundle", bundle_path, archive_remote_path, "archive upload"),
+            ("archive_report", report_path, archive_report_remote_path, "archive report upload"),
+            ("latest_bundle", latest_bundle_path, latest_bundle_remote_path, "latest bundle upload"),
+            ("latest_report", latest_report_path, latest_report_remote_path, "latest report upload"),
         ):
             response = dropbox_upload_file(local_path, remote_path, self.dropbox_auth)
-            if not response.get("ok"):
+            upload_ok[upload_key] = bool(response.get("ok"))
+            if not upload_ok[upload_key]:
                 errors.append(f"{error_label}: {response.get('error') or response.get('status')}")
 
         latest_bundle_url = None
         latest_report_url = None
-        if not errors:
+        if upload_ok.get("latest_bundle"):
             latest_bundle_url = dropbox_create_or_get_shared_link(latest_bundle_remote_path, self.dropbox_auth)
+        if upload_ok.get("latest_report"):
             latest_report_url = dropbox_create_or_get_shared_link(latest_report_remote_path, self.dropbox_auth)
 
         dropbox_meta.update(
@@ -535,7 +559,7 @@ class AnalysisBundleExporter:
             errors.append(f"latest index upload: {index_upload.get('error') or index_upload.get('status')}")
 
         latest_index_url = None
-        if not errors:
+        if index_upload.get("ok"):
             latest_index_url = dropbox_create_or_get_shared_link(latest_index_remote_path, self.dropbox_auth)
             dropbox_meta["latest_index_url"] = latest_index_url
             index_payload["dropbox"] = dropbox_meta
@@ -544,12 +568,12 @@ class AnalysisBundleExporter:
             if not refresh_upload.get("ok"):
                 errors.append(f"latest index refresh: {refresh_upload.get('error') or refresh_upload.get('status')}")
 
-        self._last_dropbox_bundle_path = latest_bundle_remote_path if not errors else None
-        self._last_dropbox_bundle_url = latest_bundle_url if not errors else None
-        self._last_dropbox_index_path = latest_index_remote_path if not errors else None
-        self._last_dropbox_index_url = latest_index_url if not errors else None
-        self._last_dropbox_report_path = latest_report_remote_path if not errors else None
-        self._last_dropbox_report_url = latest_report_url if not errors else None
+        self._last_dropbox_bundle_path = latest_bundle_remote_path if upload_ok.get("latest_bundle") else None
+        self._last_dropbox_bundle_url = latest_bundle_url if upload_ok.get("latest_bundle") else None
+        self._last_dropbox_index_path = latest_index_remote_path if index_upload.get("ok") else None
+        self._last_dropbox_index_url = latest_index_url if index_upload.get("ok") else None
+        self._last_dropbox_report_path = latest_report_remote_path if upload_ok.get("latest_report") else None
+        self._last_dropbox_report_url = latest_report_url if upload_ok.get("latest_report") else None
         self._last_dropbox_error = " | ".join(errors) if errors else None
         dropbox_meta["error"] = self._last_dropbox_error
         index_payload["dropbox"] = dropbox_meta
@@ -572,3 +596,14 @@ class AnalysisBundleExporter:
         if self.dropbox_root == "/":
             return f"/{folder}/{filename}"
         return f"{self.dropbox_root}/{folder}/{filename}"
+
+
+def _compact_db_limits() -> dict[str, int]:
+    return {
+        "signals": COMPACT_DB_SIGNAL_LIMIT,
+        "decisions": COMPACT_DB_DECISION_LIMIT,
+        "paper_position_reviews": COMPACT_DB_REVIEW_LIMIT,
+        "shadow_order_intents": COMPACT_DB_SHADOW_ORDER_LIMIT,
+        "operator_events": COMPACT_DB_OPERATOR_EVENT_LIMIT,
+        "resolution_events": COMPACT_DB_RESOLUTION_EVENT_LIMIT,
+    }

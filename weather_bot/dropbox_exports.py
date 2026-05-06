@@ -16,9 +16,14 @@ from .paths import DROPBOX_SYNC_ROOT, REPO_ROOT
 
 DROPBOX_OAUTH_URL = "https://api.dropboxapi.com/oauth2/token"
 DROPBOX_UPLOAD_URL = "https://content.dropboxapi.com/2/files/upload"
+DROPBOX_UPLOAD_SESSION_START_URL = "https://content.dropboxapi.com/2/files/upload_session/start"
+DROPBOX_UPLOAD_SESSION_APPEND_URL = "https://content.dropboxapi.com/2/files/upload_session/append_v2"
+DROPBOX_UPLOAD_SESSION_FINISH_URL = "https://content.dropboxapi.com/2/files/upload_session/finish"
 DROPBOX_DOWNLOAD_URL = "https://content.dropboxapi.com/2/files/download"
 DROPBOX_SHARED_LINK_CREATE_URL = "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings"
 DROPBOX_SHARED_LINK_LIST_URL = "https://api.dropboxapi.com/2/sharing/list_shared_links"
+DROPBOX_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+DROPBOX_SIMPLE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
 
 
 def dropbox_settings_from_env_or_options() -> dict[str, str]:
@@ -131,6 +136,9 @@ def resolve_dropbox_access_token(dropbox_auth: dict[str, Any]) -> str:
 
 def dropbox_upload_file(local_path: str | Path, dropbox_path: str, dropbox_auth: dict[str, Any]) -> dict[str, Any]:
     path = Path(local_path)
+    size = path.stat().st_size
+    if size > DROPBOX_SIMPLE_UPLOAD_MAX_BYTES:
+        return _dropbox_upload_file_chunked(path, dropbox_path, dropbox_auth)
     response = _dropbox_request(
         url=DROPBOX_UPLOAD_URL,
         dropbox_auth=dropbox_auth,
@@ -149,10 +157,82 @@ def dropbox_upload_file(local_path: str | Path, dropbox_path: str, dropbox_auth:
     return {
         "ok": True,
         "status": response.get("status"),
-        "bytes": path.stat().st_size,
+        "bytes": size,
         "path": str(dropbox_path),
         "payload": payload,
     }
+
+
+def _dropbox_upload_file_chunked(path: Path, dropbox_path: str, dropbox_auth: dict[str, Any]) -> dict[str, Any]:
+    size = path.stat().st_size
+    try:
+        token = resolve_dropbox_access_token(dropbox_auth)
+        with path.open("rb") as handle:
+            first_chunk = handle.read(DROPBOX_UPLOAD_CHUNK_BYTES)
+            start_response = _dropbox_content_post(
+                DROPBOX_UPLOAD_SESSION_START_URL,
+                token=token,
+                api_arg={"close": False},
+                data=first_chunk,
+                timeout=120,
+            )
+            if not start_response.get("ok"):
+                return start_response
+            session_id = str((start_response.get("payload") or {}).get("session_id") or "")
+            if not session_id:
+                return {"ok": False, "status": None, "error": "Dropbox upload session returned no session_id."}
+
+            offset = len(first_chunk)
+            while offset < size:
+                remaining = size - offset
+                chunk = handle.read(min(DROPBOX_UPLOAD_CHUNK_BYTES, remaining))
+                if not chunk:
+                    break
+                next_offset = offset + len(chunk)
+                if next_offset >= size:
+                    finish_response = _dropbox_content_post(
+                        DROPBOX_UPLOAD_SESSION_FINISH_URL,
+                        token=token,
+                        api_arg={
+                            "cursor": {"session_id": session_id, "offset": offset},
+                            "commit": {
+                                "path": str(dropbox_path),
+                                "mode": "overwrite",
+                                "autorename": False,
+                                "mute": True,
+                            },
+                        },
+                        data=chunk,
+                        timeout=120,
+                    )
+                    if not finish_response.get("ok"):
+                        return finish_response
+                    return {
+                        "ok": True,
+                        "status": finish_response.get("status"),
+                        "bytes": size,
+                        "path": str(dropbox_path),
+                        "payload": finish_response.get("payload") or {},
+                        "chunked": True,
+                    }
+                append_response = _dropbox_content_post(
+                    DROPBOX_UPLOAD_SESSION_APPEND_URL,
+                    token=token,
+                    api_arg={"cursor": {"session_id": session_id, "offset": offset}, "close": False},
+                    data=chunk,
+                    timeout=120,
+                )
+                if not append_response.get("ok"):
+                    return append_response
+                offset = next_offset
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": None,
+            "error": str(exc),
+            "error_details": _dropbox_error_details(str(exc)),
+        }
+    return {"ok": False, "status": None, "error": "Dropbox upload session ended before committing the file."}
 
 
 def dropbox_download_file(dropbox_path: str, dropbox_auth: dict[str, Any], local_path: str | Path) -> dict[str, Any]:
@@ -318,6 +398,53 @@ def _dropbox_request(
             "status": None,
             "error": str(exc),
             "error_details": _dropbox_error_details(str(exc)),
+        }
+
+
+def _dropbox_content_post(
+    url: str,
+    *,
+    token: str,
+    api_arg: dict[str, Any],
+    data: bytes,
+    timeout: int,
+) -> dict[str, Any]:
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/octet-stream",
+                "Dropbox-API-Arg": json.dumps(api_arg),
+            },
+            data=data,
+            timeout=timeout,
+        )
+        content_type = str(response.headers.get("Content-Type") or "")
+        payload: Any = {}
+        if "application/json" in content_type and response.text:
+            payload = response.json()
+        if response.status_code >= 400:
+            error_text = response.text or f"HTTP {response.status_code}"
+            return {
+                "ok": False,
+                "status": response.status_code,
+                "error": error_text,
+                "error_details": _dropbox_error_details(error_text),
+                "payload": payload if isinstance(payload, dict) else {},
+            }
+        return {
+            "ok": True,
+            "status": response.status_code,
+            "payload": payload if isinstance(payload, dict) else {},
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": None,
+            "error": str(exc),
+            "error_details": _dropbox_error_details(str(exc)),
+            "payload": {},
         }
 
 
