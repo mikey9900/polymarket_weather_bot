@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -35,6 +36,20 @@ def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "active_config.yaml"
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     return config_path
+
+
+def _wait_for_analysis_export(exporter: AnalysisBundleExporter, *, timeout: float = 10.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status = exporter.status()
+        if not status.get("analysis_bundle_export_in_progress"):
+            error = status.get("last_analysis_bundle_error")
+            if error:
+                raise AssertionError(f"analysis export failed: {error}")
+            if status.get("last_analysis_bundle_path"):
+                return status
+        time.sleep(0.05)
+    raise AssertionError("analysis export did not finish before timeout")
 
 
 def test_default_config_disables_precipitation_scans(tmp_path: Path):
@@ -439,11 +454,15 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     response = dashboard.apply_control_threadsafe({"action": "export_analysis_bundle"})
 
     assert response["ok"] is True
-    bundle_path = Path(response["state"]["exports"]["last_analysis_bundle_path"])
-    latest_bundle_path = Path(response["state"]["exports"]["latest_analysis_bundle_path"])
-    latest_index_path = Path(response["state"]["exports"]["latest_analysis_index_path"])
-    latest_report_path = Path(response["state"]["exports"]["latest_analysis_report_path"])
-    report_path = Path(response["state"]["exports"]["last_analysis_report_path"])
+    assert response["status"] == 202
+    _wait_for_analysis_export(analysis_exporter)
+    dashboard.refresh_once()
+    state = dashboard.get_state_threadsafe()
+    bundle_path = Path(state["exports"]["last_analysis_bundle_path"])
+    latest_bundle_path = Path(state["exports"]["latest_analysis_bundle_path"])
+    latest_index_path = Path(state["exports"]["latest_analysis_index_path"])
+    latest_report_path = Path(state["exports"]["latest_analysis_report_path"])
+    report_path = Path(state["exports"]["last_analysis_report_path"])
     assert bundle_path.exists()
     assert latest_bundle_path.exists()
     assert latest_index_path.exists()
@@ -525,6 +544,9 @@ def test_live_api_serves_latest_analysis_report_download(tmp_path: Path):
 
     export_response = dashboard.apply_control_threadsafe({"action": "export_analysis_bundle"})
     assert export_response["ok"] is True
+    assert export_response["status"] == 202
+    _wait_for_analysis_export(analysis_exporter)
+    dashboard.refresh_once()
 
     server = LiveApiServer(dashboard, host="127.0.0.1", port=0)
     server.start_threaded()
@@ -676,8 +698,11 @@ def test_analysis_bundle_export_updates_dropbox_latest_pointer(tmp_path: Path, m
 
     response = dashboard.apply_control_threadsafe({"action": "export_analysis_bundle"})
 
-    exports = response["state"]["exports"]
     assert response["ok"] is True
+    assert response["status"] == 202
+    _wait_for_analysis_export(analysis_exporter)
+    dashboard.refresh_once()
+    exports = dashboard.get_state_threadsafe()["exports"]
     assert exports["analysis_dropbox_enabled"] is True
     assert exports["last_analysis_bundle_dropbox_path"] == "/weather-bot/latest/WEATHER-BOT_latest_bundle.zip"
     assert exports["last_analysis_index_dropbox_path"] == "/weather-bot/latest/WEATHER-BOT_latest_index.json"
@@ -686,8 +711,7 @@ def test_analysis_bundle_export_updates_dropbox_latest_pointer(tmp_path: Path, m
     assert exports["last_analysis_index_dropbox_url"] == "https://dropbox.test/weather-bot/latest/WEATHER-BOT_latest_index.json?dl=0"
     assert exports["last_analysis_report_dropbox_url"] == "https://dropbox.test/weather-bot/latest/WEATHER-BOT_latest_report.xlsx?dl=0"
     assert exports["last_analysis_bundle_dropbox_error"] is None
-    assert "Dropbox latest bundle, report, and index are now in sync." in response["message"]
-    assert "Report: /weather-bot/latest/WEATHER-BOT_latest_report.xlsx." in response["message"]
+    assert "Analysis bundle export started in the background" in response["message"]
     latest_index = json.loads(Path(exports["latest_analysis_index_path"]).read_text(encoding="utf-8"))
     assert latest_index["dropbox"]["latest_bundle_url"] == exports["last_analysis_bundle_dropbox_url"]
     assert latest_index["dropbox"]["latest_index_url"] == exports["last_analysis_index_dropbox_url"]

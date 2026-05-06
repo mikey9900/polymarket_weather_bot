@@ -922,6 +922,19 @@ class WeatherTracker:
             ).fetchall()
         return [_deserialize_position_review_row(row) for row in rows]
 
+    def get_position_review_count(self, *, position_id: int | None = None) -> int:
+        params: list[Any] = []
+        where = ""
+        if position_id is not None:
+            where = "WHERE position_id = ?"
+            params.append(int(position_id))
+        with self._lock:
+            row = self.conn.execute(
+                f"SELECT COUNT(*) AS count FROM paper_position_reviews {where}",
+                tuple(params),
+            ).fetchone()
+        return int(row["count"] or 0) if row is not None else 0
+
     def get_dashboard_paper_positions(
         self,
         limit: int = 20,

@@ -128,6 +128,8 @@ class ControlPlane:
         runtime_status = self.runtime.get_status_snapshot()
         paper = self.tracker.get_paper_stats()
         shadow_summary = self.tracker.get_shadow_order_summary()
+        analysis_status = self.analysis_exporter.status() if self.analysis_exporter is not None else {}
+        analysis_export_in_progress = bool(analysis_status.get("analysis_bundle_export_in_progress"))
         temperature_scan_interval_seconds = runtime_status.get(
             "auto_temperature_scan_interval_seconds",
             _scheduled_interval_seconds(
@@ -223,7 +225,7 @@ class ControlPlane:
                 "toggle_temperature": True,
                 "toggle_precipitation": True,
                 "toggle_paper_auto_trade": True,
-                "export_analysis_bundle": self.analysis_exporter is not None,
+                "export_analysis_bundle": self.analysis_exporter is not None and not analysis_export_in_progress,
                 "research_run_now": self.codex_manager is not None,
                 "tuner_run_now": self.codex_manager is not None,
                 "tuner_promote_latest": self.codex_manager is not None,
@@ -233,6 +235,8 @@ class ControlPlane:
             "last_message": self._last_control.get("message"),
             "last_ok": self._last_control.get("ok"),
             "last_action_at": self._last_control.get("created_at"),
+            "analysis_bundle_export_in_progress": analysis_export_in_progress,
+            "analysis_bundle_export_started_at": analysis_status.get("analysis_bundle_export_started_at"),
         }
 
     def apply_sync(self, request: ControlRequest) -> ControlResult:
@@ -453,6 +457,16 @@ class ControlPlane:
         if action == "export_analysis_bundle":
             if self.analysis_exporter is None:
                 return self._record(ControlResult(False, 503, "Analysis bundle export is not configured.", action))
+            if hasattr(self.analysis_exporter, "export_bundle_async"):
+                result = self.analysis_exporter.export_bundle_async(reason="operator")
+                return self._record(
+                    ControlResult(
+                        bool(result.get("ok")),
+                        int(result.get("status", 202 if result.get("ok") else 409)),
+                        str(result.get("message") or "Analysis bundle export queued."),
+                        action,
+                    )
+                )
             try:
                 result = self.analysis_exporter.export_bundle(reason="operator")
             except Exception as exc:

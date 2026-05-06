@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import threading
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,8 @@ from .paths import ACTIVE_CONFIG_PATH, ANALYSIS_BUNDLE_ROOT
 from .persistent_weather_cache import backup_weather_cache
 
 DEFAULT_ANALYSIS_BUNDLE_LABEL = "WEATHER-BOT"
+POSITION_REVIEW_HISTORY_EXPORT_LIMIT = 5000
+SAME_DAY_RISK_EXPORT_LIMIT = 5000
 
 
 class AnalysisBundleExporter:
@@ -55,6 +58,9 @@ class AnalysisBundleExporter:
         self._last_dropbox_report_path: str | None = None
         self._last_dropbox_report_url: str | None = None
         self._last_dropbox_error: str | None = None
+        self._status_lock = threading.Lock()
+        self._export_in_progress = False
+        self._export_started_at: str | None = None
         self.bundle_root.mkdir(parents=True, exist_ok=True)
 
         settings = dropbox_settings_from_env_or_options()
@@ -95,6 +101,9 @@ class AnalysisBundleExporter:
         self.snapshot_getter = snapshot_getter
 
     def status(self) -> dict[str, Any]:
+        with self._status_lock:
+            export_in_progress = self._export_in_progress
+            export_started_at = self._export_started_at
         return {
             "analysis_bundle_label": self.bundle_label,
             "analysis_bundle_root": str(self.bundle_root),
@@ -108,6 +117,8 @@ class AnalysisBundleExporter:
             "last_analysis_report_path": self._last_report_path,
             "last_analysis_bundle_error": self._last_error,
             "last_analysis_bundle_at": self._last_created_at,
+            "analysis_bundle_export_in_progress": export_in_progress,
+            "analysis_bundle_export_started_at": export_started_at,
             "analysis_dropbox_enabled": self.dropbox_auth is not None,
             "analysis_dropbox_root": self.dropbox_root if self.dropbox_auth is not None or self._dropbox_configuration_error else None,
             "analysis_dropbox_configuration_error": self._dropbox_configuration_error,
@@ -121,6 +132,57 @@ class AnalysisBundleExporter:
         }
 
     def export_bundle(self, *, reason: str = "operator") -> dict[str, Any]:
+        if not self._mark_export_started():
+            raise RuntimeError("Analysis bundle export is already running.")
+        try:
+            return self._export_bundle_unlocked(reason=reason)
+        finally:
+            self._mark_export_finished()
+
+    def export_bundle_async(self, *, reason: str = "operator") -> dict[str, Any]:
+        if not self._mark_export_started():
+            return {
+                "ok": False,
+                "status": 409,
+                "message": "Analysis bundle export is already running. Wait for it to finish before starting another one.",
+            }
+        thread = threading.Thread(
+            target=self._background_export_bundle,
+            kwargs={"reason": reason},
+            name="weather-analysis-bundle-export",
+            daemon=True,
+        )
+        thread.start()
+        return {
+            "ok": True,
+            "status": 202,
+            "message": "Analysis bundle export started in the background. The latest XLSX/ZIP links will update when it finishes.",
+            "started_at": self._export_started_at,
+        }
+
+    def _background_export_bundle(self, *, reason: str) -> None:
+        try:
+            self._export_bundle_unlocked(reason=reason)
+        except Exception as exc:
+            self._last_error = self._last_error or f"{type(exc).__name__}: {exc}"
+        finally:
+            self._mark_export_finished()
+
+    def _mark_export_started(self) -> bool:
+        with self._status_lock:
+            if self._export_in_progress:
+                return False
+            self._export_in_progress = True
+            self._export_started_at = datetime.now(timezone.utc).isoformat()
+            self._last_error = None
+            return True
+
+    def _mark_export_finished(self) -> None:
+        with self._status_lock:
+            self._export_in_progress = False
+            self._export_started_at = None
+
+    def _export_bundle_unlocked(self, *, reason: str = "operator") -> dict[str, Any]:
         if self.snapshot_refresher is not None:
             self.snapshot_refresher()
 
@@ -139,10 +201,21 @@ class AnalysisBundleExporter:
         latest_index_path = self.latest_index_path
         report_path = self.bundle_root / f"{stamp}_{self.bundle_label}_analysis_report.xlsx"
         latest_report_path = self.latest_report_path
-        position_review_history = self.tracker.get_position_review_history(limit=None)
+        position_review_total_count = (
+            self.tracker.get_position_review_count()
+            if hasattr(self.tracker, "get_position_review_count")
+            else None
+        )
+        position_review_history = self.tracker.get_position_review_history(limit=POSITION_REVIEW_HISTORY_EXPORT_LIMIT)
         shadow_order_intents = self.tracker.get_recent_shadow_order_intents(limit=None)
-        same_day_risk_tracking = self.tracker.get_same_day_risk_tracking(limit=None)
+        same_day_risk_tracking = self.tracker.get_same_day_risk_tracking(limit=SAME_DAY_RISK_EXPORT_LIMIT)
         same_day_risk_summary = summarize_same_day_risk(same_day_risk_tracking, position_review_history)
+        position_review_count = (
+            int(position_review_total_count)
+            if position_review_total_count is not None
+            else len(position_review_history)
+        )
+        position_review_export_truncated = position_review_count > len(position_review_history)
 
         try:
             with tempfile.TemporaryDirectory(prefix="weather-analysis-bundle-") as temp_dir:
@@ -214,7 +287,10 @@ class AnalysisBundleExporter:
                         "tracker_db_path": str(self.tracker.db_path),
                         "scan_export_root": str(scan_export_root) if scan_export_root is not None else None,
                         "scan_export_count": len(scan_files),
-                        "position_review_count": len(position_review_history),
+                        "position_review_count": position_review_count,
+                        "position_review_export_count": len(position_review_history),
+                        "position_review_export_limit": POSITION_REVIEW_HISTORY_EXPORT_LIMIT,
+                        "position_review_export_truncated": position_review_export_truncated,
                         "shadow_order_count": len(shadow_order_intents),
                         "same_day_risk": same_day_risk_summary,
                         "same_day_risk_decision_count": same_day_risk_summary["same_day_decision_count"],
@@ -237,7 +313,10 @@ class AnalysisBundleExporter:
                 latest_report_path=latest_report_path,
                 scan_export_root=scan_export_root,
                 scan_files=scan_files,
-                position_review_count=len(position_review_history),
+                position_review_count=position_review_count,
+                position_review_export_count=len(position_review_history),
+                position_review_export_limit=POSITION_REVIEW_HISTORY_EXPORT_LIMIT,
+                position_review_export_truncated=position_review_export_truncated,
                 shadow_order_count=len(shadow_order_intents),
                 same_day_risk_summary=same_day_risk_summary,
                 runtime_status=runtime_status,
@@ -266,7 +345,10 @@ class AnalysisBundleExporter:
                 "latest_report_path": str(latest_report_path),
                 "created_at": self._last_created_at,
                 "scan_export_count": len(scan_files),
-                "position_review_count": len(position_review_history),
+                "position_review_count": position_review_count,
+                "position_review_export_count": len(position_review_history),
+                "position_review_export_limit": POSITION_REVIEW_HISTORY_EXPORT_LIMIT,
+                "position_review_export_truncated": position_review_export_truncated,
                 "shadow_order_count": len(shadow_order_intents),
                 "same_day_risk_decision_count": same_day_risk_summary["same_day_decision_count"],
                 "same_day_low_edge_block_count": same_day_risk_summary["same_day_low_edge_block_count"],
@@ -306,6 +388,9 @@ class AnalysisBundleExporter:
         scan_export_root: Path | None,
         scan_files: list[Path],
         position_review_count: int,
+        position_review_export_count: int,
+        position_review_export_limit: int,
+        position_review_export_truncated: bool,
         shadow_order_count: int,
         same_day_risk_summary: dict[str, int],
         runtime_status: dict[str, Any],
@@ -343,6 +428,9 @@ class AnalysisBundleExporter:
             "scan_export_root": str(scan_export_root) if scan_export_root is not None else None,
             "scan_export_count": len(scan_files),
             "position_review_count": int(position_review_count),
+            "position_review_export_count": int(position_review_export_count),
+            "position_review_export_limit": int(position_review_export_limit),
+            "position_review_export_truncated": bool(position_review_export_truncated),
             "shadow_order_count": int(shadow_order_count),
             "same_day_risk": dict(same_day_risk_summary),
             "same_day_risk_decision_count": int(same_day_risk_summary.get("same_day_decision_count", 0)),

@@ -228,6 +228,8 @@ class DashboardStateService:
                 "last_analysis_report_path": None,
                 "last_analysis_bundle_error": None,
                 "last_analysis_bundle_at": None,
+                "analysis_bundle_export_in_progress": False,
+                "analysis_bundle_export_started_at": None,
                 "analysis_dropbox_enabled": False,
                 "analysis_dropbox_root": None,
                 "analysis_dropbox_configuration_error": None,
@@ -243,7 +245,7 @@ class DashboardStateService:
 
     @staticmethod
     def _should_skip_refresh(action: str, status: int) -> bool:
-        return int(status) == 202 and str(action or "") in {"scan_temperature", "scan_precipitation"}
+        return int(status) == 202 and str(action or "") in {"scan_temperature", "scan_precipitation", "export_analysis_bundle"}
 
     @staticmethod
     def control_plane_request(payload: dict[str, Any]):
