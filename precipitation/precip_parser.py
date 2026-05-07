@@ -34,6 +34,18 @@ def _get_yes_price(market: dict) -> Optional[float]:
         return None
 
 
+def _get_clob_token_ids(market: dict) -> list[str]:
+    raw = market.get("clobTokenIds") or market.get("clob_token_ids")
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except Exception:
+            raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
 def _is_market_closed(market: dict) -> bool:
     if market.get("closed") is True:
         return True
@@ -146,6 +158,10 @@ def parse_precip_buckets_for_event(markets: list) -> list:
 
         bucket["market_yes_price"] = yes_price
         bucket["market_slug"]      = market.get("slug", "")
+        token_ids                  = _get_clob_token_ids(market)
+        bucket["clob_token_ids"]   = token_ids
+        bucket["yes_token_id"]     = token_ids[0] if len(token_ids) >= 1 else None
+        bucket["no_token_id"]      = token_ids[1] if len(token_ids) >= 2 else None
         bucket["liquidity"]        = liquidity
         bucket["event_slug"]       = ""  # filled in by caller
         buckets.append(bucket)

@@ -11,6 +11,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .execution.models import ShadowOrderIntent
+from .execution.shadow_fill import extract_clob_token_ids, token_id_for_outcome
 from .models import ForecastSnapshot, PaperPosition, ResolutionOutcome, WeatherDecision, WeatherSignal, iso_now
 from .paths import TRACKER_DB_PATH, candidate_legacy_tracking_paths
 
@@ -201,6 +202,21 @@ class WeatherTracker:
                 notional_usd REAL NOT NULL,
                 estimated_fee_paid REAL NOT NULL,
                 decision_final_score REAL,
+                clob_token_id TEXT,
+                book_best_bid REAL,
+                book_best_ask REAL,
+                book_spread REAL,
+                book_midpoint REAL,
+                book_depth_at_target_shares REAL,
+                book_depth_at_target_usd REAL,
+                simulated_fill_status TEXT NOT NULL DEFAULT 'not_checked',
+                simulated_fill_shares REAL,
+                simulated_avg_fill_price REAL,
+                simulated_notional_usd REAL,
+                simulated_unfilled_shares REAL,
+                simulated_slippage_bps REAL,
+                execution_checked_at TEXT,
+                execution_error TEXT,
                 reason TEXT NOT NULL,
                 reason_code TEXT,
                 status TEXT NOT NULL,
@@ -217,6 +233,7 @@ class WeatherTracker:
             """
         )
         self._ensure_paper_position_columns()
+        self._ensure_shadow_order_columns()
         self.conn.commit()
 
     def backup_database(self, destination: str | Path) -> str:
@@ -465,6 +482,9 @@ class WeatherTracker:
             position_size = _paper_entry_position_size(stake_usd, available, entry_context["entry_price"], fee_bps)
         if position_size is None:
             return None
+        outcome_side = str(signal.direction or "").upper()
+        signal_payload = dict(signal.raw_payload or {})
+        clob_token_id = token_id_for_outcome(signal_payload, outcome_side)
         return ShadowOrderIntent(
             signal_id=int(signal_id),
             decision_id=int(decision_id),
@@ -479,8 +499,8 @@ class WeatherTracker:
             label=signal.label,
             direction=signal.direction,
             order_action="BUY",
-            outcome_side=str(signal.direction or "").upper(),
-            order_intent="BUY_SHORT" if str(signal.direction or "").upper() == "NO" else "BUY_LONG",
+            outcome_side=outcome_side,
+            order_intent="BUY_SHORT" if outcome_side == "NO" else "BUY_LONG",
             order_type="LIMIT",
             time_in_force="GTC",
             manual_order_indicator="AUTOMATIC",
@@ -490,6 +510,7 @@ class WeatherTracker:
             notional_usd=float(position_size["cost"] or 0.0),
             estimated_fee_paid=float(position_size["entry_fee_paid"] or 0.0),
             decision_final_score=_as_float(decision_final_score),
+            clob_token_id=clob_token_id,
             reason=str(reason or ""),
             reason_code=reason_code,
             payload={
@@ -503,6 +524,9 @@ class WeatherTracker:
                 "available_capital": float(available or 0.0),
                 "entry_fee_bps": _bps(fee_bps),
                 "entry_slippage_bps": _bps(entry_slippage_bps),
+                "clob_token_ids": extract_clob_token_ids(signal_payload),
+                "yes_token_id": signal_payload.get("yes_token_id") or signal_payload.get("yesTokenId"),
+                "no_token_id": signal_payload.get("no_token_id") or signal_payload.get("noTokenId"),
             },
         )
 
@@ -528,7 +552,9 @@ class WeatherTracker:
                 exit_fee_bps=exit_fee_bps,
                 exit_slippage_bps=exit_slippage_bps,
             )
+            entry_shadow = self._shadow_entry_payload_for_position_locked(int(position_id))
         direction = str(row["direction"] or "").upper()
+        clob_token_id = token_id_for_outcome(entry_shadow, direction)
         return ShadowOrderIntent(
             signal_id=int(row["signal_id"]) if row["signal_id"] is not None else None,
             decision_id=int(row["decision_id"]) if row["decision_id"] is not None else None,
@@ -555,9 +581,11 @@ class WeatherTracker:
             notional_usd=float(exit_context["net_payout"] or 0.0),
             estimated_fee_paid=float(exit_context["exit_fee_paid"] or 0.0),
             decision_final_score=_as_float(decision_final_score),
+            clob_token_id=clob_token_id,
             reason=str(reason or ""),
             reason_code=reason_code,
             payload={
+                "entry_shadow_order": entry_shadow,
                 "entry_price": _as_float(row["entry_price"]),
                 "cost": _as_float(row["cost"]),
                 "mark_price": _as_float(row["mark_price"]),
@@ -569,6 +597,26 @@ class WeatherTracker:
             },
         )
 
+    def _shadow_entry_payload_for_position_locked(self, position_id: int) -> dict[str, Any]:
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM shadow_order_intents
+            WHERE position_id = ? AND intent_kind = 'entry'
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """,
+            (int(position_id),),
+        ).fetchone()
+        if row is None:
+            return {}
+        payload = _json_object(row["payload_json"])
+        return {
+            **payload,
+            "clob_token_id": str(row["clob_token_id"] or "") if "clob_token_id" in row.keys() else "",
+            "simulated_fill_status": str(row["simulated_fill_status"] or "") if "simulated_fill_status" in row.keys() else "",
+        }
+
     def record_shadow_order_intent(self, intent: ShadowOrderIntent) -> int:
         payload_json = json.dumps(intent.payload, sort_keys=True)
         with self._lock:
@@ -579,10 +627,14 @@ class WeatherTracker:
                     market_type, market_slug, event_slug, city_slug, event_date, label, direction,
                     order_action, outcome_side, order_intent, order_type, time_in_force,
                     manual_order_indicator, target_price, reference_price, shares, notional_usd,
-                    estimated_fee_paid, decision_final_score, reason, reason_code, status,
-                    payload_json, created_at
+                    estimated_fee_paid, decision_final_score, clob_token_id, book_best_bid,
+                    book_best_ask, book_spread, book_midpoint, book_depth_at_target_shares,
+                    book_depth_at_target_usd, simulated_fill_status, simulated_fill_shares,
+                    simulated_avg_fill_price, simulated_notional_usd, simulated_unfilled_shares,
+                    simulated_slippage_bps, execution_checked_at, execution_error, reason,
+                    reason_code, status, payload_json, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     intent.signal_id,
@@ -610,6 +662,21 @@ class WeatherTracker:
                     intent.notional_usd,
                     intent.estimated_fee_paid,
                     intent.decision_final_score,
+                    intent.clob_token_id,
+                    intent.book_best_bid,
+                    intent.book_best_ask,
+                    intent.book_spread,
+                    intent.book_midpoint,
+                    intent.book_depth_at_target_shares,
+                    intent.book_depth_at_target_usd,
+                    intent.simulated_fill_status,
+                    intent.simulated_fill_shares,
+                    intent.simulated_avg_fill_price,
+                    intent.simulated_notional_usd,
+                    intent.simulated_unfilled_shares,
+                    intent.simulated_slippage_bps,
+                    intent.execution_checked_at,
+                    intent.execution_error,
                     intent.reason,
                     intent.reason_code,
                     intent.status,
@@ -1239,6 +1306,10 @@ class WeatherTracker:
                     COUNT(*) AS total_count,
                     SUM(CASE WHEN intent_kind = 'entry' THEN 1 ELSE 0 END) AS entry_count,
                     SUM(CASE WHEN intent_kind = 'exit' THEN 1 ELSE 0 END) AS exit_count,
+                    SUM(CASE WHEN simulated_fill_status = 'full_fill' THEN 1 ELSE 0 END) AS full_fill_count,
+                    SUM(CASE WHEN simulated_fill_status = 'partial_fill' THEN 1 ELSE 0 END) AS partial_fill_count,
+                    SUM(CASE WHEN simulated_fill_status = 'no_fill' THEN 1 ELSE 0 END) AS no_fill_count,
+                    SUM(CASE WHEN simulated_fill_status IN ('missing_token_id', 'book_error', 'book_empty') THEN 1 ELSE 0 END) AS unknown_fill_count,
                     MAX(created_at) AS last_created_at
                 FROM shadow_order_intents
                 """
@@ -1247,6 +1318,10 @@ class WeatherTracker:
             "total_count": int(row["total_count"] or 0),
             "entry_count": int(row["entry_count"] or 0),
             "exit_count": int(row["exit_count"] or 0),
+            "full_fill_count": int(row["full_fill_count"] or 0),
+            "partial_fill_count": int(row["partial_fill_count"] or 0),
+            "no_fill_count": int(row["no_fill_count"] or 0),
+            "unknown_fill_count": int(row["unknown_fill_count"] or 0),
             "last_created_at": row["last_created_at"],
         }
 
@@ -1332,6 +1407,33 @@ class WeatherTracker:
             if column in existing:
                 continue
             self.conn.execute(f"ALTER TABLE paper_positions ADD COLUMN {column} {column_type}")
+
+    def _ensure_shadow_order_columns(self) -> None:
+        existing = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(shadow_order_intents)").fetchall()
+        }
+        required_columns = {
+            "clob_token_id": "TEXT",
+            "book_best_bid": "REAL",
+            "book_best_ask": "REAL",
+            "book_spread": "REAL",
+            "book_midpoint": "REAL",
+            "book_depth_at_target_shares": "REAL",
+            "book_depth_at_target_usd": "REAL",
+            "simulated_fill_status": "TEXT NOT NULL DEFAULT 'not_checked'",
+            "simulated_fill_shares": "REAL",
+            "simulated_avg_fill_price": "REAL",
+            "simulated_notional_usd": "REAL",
+            "simulated_unfilled_shares": "REAL",
+            "simulated_slippage_bps": "REAL",
+            "execution_checked_at": "TEXT",
+            "execution_error": "TEXT",
+        }
+        for column, column_type in required_columns.items():
+            if column in existing:
+                continue
+            self.conn.execute(f"ALTER TABLE shadow_order_intents ADD COLUMN {column} {column_type}")
 
     def _record_position_review_snapshot(
         self,
@@ -1690,6 +1792,21 @@ def _serialize_shadow_order_intent(row: sqlite3.Row) -> dict[str, Any]:
         "notional_usd": _as_float(payload.get("notional_usd")),
         "estimated_fee_paid": _as_float(payload.get("estimated_fee_paid")),
         "decision_final_score": _as_float(payload.get("decision_final_score")),
+        "clob_token_id": str(payload.get("clob_token_id") or ""),
+        "book_best_bid": _as_float(payload.get("book_best_bid")),
+        "book_best_ask": _as_float(payload.get("book_best_ask")),
+        "book_spread": _as_float(payload.get("book_spread")),
+        "book_midpoint": _as_float(payload.get("book_midpoint")),
+        "book_depth_at_target_shares": _as_float(payload.get("book_depth_at_target_shares")),
+        "book_depth_at_target_usd": _as_float(payload.get("book_depth_at_target_usd")),
+        "simulated_fill_status": str(payload.get("simulated_fill_status") or "not_checked"),
+        "simulated_fill_shares": _as_float(payload.get("simulated_fill_shares")),
+        "simulated_avg_fill_price": _as_float(payload.get("simulated_avg_fill_price")),
+        "simulated_notional_usd": _as_float(payload.get("simulated_notional_usd")),
+        "simulated_unfilled_shares": _as_float(payload.get("simulated_unfilled_shares")),
+        "simulated_slippage_bps": _as_float(payload.get("simulated_slippage_bps")),
+        "execution_checked_at": str(payload.get("execution_checked_at") or ""),
+        "execution_error": str(payload.get("execution_error") or ""),
         "reason": str(payload.get("reason") or ""),
         "reason_code": str(payload.get("reason_code") or ""),
         "status": str(payload.get("status") or ""),

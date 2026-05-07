@@ -214,6 +214,7 @@ class AnalysisBundleExporter:
         )
         position_review_history = self.tracker.get_position_review_history(limit=POSITION_REVIEW_HISTORY_EXPORT_LIMIT)
         shadow_order_intents = self.tracker.get_recent_shadow_order_intents(limit=None)
+        shadow_fill_summary = _summarize_shadow_fills(shadow_order_intents)
         same_day_risk_tracking = self.tracker.get_same_day_risk_tracking(limit=SAME_DAY_RISK_EXPORT_LIMIT)
         same_day_risk_summary = summarize_same_day_risk(same_day_risk_tracking, position_review_history)
         position_review_count = (
@@ -311,6 +312,7 @@ class AnalysisBundleExporter:
                         "position_review_export_limit": POSITION_REVIEW_HISTORY_EXPORT_LIMIT,
                         "position_review_export_truncated": position_review_export_truncated,
                         "shadow_order_count": len(shadow_order_intents),
+                        "shadow_fill_summary": shadow_fill_summary,
                         "same_day_risk": same_day_risk_summary,
                         "same_day_risk_decision_count": same_day_risk_summary["same_day_decision_count"],
                         "same_day_low_edge_block_count": same_day_risk_summary["same_day_low_edge_block_count"],
@@ -337,6 +339,7 @@ class AnalysisBundleExporter:
                 position_review_export_limit=POSITION_REVIEW_HISTORY_EXPORT_LIMIT,
                 position_review_export_truncated=position_review_export_truncated,
                 shadow_order_count=len(shadow_order_intents),
+                shadow_fill_summary=shadow_fill_summary,
                 same_day_risk_summary=same_day_risk_summary,
                 runtime_status=runtime_status,
                 included_entries=[*included_entries, "manifest.json"],
@@ -411,6 +414,7 @@ class AnalysisBundleExporter:
         position_review_export_limit: int,
         position_review_export_truncated: bool,
         shadow_order_count: int,
+        shadow_fill_summary: dict[str, int],
         same_day_risk_summary: dict[str, int],
         runtime_status: dict[str, Any],
         included_entries: list[str],
@@ -453,6 +457,7 @@ class AnalysisBundleExporter:
             "position_review_export_limit": int(position_review_export_limit),
             "position_review_export_truncated": bool(position_review_export_truncated),
             "shadow_order_count": int(shadow_order_count),
+            "shadow_fill_summary": dict(shadow_fill_summary),
             "same_day_risk": dict(same_day_risk_summary),
             "same_day_risk_decision_count": int(same_day_risk_summary.get("same_day_decision_count", 0)),
             "same_day_low_edge_block_count": int(same_day_risk_summary.get("same_day_low_edge_block_count", 0)),
@@ -606,4 +611,15 @@ def _compact_db_limits() -> dict[str, int]:
         "shadow_order_intents": COMPACT_DB_SHADOW_ORDER_LIMIT,
         "operator_events": COMPACT_DB_OPERATOR_EVENT_LIMIT,
         "resolution_events": COMPACT_DB_RESOLUTION_EVENT_LIMIT,
+    }
+
+
+def _summarize_shadow_fills(rows: list[dict[str, Any]]) -> dict[str, int]:
+    statuses = [str(row.get("simulated_fill_status") or "not_checked") for row in rows]
+    known = {"full_fill", "partial_fill", "no_fill"}
+    return {
+        "full_fill_count": statuses.count("full_fill"),
+        "partial_fill_count": statuses.count("partial_fill"),
+        "no_fill_count": statuses.count("no_fill"),
+        "unknown_fill_count": sum(1 for status in statuses if status not in known),
     }

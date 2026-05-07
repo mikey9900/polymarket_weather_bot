@@ -149,6 +149,15 @@ def summarize_same_day_risk(
     }
 
 
+def _count_shadow_fill(rows: list[dict[str, Any]], status: str) -> int:
+    return sum(1 for row in rows if str(row.get("simulated_fill_status") or "") == status)
+
+
+def _count_shadow_unknown_fills(rows: list[dict[str, Any]]) -> int:
+    known = {"full_fill", "partial_fill", "no_fill"}
+    return sum(1 for row in rows if str(row.get("simulated_fill_status") or "") not in known)
+
+
 def _build_overview_sheet(
     ws,
     *,
@@ -240,6 +249,13 @@ def _build_overview_sheet(
     ws.cell(row=preview_row, column=1).alignment = Alignment(horizontal="center")
     quick_lines = [
         f"Open positions: {len(open_positions)} | Recent outcomes: {len(recent_outcomes)} | Recent signals: {len(recent_signals)} | Shadow intents: {len(shadow_order_intents)}",
+        (
+            "Shadow fills: "
+            f"full {_count_shadow_fill(shadow_order_intents, 'full_fill')} | "
+            f"partial {_count_shadow_fill(shadow_order_intents, 'partial_fill')} | "
+            f"none {_count_shadow_fill(shadow_order_intents, 'no_fill')} | "
+            f"unknown {_count_shadow_unknown_fills(shadow_order_intents)}"
+        ),
         (
             f"Same-day temp decisions: {same_day_risk_summary.get('same_day_decision_count', 0)} | "
             f"low-edge blocked: {same_day_risk_summary.get('same_day_low_edge_block_count', 0)} | "
@@ -442,6 +458,17 @@ def _build_shadow_orders_sheet(ws, rows: list[dict[str, Any]]) -> None:
         ("Kind", "intent_kind", "text"),
         ("Mode", "execution_mode", "text"),
         ("Status", "status", "text"),
+        ("Fill", "simulated_fill_status", "text"),
+        ("Fill Sh", "simulated_fill_shares", "number"),
+        ("Avg Fill %", "simulated_avg_fill_price", "percent"),
+        ("Unfilled Sh", "simulated_unfilled_shares", "number"),
+        ("Best Bid %", "book_best_bid", "percent"),
+        ("Best Ask %", "book_best_ask", "percent"),
+        ("Spread %", "book_spread", "percent"),
+        ("Depth Sh", "book_depth_at_target_shares", "number"),
+        ("Depth $", "book_depth_at_target_usd", "currency_plain"),
+        ("Slip bps", "simulated_slippage_bps", "number"),
+        ("Token ID", "clob_token_id", "text"),
         ("City", "city_slug", "text"),
         ("Type", "market_type", "text"),
         ("Date", "event_date", "text"),
@@ -466,8 +493,8 @@ def _build_shadow_orders_sheet(ws, rows: list[dict[str, Any]]) -> None:
     ]
     _write_table(ws, start_row=4, columns=columns, rows=shaped)
     for idx, row in enumerate(shaped, start=5):
-        _fill_if_text(ws.cell(row=idx, column=8), row.get("direction"))
-        _fill_if_text(ws.cell(row=idx, column=10), row.get("outcome_side"))
+        _fill_if_text(ws.cell(row=idx, column=19), row.get("direction"))
+        _fill_if_text(ws.cell(row=idx, column=21), row.get("outcome_side"))
         _fill_shadow_status(ws.cell(row=idx, column=4), row.get("status"))
 
 

@@ -32,6 +32,21 @@ class ShadowOrderIntent:
     notional_usd: float
     estimated_fee_paid: float
     decision_final_score: float | None = None
+    clob_token_id: str | None = None
+    book_best_bid: float | None = None
+    book_best_ask: float | None = None
+    book_spread: float | None = None
+    book_midpoint: float | None = None
+    book_depth_at_target_shares: float | None = None
+    book_depth_at_target_usd: float | None = None
+    simulated_fill_status: str = "not_checked"
+    simulated_fill_shares: float | None = None
+    simulated_avg_fill_price: float | None = None
+    simulated_notional_usd: float | None = None
+    simulated_unfilled_shares: float | None = None
+    simulated_slippage_bps: float | None = None
+    execution_checked_at: str | None = None
+    execution_error: str | None = None
     reason: str = ""
     reason_code: str | None = None
     signal_id: int | None = None

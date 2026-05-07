@@ -206,6 +206,10 @@ class ControlPlane:
             "shadow_order_count": shadow_summary.get("total_count", 0),
             "shadow_entry_count": shadow_summary.get("entry_count", 0),
             "shadow_exit_count": shadow_summary.get("exit_count", 0),
+            "shadow_full_fill_count": shadow_summary.get("full_fill_count", 0),
+            "shadow_partial_fill_count": shadow_summary.get("partial_fill_count", 0),
+            "shadow_no_fill_count": shadow_summary.get("no_fill_count", 0),
+            "shadow_unknown_fill_count": shadow_summary.get("unknown_fill_count", 0),
             "last_shadow_order_at": shadow_summary.get("last_created_at"),
             "paper_open_positions": paper.get("open_positions", 0),
             "available_actions": {

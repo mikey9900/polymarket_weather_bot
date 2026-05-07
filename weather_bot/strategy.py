@@ -18,6 +18,7 @@ from .execution import (
     execution_mode_records_shadow_orders,
     normalize_execution_mode,
 )
+from .execution.shadow_fill import enrich_shadow_intent_with_fill_rehearsal
 from .models import PaperPosition, WeatherDecision, WeatherSignal
 from .tracker import WeatherTracker
 
@@ -84,6 +85,8 @@ class WeatherStrategyEngine:
                     fee_bps=self.config.paper.fee_bps,
                     entry_slippage_bps=self.config.paper.entry_slippage_bps,
                 )
+                if shadow_intent is not None:
+                    shadow_intent = enrich_shadow_intent_with_fill_rehearsal(shadow_intent)
             if decision.accepted:
                 if execution_mode_creates_paper_positions(self.paper_execution_mode):
                     position = self.tracker.create_paper_position(

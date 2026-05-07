@@ -166,6 +166,9 @@ def find_discrepancies(
                 "noaa_prob": noaa_result["forecast_prob"] if noaa_result else None,
                 "weatherapi_prob": weatherapi_result["forecast_prob"] if weatherapi_result else None,
                 "event_slug": bucket.get("event_slug", ""),
+                "clob_token_ids": list(bucket.get("clob_token_ids") or []),
+                "yes_token_id": bucket.get("yes_token_id"),
+                "no_token_id": bucket.get("no_token_id"),
             }
         )
 

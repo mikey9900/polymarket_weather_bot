@@ -24,6 +24,7 @@ from parser.weather_parser import parse_temperature_bucket
 from scanner.weather_event_scanner import normalize_temperature_market_scope
 
 from .execution import execution_mode_records_shadow_orders, normalize_execution_mode
+from .execution.shadow_fill import enrich_shadow_intent_with_fill_rehearsal
 from .messages import format_resolution_message, format_scan_summary, format_signal_message
 from .models import ForecastSnapshot, ResolutionOutcome, ScanBatch, WeatherSignal
 from .precipitation_signals import _build_precip_signal, scan_precipitation_signals
@@ -494,6 +495,8 @@ class WeatherRuntime:
                 exit_fee_bps=self.config.paper.fee_bps,
                 exit_slippage_bps=self.config.paper.exit_slippage_bps,
             )
+            if shadow_exit_intent is not None:
+                shadow_exit_intent = enrich_shadow_intent_with_fill_rehearsal(shadow_exit_intent)
         result = self.tracker.close_paper_position(
             int(position_id),
             exit_price=exit_price,
@@ -786,6 +789,8 @@ class WeatherRuntime:
                     exit_fee_bps=self.config.paper.fee_bps,
                     exit_slippage_bps=self.config.paper.exit_slippage_bps,
                 )
+                if shadow_exit_intent is not None:
+                    shadow_exit_intent = enrich_shadow_intent_with_fill_rehearsal(shadow_exit_intent)
             result = self.tracker.close_paper_position(
                 int(position["id"]),
                 exit_price=mark_price,

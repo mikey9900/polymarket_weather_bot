@@ -62,6 +62,18 @@ def _get_yes_price(market: dict) -> Optional[float]:
         return None
 
 
+def _get_clob_token_ids(market: dict) -> list[str]:
+    raw = market.get("clobTokenIds") or market.get("clob_token_ids")
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except Exception:
+            raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
 def _is_market_closed(market: dict) -> bool:
     """
     Returns True if the market is already resolved/closed.
@@ -253,6 +265,10 @@ def parse_temperature_buckets_for_event(markets: list) -> list:
         bucket = parsed["bucket"].copy()
         bucket["market_slug"]      = market.get("slug")
         bucket["market_yes_price"] = _get_yes_price(market)
+        token_ids                  = _get_clob_token_ids(market)
+        bucket["clob_token_ids"]   = token_ids
+        bucket["yes_token_id"]     = token_ids[0] if len(token_ids) >= 1 else None
+        bucket["no_token_id"]      = token_ids[1] if len(token_ids) >= 2 else None
         bucket["threshold"]        = parsed.get("threshold")
         bucket["liquidity"]        = parsed.get("liquidity", 0.0)
         # event_slug is set later in run_scanner when we know the parent event
