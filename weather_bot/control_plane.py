@@ -128,6 +128,7 @@ class ControlPlane:
         runtime_status = self.runtime.get_status_snapshot()
         paper = self.tracker.get_paper_stats()
         shadow_summary = self.tracker.get_shadow_order_summary()
+        shadow_exec_summary = self.tracker.get_shadow_execution_summary()
         analysis_status = self.analysis_exporter.status() if self.analysis_exporter is not None else {}
         analysis_export_in_progress = bool(analysis_status.get("analysis_bundle_export_in_progress"))
         temperature_scan_interval_seconds = runtime_status.get(
@@ -211,6 +212,23 @@ class ControlPlane:
             "shadow_no_fill_count": shadow_summary.get("no_fill_count", 0),
             "shadow_unknown_fill_count": shadow_summary.get("unknown_fill_count", 0),
             "last_shadow_order_at": shadow_summary.get("last_created_at"),
+            "shadow_execution_enabled": runtime_status.get("shadow_execution_enabled", False),
+            "shadow_exec_order_count": shadow_exec_summary.get("order_count", 0),
+            "shadow_exec_position_count": shadow_exec_summary.get("position_count", 0),
+            "shadow_exec_open_position_count": shadow_exec_summary.get("open_position_count", 0),
+            "shadow_exec_fill_count": shadow_exec_summary.get("fill_count", 0),
+            "shadow_exec_entry_fill_rate": shadow_exec_summary.get("entry_fill_rate", 0.0),
+            "shadow_exec_realistic_total_pnl": shadow_exec_summary.get("realistic_total_pnl", 0.0),
+            "shadow_exec_scoreboard_pnl": shadow_exec_summary.get("scoreboard_pnl", shadow_exec_summary.get("realistic_total_pnl", 0.0)),
+            "shadow_exec_paper_signal_pnl": shadow_exec_summary.get("paper_signal_total_pnl", shadow_exec_summary.get("paper_total_pnl", 0.0)),
+            "shadow_exec_paper_gap": shadow_exec_summary.get("paper_vs_realistic_gap", 0.0),
+            "shadow_exec_signal_gap": shadow_exec_summary.get("signal_vs_realistic_gap", 0.0),
+            "shadow_exec_missed_paper_pnl": shadow_exec_summary.get("missed_paper_pnl", 0.0),
+            "shadow_exec_entry_fill_count": shadow_exec_summary.get("realistic_entry_fill_count", 0),
+            "shadow_exec_unfilled_entry_count": shadow_exec_summary.get("unfilled_entry_order_count", 0),
+            "last_shadow_execution_cycle_at": runtime_status.get("last_shadow_execution_cycle_at"),
+            "last_shadow_execution_status": runtime_status.get("last_shadow_execution_status"),
+            "last_shadow_execution_error": runtime_status.get("last_shadow_execution_error"),
             "paper_open_positions": paper.get("open_positions", 0),
             "available_actions": {
                 "start": True,

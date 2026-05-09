@@ -31,6 +31,29 @@ paper:
   entry_slippage_bps: 15.0
   exit_slippage_bps: 15.0
   mark_stale_after_seconds: 75
+shadow_execution:
+  enabled: true
+  entry_ttl_seconds: 1800
+  exit_ttl_seconds: 300
+  queue_fill_fraction: 0.50
+  rest_fallback_seconds: 5
+  show_taker_exit_estimate: true
+  entry_price_improvement_enabled: true
+  entry_min_edge_abs: 0.12
+  exit_repricing_enabled: true
+  exit_ladder_step_seconds: 60
+  exit_concession_steps:
+    - 0.005
+    - 0.01
+  exit_urgent_concession_steps:
+    - 0.005
+    - 0.01
+    - 0.02
+    - 0.03
+  exit_urgent_reason_codes:
+    - same_day_price_collapse
+    - no_stop_loss
+    - score_breakdown
 strategy:
   temperature:
     min_score: 0.62

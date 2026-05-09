@@ -52,6 +52,7 @@ class WeatherRuntime:
         self.config = config
         self.tracker = tracker
         self.strategy_engine = strategy_engine
+        self.shadow_execution = getattr(strategy_engine, "shadow_execution", None)
         self.telegram = telegram
         self.temperature_scanner = temperature_scanner
         self.precipitation_scanner = precipitation_scanner
@@ -151,6 +152,14 @@ class WeatherRuntime:
             "open_position_weather_refresh_interval_seconds": self._open_position_weather_refresh_interval_seconds(),
             "last_resolution_check_at": None,
             "last_resolution_error": None,
+            "shadow_execution_enabled": bool(getattr(self.shadow_execution, "enabled", False)),
+            "last_shadow_execution_cycle_at": None,
+            "last_shadow_execution_status": None,
+            "last_shadow_execution_error": None,
+            "last_shadow_execution_processed_orders": 0,
+            "last_shadow_execution_fills": 0,
+            "last_shadow_execution_expired": 0,
+            "last_shadow_execution_marked_positions": 0,
         }
         saved_state = self.tracker.get_runtime_state("runtime_status", default=default_state)
         self._state = {**default_state, **saved_state}
@@ -238,6 +247,8 @@ class WeatherRuntime:
             (self._open_position_review_loop, "weather-position-review"),
             (self._resolution_loop, "weather-resolution-loop"),
         ]
+        if self.shadow_execution is not None and getattr(self.shadow_execution, "enabled", False):
+            loops.append((self._shadow_execution_loop, "weather-shadow-execution"))
         for target, name in loops:
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
@@ -250,6 +261,8 @@ class WeatherRuntime:
         for thread in self._threads:
             thread.join(timeout=5.0)
         self._threads.clear()
+        if self.shadow_execution is not None and hasattr(self.shadow_execution, "stop"):
+            self.shadow_execution.stop()
         self._set_next_scheduled_scan("temperature", None)
         self._set_next_scheduled_scan("precipitation", None)
         self._update_state(scan_worker_healthy=False)
@@ -512,7 +525,9 @@ class WeatherRuntime:
         if result is None:
             return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
         if shadow_exit_intent is not None:
-            self.tracker.record_shadow_order_intent(replace(shadow_exit_intent, status="mirrored"))
+            mirrored_intent = replace(shadow_exit_intent, status="mirrored")
+            intent_id = self.tracker.record_shadow_order_intent(mirrored_intent)
+            self._mirror_shadow_execution_intent(intent_id, mirrored_intent)
         return {
             "ok": True,
             "status": 200,
@@ -568,6 +583,44 @@ class WeatherRuntime:
                 return True
             time.sleep(0.05)
         return False
+
+    def _mirror_shadow_execution_intent(self, intent_id: int, intent) -> None:
+        executor = self.shadow_execution
+        if executor is None or not getattr(executor, "enabled", False):
+            return
+        try:
+            executor.mirror_intent(int(intent_id), intent)
+        except Exception as exc:
+            logger.warning("shadow execution mirror failed for intent %s: %s", intent_id, exc)
+            self._update_state(last_shadow_execution_error=str(exc), last_shadow_execution_status="failed")
+
+    def _shadow_execution_loop(self) -> None:
+        interval = max(
+            1,
+            int(getattr(getattr(self.shadow_execution, "config", None), "rest_fallback_seconds", 5) or 5),
+        )
+        self._update_state(shadow_execution_enabled=True, last_shadow_execution_status="running")
+        while not self._stop_event.wait(interval):
+            try:
+                summary = self.shadow_execution.run_cycle(price_fetcher=self.price_fetcher)
+                self._update_state(
+                    shadow_execution_enabled=True,
+                    last_shadow_execution_cycle_at=datetime.now(timezone.utc).isoformat(),
+                    last_shadow_execution_status="completed",
+                    last_shadow_execution_error=None,
+                    last_shadow_execution_processed_orders=int(summary.get("processed_orders") or 0),
+                    last_shadow_execution_fills=int(summary.get("fills") or 0),
+                    last_shadow_execution_expired=int(summary.get("expired") or 0),
+                    last_shadow_execution_marked_positions=int(summary.get("marked_positions") or 0),
+                )
+            except Exception as exc:
+                logger.warning("shadow execution cycle failed: %s", exc)
+                self._update_state(
+                    shadow_execution_enabled=True,
+                    last_shadow_execution_cycle_at=datetime.now(timezone.utc).isoformat(),
+                    last_shadow_execution_status="failed",
+                    last_shadow_execution_error=str(exc),
+                )
 
     def _scan_worker_loop(self) -> None:
         self._update_state(scan_worker_healthy=True, last_scan_worker_error=None)
@@ -804,7 +857,9 @@ class WeatherRuntime:
             )
             if result is not None:
                 if shadow_exit_intent is not None:
-                    self.tracker.record_shadow_order_intent(replace(shadow_exit_intent, status="mirrored"))
+                    mirrored_intent = replace(shadow_exit_intent, status="mirrored")
+                    intent_id = self.tracker.record_shadow_order_intent(mirrored_intent)
+                    self._mirror_shadow_execution_intent(intent_id, mirrored_intent)
                 closed += 1
 
         return {"reviewed": reviewed, "closed": closed}

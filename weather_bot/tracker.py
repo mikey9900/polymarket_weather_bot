@@ -230,6 +230,137 @@ class WeatherTracker:
             CREATE INDEX IF NOT EXISTS idx_shadow_order_intents_created_at ON shadow_order_intents(created_at);
             CREATE INDEX IF NOT EXISTS idx_shadow_order_intents_market_slug ON shadow_order_intents(market_slug);
             CREATE INDEX IF NOT EXISTS idx_shadow_order_intents_kind ON shadow_order_intents(intent_kind);
+
+            CREATE TABLE IF NOT EXISTS shadow_exec_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                shadow_intent_id INTEGER,
+                paper_position_id INTEGER,
+                shadow_position_id INTEGER,
+                parent_order_id INTEGER,
+                intent_kind TEXT NOT NULL,
+                execution_mode TEXT NOT NULL,
+                market_type TEXT NOT NULL,
+                market_slug TEXT NOT NULL,
+                event_slug TEXT NOT NULL,
+                city_slug TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                label TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                order_action TEXT NOT NULL,
+                outcome_side TEXT NOT NULL,
+                target_price REAL NOT NULL,
+                reference_price REAL,
+                requested_shares REAL NOT NULL,
+                filled_shares REAL NOT NULL DEFAULT 0,
+                avg_fill_price REAL,
+                filled_notional_usd REAL NOT NULL DEFAULT 0,
+                unfilled_shares REAL NOT NULL DEFAULT 0,
+                estimated_fee_paid REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                status_reason TEXT,
+                ttl_seconds INTEGER NOT NULL,
+                expires_at TEXT,
+                clob_token_id TEXT,
+                taker_estimate_avg_price REAL,
+                taker_estimate_notional_usd REAL,
+                taker_estimate_fill_shares REAL,
+                taker_estimate_pnl REAL,
+                queue_fill_fraction REAL NOT NULL DEFAULT 0.5,
+                last_checked_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                FOREIGN KEY(shadow_intent_id) REFERENCES shadow_order_intents(id),
+                FOREIGN KEY(paper_position_id) REFERENCES paper_positions(id),
+                FOREIGN KEY(shadow_position_id) REFERENCES shadow_exec_positions(id),
+                FOREIGN KEY(parent_order_id) REFERENCES shadow_exec_orders(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_status ON shadow_exec_orders(status);
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_created_at ON shadow_exec_orders(created_at);
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_token ON shadow_exec_orders(clob_token_id);
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_paper_position ON shadow_exec_orders(paper_position_id);
+
+            CREATE TABLE IF NOT EXISTS shadow_exec_fills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                shadow_position_id INTEGER,
+                shadow_intent_id INTEGER,
+                paper_position_id INTEGER,
+                clob_token_id TEXT,
+                action TEXT NOT NULL,
+                price REAL NOT NULL,
+                shares REAL NOT NULL,
+                notional_usd REAL NOT NULL,
+                liquidity_source TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                filled_at TEXT NOT NULL,
+                FOREIGN KEY(order_id) REFERENCES shadow_exec_orders(id),
+                FOREIGN KEY(shadow_position_id) REFERENCES shadow_exec_positions(id),
+                FOREIGN KEY(shadow_intent_id) REFERENCES shadow_order_intents(id),
+                FOREIGN KEY(paper_position_id) REFERENCES paper_positions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_fills_order ON shadow_exec_fills(order_id);
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_fills_filled_at ON shadow_exec_fills(filled_at);
+
+            CREATE TABLE IF NOT EXISTS shadow_exec_positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                paper_position_id INTEGER,
+                market_type TEXT NOT NULL,
+                market_slug TEXT NOT NULL,
+                event_slug TEXT NOT NULL,
+                city_slug TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                label TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                clob_token_id TEXT,
+                entry_order_id INTEGER,
+                exit_order_id INTEGER,
+                status TEXT NOT NULL,
+                total_entry_shares REAL NOT NULL DEFAULT 0,
+                total_entry_notional_usd REAL NOT NULL DEFAULT 0,
+                avg_entry_price REAL,
+                open_shares REAL NOT NULL DEFAULT 0,
+                closed_shares REAL NOT NULL DEFAULT 0,
+                remaining_cost_basis_usd REAL NOT NULL DEFAULT 0,
+                exit_notional_usd REAL NOT NULL DEFAULT 0,
+                avg_exit_price REAL,
+                realized_pnl REAL NOT NULL DEFAULT 0,
+                mark_price REAL,
+                mark_value_usd REAL,
+                unrealized_pnl REAL,
+                total_pnl REAL,
+                taker_exit_estimated_pnl REAL,
+                opened_at TEXT NOT NULL,
+                closed_at TEXT,
+                last_marked_at TEXT,
+                updated_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                FOREIGN KEY(paper_position_id) REFERENCES paper_positions(id),
+                FOREIGN KEY(entry_order_id) REFERENCES shadow_exec_orders(id),
+                FOREIGN KEY(exit_order_id) REFERENCES shadow_exec_orders(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_positions_status ON shadow_exec_positions(status);
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_positions_paper_position ON shadow_exec_positions(paper_position_id);
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_positions_market ON shadow_exec_positions(market_slug);
+
+            CREATE TABLE IF NOT EXISTS shadow_exec_marks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                shadow_position_id INTEGER NOT NULL,
+                mark_price REAL NOT NULL,
+                mark_value_usd REAL NOT NULL,
+                unrealized_pnl REAL NOT NULL,
+                total_pnl REAL NOT NULL,
+                source TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(shadow_position_id) REFERENCES shadow_exec_positions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_marks_position ON shadow_exec_marks(shadow_position_id);
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_marks_created_at ON shadow_exec_marks(created_at);
             """
         )
         self._ensure_paper_position_columns()
@@ -285,6 +416,23 @@ class WeatherTracker:
                 """,
                 (max(0, int(shadow_order_limit)),),
             )
+            for table_name, order_column in (
+                ("shadow_exec_marks", "created_at"),
+                ("shadow_exec_fills", "filled_at"),
+                ("shadow_exec_orders", "created_at"),
+                ("shadow_exec_positions", "updated_at"),
+            ):
+                conn.execute(
+                    f"""
+                    DELETE FROM {table_name}
+                    WHERE id NOT IN (
+                        SELECT id FROM {table_name}
+                        ORDER BY {order_column} DESC, id DESC
+                        LIMIT ?
+                    )
+                    """,
+                    (max(0, int(shadow_order_limit)),),
+                )
             conn.execute(
                 """
                 DELETE FROM operator_events
@@ -709,6 +857,737 @@ class WeatherTracker:
                 tuple(params),
             ).fetchall()
         return [_serialize_shadow_order_intent(row) for row in rows]
+
+    def create_shadow_exec_order_from_intent(
+        self,
+        *,
+        shadow_intent_id: int,
+        intent: ShadowOrderIntent,
+        entry_ttl_seconds: int = 1800,
+        exit_ttl_seconds: int = 300,
+        queue_fill_fraction: float = 0.5,
+        taker_estimate: dict[str, Any] | None = None,
+    ) -> int:
+        ttl_seconds = int(entry_ttl_seconds if str(intent.intent_kind or "").lower() == "entry" else exit_ttl_seconds)
+        ttl_seconds = max(1, ttl_seconds)
+        created_at = str(intent.created_at or iso_now())
+        created_dt = _parse_iso_datetime(created_at) or datetime.now(timezone.utc)
+        expires_at = (created_dt + timedelta(seconds=ttl_seconds)).isoformat()
+        requested_shares = max(0.0, float(intent.shares or 0.0))
+        status = "resting"
+        status_reason = "Waiting for executable public market evidence."
+        shadow_position_id = None
+        shadow_position_open_shares = None
+        if not str(intent.clob_token_id or "").strip():
+            status = "error"
+            status_reason = "missing_token_id"
+        elif requested_shares <= 0:
+            status = "error"
+            status_reason = "zero_requested_shares"
+        elif str(intent.intent_kind or "").lower() == "exit":
+            with self._lock:
+                row = self.conn.execute(
+                    """
+                    SELECT id, open_shares
+                    FROM shadow_exec_positions
+                    WHERE paper_position_id = ? AND status = 'open'
+                    ORDER BY opened_at ASC, id ASC
+                    LIMIT 1
+                    """,
+                    (intent.position_id,),
+                ).fetchone()
+            if row is None:
+                status = "no_position"
+                status_reason = "No realistic shadow position exists for this paper exit."
+            else:
+                shadow_position_id = int(row["id"])
+                shadow_position_open_shares = max(0.0, float(row["open_shares"] or 0.0))
+                requested_shares = min(requested_shares, shadow_position_open_shares)
+                if requested_shares <= 0:
+                    status = "no_position"
+                    status_reason = "Realistic shadow position has no open shares."
+
+        payload = {
+            "shadow_intent": intent.to_dict(),
+            "shadow_execution": {
+                "entry_ttl_seconds": int(entry_ttl_seconds),
+                "exit_ttl_seconds": int(exit_ttl_seconds),
+                "queue_fill_fraction": float(queue_fill_fraction),
+                "shadow_position_open_shares": shadow_position_open_shares,
+            },
+        }
+        if taker_estimate:
+            payload["taker_estimate"] = taker_estimate
+        with self._lock:
+            existing = self.conn.execute(
+                "SELECT id FROM shadow_exec_orders WHERE shadow_intent_id = ? LIMIT 1",
+                (int(shadow_intent_id),),
+            ).fetchone()
+            if existing is not None:
+                return int(existing["id"])
+            cursor = self.conn.execute(
+                """
+                INSERT INTO shadow_exec_orders (
+                    shadow_intent_id, paper_position_id, shadow_position_id, parent_order_id,
+                    intent_kind, execution_mode, market_type, market_slug, event_slug, city_slug,
+                    event_date, label, direction, order_action, outcome_side, target_price,
+                    reference_price, requested_shares, filled_shares, avg_fill_price,
+                    filled_notional_usd, unfilled_shares, estimated_fee_paid, status,
+                    status_reason, ttl_seconds, expires_at, clob_token_id,
+                    taker_estimate_avg_price, taker_estimate_notional_usd,
+                    taker_estimate_fill_shares, taker_estimate_pnl, queue_fill_fraction,
+                    last_checked_at, created_at, updated_at, payload_json
+                )
+                VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(shadow_intent_id),
+                    intent.position_id,
+                    shadow_position_id,
+                    str(intent.intent_kind or ""),
+                    str(intent.execution_mode or ""),
+                    str(intent.market_type or ""),
+                    str(intent.market_slug or ""),
+                    str(intent.event_slug or ""),
+                    str(intent.city_slug or ""),
+                    str(intent.event_date or ""),
+                    str(intent.label or ""),
+                    str(intent.direction or ""),
+                    str(intent.order_action or ""),
+                    str(intent.outcome_side or ""),
+                    float(intent.target_price or 0.0),
+                    _as_float(intent.reference_price),
+                    requested_shares,
+                    requested_shares,
+                    float(intent.estimated_fee_paid or 0.0),
+                    status,
+                    status_reason,
+                    ttl_seconds,
+                    expires_at,
+                    str(intent.clob_token_id or ""),
+                    _as_float((taker_estimate or {}).get("avg_fill_price")),
+                    _as_float((taker_estimate or {}).get("notional_usd")),
+                    _as_float((taker_estimate or {}).get("fill_shares")),
+                    _as_float((taker_estimate or {}).get("estimated_pnl")),
+                    max(0.0, min(1.0, float(queue_fill_fraction))),
+                    None,
+                    created_at,
+                    created_at,
+                    json.dumps(payload, sort_keys=True),
+                ),
+            )
+            order_id = int(cursor.lastrowid)
+            if shadow_position_id is not None:
+                self.conn.execute(
+                    """
+                    UPDATE shadow_exec_positions
+                    SET exit_order_id = ?,
+                        taker_exit_estimated_pnl = COALESCE(?, taker_exit_estimated_pnl),
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        order_id,
+                        _as_float((taker_estimate or {}).get("estimated_pnl")),
+                        created_at,
+                        shadow_position_id,
+                    ),
+                )
+            self.conn.commit()
+            return order_id
+
+    def update_shadow_exec_order_target(
+        self,
+        order_id: int,
+        *,
+        target_price: float,
+        reason: str,
+        evidence: dict[str, Any] | None = None,
+        updated_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        updated_at = str(updated_at or iso_now())
+        target_price = _bounded_probability(target_price)
+        if target_price is None:
+            return self.get_shadow_exec_order(order_id)
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM shadow_exec_orders WHERE id = ?", (int(order_id),)).fetchone()
+            if row is None:
+                return None
+            payload = _json_object(row["payload_json"])
+            repricing = payload.get("shadow_execution_repricing")
+            if not isinstance(repricing, dict):
+                repricing = {
+                    "original_target_price": _as_float(row["target_price"]),
+                    "events": [],
+                }
+            events = repricing.get("events")
+            if not isinstance(events, list):
+                events = []
+            events.append(
+                {
+                    "target_price": target_price,
+                    "reason": str(reason or "repriced"),
+                    "updated_at": updated_at,
+                    "evidence": evidence or {},
+                }
+            )
+            repricing["events"] = events[-20:]
+            repricing["current_target_price"] = target_price
+            repricing["last_reason"] = str(reason or "repriced")
+            repricing["last_updated_at"] = updated_at
+            payload["shadow_execution_repricing"] = repricing
+            self.conn.execute(
+                """
+                UPDATE shadow_exec_orders
+                SET target_price = ?, status_reason = ?, last_checked_at = ?, updated_at = ?, payload_json = ?
+                WHERE id = ?
+                """,
+                (
+                    target_price,
+                    str(reason or "repriced"),
+                    updated_at,
+                    updated_at,
+                    json.dumps(payload, sort_keys=True),
+                    int(order_id),
+                ),
+            )
+            self.conn.commit()
+        return self.get_shadow_exec_order(order_id)
+
+    def get_shadow_exec_order(self, order_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM shadow_exec_orders WHERE id = ?", (int(order_id),)).fetchone()
+        return _serialize_shadow_exec_order(row) if row is not None else None
+
+    def get_active_shadow_exec_orders(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self.conn.execute(
+                f"""
+                SELECT *
+                FROM shadow_exec_orders
+                WHERE status IN ('resting', 'partial_fill')
+                ORDER BY created_at ASC, id ASC
+                {limit_clause}
+                """,
+                tuple(params),
+            ).fetchall()
+        return [_serialize_shadow_exec_order(row) for row in rows]
+
+    def record_shadow_exec_fill(
+        self,
+        order_id: int,
+        *,
+        price: float,
+        shares: float,
+        liquidity_source: str,
+        evidence: dict[str, Any] | None = None,
+        filled_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        filled_at = str(filled_at or iso_now())
+        price = _bounded_probability(price) or 0.0
+        requested_fill_shares = max(0.0, float(shares or 0.0))
+        if price <= 0 or requested_fill_shares <= 0:
+            return None
+        with self._lock:
+            order = self.conn.execute("SELECT * FROM shadow_exec_orders WHERE id = ?", (int(order_id),)).fetchone()
+            if order is None:
+                return None
+            if str(order["status"] or "") not in {"resting", "partial_fill"}:
+                return None
+            remaining = max(0.0, float(order["requested_shares"] or 0.0) - float(order["filled_shares"] or 0.0))
+            fill_shares = min(remaining, requested_fill_shares)
+            shadow_position_id = int(order["shadow_position_id"]) if order["shadow_position_id"] is not None else None
+            if str(order["intent_kind"] or "").lower() == "exit":
+                if shadow_position_id is None:
+                    self.conn.execute(
+                        """
+                        UPDATE shadow_exec_orders
+                        SET status = 'no_position', status_reason = ?, last_checked_at = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        ("No realistic shadow position exists for this exit order.", filled_at, filled_at, int(order_id)),
+                    )
+                    self.conn.commit()
+                    return None
+                position = self.conn.execute("SELECT * FROM shadow_exec_positions WHERE id = ?", (shadow_position_id,)).fetchone()
+                if position is None or str(position["status"] or "") != "open":
+                    self.conn.execute(
+                        """
+                        UPDATE shadow_exec_orders
+                        SET status = 'no_position', status_reason = ?, last_checked_at = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        ("Realistic shadow position was already closed.", filled_at, filled_at, int(order_id)),
+                    )
+                    self.conn.commit()
+                    return None
+                fill_shares = min(fill_shares, max(0.0, float(position["open_shares"] or 0.0)))
+            if fill_shares <= 0:
+                return None
+            notional = round(fill_shares * price, 6)
+            cursor = self.conn.execute(
+                """
+                INSERT INTO shadow_exec_fills (
+                    order_id, shadow_position_id, shadow_intent_id, paper_position_id,
+                    clob_token_id, action, price, shares, notional_usd,
+                    liquidity_source, evidence_json, filled_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(order_id),
+                    shadow_position_id,
+                    order["shadow_intent_id"],
+                    order["paper_position_id"],
+                    str(order["clob_token_id"] or ""),
+                    str(order["order_action"] or ""),
+                    price,
+                    round(fill_shares, 6),
+                    notional,
+                    str(liquidity_source or "unknown"),
+                    json.dumps(evidence or {}, sort_keys=True),
+                    filled_at,
+                ),
+            )
+            fill_id = int(cursor.lastrowid)
+            filled_before = float(order["filled_shares"] or 0.0)
+            notional_before = float(order["filled_notional_usd"] or 0.0)
+            filled_total = round(filled_before + fill_shares, 6)
+            notional_total = round(notional_before + notional, 6)
+            unfilled = round(max(0.0, float(order["requested_shares"] or 0.0) - filled_total), 6)
+            avg_fill_price = round(notional_total / filled_total, 6) if filled_total > 0 else None
+            order_status = "filled" if unfilled <= 0.000001 else "partial_fill"
+            self.conn.execute(
+                """
+                UPDATE shadow_exec_orders
+                SET filled_shares = ?, avg_fill_price = ?, filled_notional_usd = ?,
+                    unfilled_shares = ?, status = ?, status_reason = ?, last_checked_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    filled_total,
+                    avg_fill_price,
+                    notional_total,
+                    unfilled,
+                    order_status,
+                    str(liquidity_source or "fill"),
+                    filled_at,
+                    filled_at,
+                    int(order_id),
+                ),
+            )
+            if str(order["intent_kind"] or "").lower() == "entry":
+                shadow_position_id = self._apply_shadow_entry_fill_locked(order, int(order_id), fill_shares, notional, filled_at)
+                self.conn.execute(
+                    "UPDATE shadow_exec_fills SET shadow_position_id = ? WHERE id = ?",
+                    (shadow_position_id, fill_id),
+                )
+                self.conn.execute(
+                    "UPDATE shadow_exec_orders SET shadow_position_id = ? WHERE id = ?",
+                    (shadow_position_id, int(order_id)),
+                )
+            else:
+                self._apply_shadow_exit_fill_locked(shadow_position_id, int(order_id), fill_shares, notional, filled_at)
+            self.conn.commit()
+        return self.get_recent_shadow_exec_fills(limit=1)[0]
+
+    def expire_shadow_exec_orders(self, *, now: str | None = None) -> int:
+        now = str(now or iso_now())
+        now_dt = _parse_iso_datetime(now) or datetime.now(timezone.utc)
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM shadow_exec_orders WHERE status IN ('resting', 'partial_fill')"
+            ).fetchall()
+            expired = 0
+            for row in rows:
+                expires_at = _parse_iso_datetime(row["expires_at"])
+                if expires_at is None or expires_at > now_dt:
+                    continue
+                self.conn.execute(
+                    """
+                    UPDATE shadow_exec_orders
+                    SET status = 'expired', status_reason = ?, last_checked_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    ("Order TTL elapsed before remaining shares filled.", now, now, int(row["id"])),
+                )
+                expired += 1
+            self.conn.commit()
+            return expired
+
+    def mark_shadow_exec_position(
+        self,
+        position_id: int,
+        *,
+        mark_price: float,
+        source: str = "mark",
+        evidence: dict[str, Any] | None = None,
+        marked_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        marked_at = str(marked_at or iso_now())
+        mark_price = _bounded_probability(mark_price) or 0.0
+        with self._lock:
+            payload = self._refresh_shadow_exec_position_metrics_locked(
+                int(position_id),
+                mark_price=mark_price,
+                marked_at=marked_at,
+                source=source,
+                evidence=evidence,
+            )
+            self.conn.commit()
+        return payload
+
+    def get_recent_shadow_exec_orders(self, *, limit: int | None = 5000) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM shadow_exec_orders ORDER BY created_at DESC, id DESC {limit_clause}",
+                tuple(params),
+            ).fetchall()
+        return [_serialize_shadow_exec_order(row) for row in rows]
+
+    def get_recent_shadow_exec_fills(self, *, limit: int | None = 5000) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM shadow_exec_fills ORDER BY filled_at DESC, id DESC {limit_clause}",
+                tuple(params),
+            ).fetchall()
+        return [_serialize_shadow_exec_fill(row) for row in rows]
+
+    def get_shadow_exec_positions(self, *, limit: int | None = 5000, status: str | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if status:
+            where = "WHERE status = ?"
+            params.append(str(status))
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM shadow_exec_positions {where} ORDER BY updated_at DESC, id DESC {limit_clause}",
+                tuple(params),
+            ).fetchall()
+        return [_serialize_shadow_exec_position(row) for row in rows]
+
+    def get_recent_shadow_exec_marks(self, *, limit: int | None = 5000) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM shadow_exec_marks ORDER BY created_at DESC, id DESC {limit_clause}",
+                tuple(params),
+            ).fetchall()
+        return [_serialize_shadow_exec_mark(row) for row in rows]
+
+    def get_shadow_execution_missed_paper_trades(self, *, limit: int | None = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            entry_rows = self.conn.execute(
+                "SELECT DISTINCT paper_position_id FROM shadow_exec_orders WHERE intent_kind = 'entry' AND paper_position_id IS NOT NULL"
+            ).fetchall()
+            shadow_rows = self.conn.execute(
+                "SELECT DISTINCT paper_position_id FROM shadow_exec_positions WHERE paper_position_id IS NOT NULL"
+            ).fetchall()
+            positions = self._query_dashboard_paper_positions(limit=None)
+        entry_ids = {int(row["paper_position_id"]) for row in entry_rows if row["paper_position_id"] is not None}
+        shadow_ids = {int(row["paper_position_id"]) for row in shadow_rows if row["paper_position_id"] is not None}
+        missed: list[dict[str, Any]] = []
+        for position in positions:
+            position_id = int(position.get("id") or 0)
+            if position_id not in entry_ids or position_id in shadow_ids:
+                continue
+            paper_pnl = _paper_position_current_pnl(position)
+            missed.append(
+                {
+                    "paper_position_id": position_id,
+                    "market_slug": position.get("market_slug"),
+                    "event_title": position.get("event_title"),
+                    "city_slug": position.get("city_slug"),
+                    "event_date": position.get("event_date"),
+                    "label": position.get("target_label"),
+                    "direction": position.get("direction"),
+                    "status": position.get("status"),
+                    "paper_pnl": paper_pnl,
+                    "paper_cost": position.get("cost"),
+                    "created_at": position.get("created_at"),
+                    "resolved_at": position.get("resolved_at"),
+                }
+            )
+        missed.sort(key=lambda item: abs(float(item.get("paper_pnl") or 0.0)), reverse=True)
+        if limit is not None:
+            return missed[: max(0, int(limit))]
+        return missed
+
+    def get_shadow_execution_summary(self) -> dict[str, Any]:
+        with self._lock:
+            order_rows = self.conn.execute("SELECT * FROM shadow_exec_orders").fetchall()
+            position_rows = self.conn.execute("SELECT * FROM shadow_exec_positions").fetchall()
+            fill_rows = self.conn.execute("SELECT * FROM shadow_exec_fills").fetchall()
+            last_order = self.conn.execute("SELECT MAX(created_at) AS value FROM shadow_exec_orders").fetchone()
+            last_fill = self.conn.execute("SELECT MAX(filled_at) AS value FROM shadow_exec_fills").fetchone()
+        orders = [_serialize_shadow_exec_order(row) for row in order_rows]
+        positions = [_serialize_shadow_exec_position(row) for row in position_rows]
+        fills = [_serialize_shadow_exec_fill(row) for row in fill_rows]
+        paper_stats = self.get_paper_stats()
+        missed = self.get_shadow_execution_missed_paper_trades(limit=None)
+        total_pnl = round(sum(float(item.get("total_pnl") or 0.0) for item in positions), 6)
+        realized_pnl = round(sum(float(item.get("realized_pnl") or 0.0) for item in positions), 6)
+        unrealized_pnl = round(sum(float(item.get("unrealized_pnl") or 0.0) for item in positions), 6)
+        open_exposure = round(sum(float(item.get("mark_value_usd") or 0.0) for item in positions if item.get("status") == "open"), 6)
+        entry_orders = [item for item in orders if item.get("intent_kind") == "entry"]
+        exit_orders = [item for item in orders if item.get("intent_kind") == "exit"]
+        filled_entries = [item for item in entry_orders if float(item.get("filled_shares") or 0.0) > 0]
+        unfilled_entries = [item for item in entry_orders if float(item.get("filled_shares") or 0.0) <= 0]
+        filled_orders = [item for item in orders if float(item.get("filled_shares") or 0.0) > 0]
+        paper_pnl = float(paper_stats.get("total_pnl") or 0.0)
+        missed_paper_pnl = round(sum(float(item.get("paper_pnl") or 0.0) for item in missed), 6)
+        taker_exit_estimated_pnl = round(
+            sum(float(item.get("taker_exit_estimated_pnl") or 0.0) for item in positions),
+            6,
+        )
+        return {
+            "generated_at": iso_now(),
+            "order_count": len(orders),
+            "entry_order_count": len(entry_orders),
+            "exit_order_count": len(exit_orders),
+            "filled_order_count": len(filled_orders),
+            "open_order_count": sum(1 for item in orders if item.get("status") in {"resting", "partial_fill"}),
+            "expired_order_count": sum(1 for item in orders if item.get("status") == "expired"),
+            "no_position_order_count": sum(1 for item in orders if item.get("status") == "no_position"),
+            "position_count": len(positions),
+            "open_position_count": sum(1 for item in positions if item.get("status") == "open"),
+            "closed_position_count": sum(1 for item in positions if item.get("status") == "closed"),
+            "fill_count": len(fills),
+            "entry_fill_rate": round((len(filled_entries) / len(entry_orders) * 100.0), 2) if entry_orders else 0.0,
+            "realistic_total_pnl": total_pnl,
+            "realistic_realized_pnl": realized_pnl,
+            "realistic_unrealized_pnl": unrealized_pnl,
+            "taker_exit_estimated_pnl": taker_exit_estimated_pnl,
+            "paper_total_pnl": round(paper_pnl, 6),
+            "paper_signal_total_pnl": round(paper_pnl, 6),
+            "scoreboard_pnl": total_pnl,
+            "scoreboard_label": "Executable Shadow P/L",
+            "paper_vs_realistic_gap": round(total_pnl - paper_pnl, 6),
+            "signal_vs_realistic_gap": round(paper_pnl - total_pnl, 6),
+            "missed_paper_pnl": missed_paper_pnl,
+            "open_exposure": open_exposure,
+            "realistic_entry_fill_count": len(filled_entries),
+            "unfilled_entry_order_count": len(unfilled_entries),
+            "last_order_at": last_order["value"] if last_order is not None else None,
+            "last_fill_at": last_fill["value"] if last_fill is not None else None,
+            "by_status": _count_by_key(orders, "status"),
+        }
+
+    def _apply_shadow_entry_fill_locked(
+        self,
+        order: sqlite3.Row,
+        order_id: int,
+        fill_shares: float,
+        notional: float,
+        filled_at: str,
+    ) -> int:
+        position = None
+        if order["paper_position_id"] is not None:
+            position = self.conn.execute(
+                """
+                SELECT *
+                FROM shadow_exec_positions
+                WHERE paper_position_id = ? AND status = 'open'
+                ORDER BY opened_at ASC, id ASC
+                LIMIT 1
+                """,
+                (order["paper_position_id"],),
+            ).fetchone()
+        if position is None:
+            avg_entry_price = round(notional / fill_shares, 6) if fill_shares > 0 else None
+            cursor = self.conn.execute(
+                """
+                INSERT INTO shadow_exec_positions (
+                    paper_position_id, market_type, market_slug, event_slug, city_slug,
+                    event_date, label, direction, clob_token_id, entry_order_id,
+                    exit_order_id, status, total_entry_shares, total_entry_notional_usd,
+                    avg_entry_price, open_shares, closed_shares, remaining_cost_basis_usd,
+                    exit_notional_usd, avg_exit_price, realized_pnl, mark_price,
+                    mark_value_usd, unrealized_pnl, total_pnl, taker_exit_estimated_pnl,
+                    opened_at, closed_at, last_marked_at, updated_at, payload_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'open', ?, ?, ?, ?, 0, ?, 0, NULL, 0, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)
+                """,
+                (
+                    order["paper_position_id"],
+                    str(order["market_type"] or ""),
+                    str(order["market_slug"] or ""),
+                    str(order["event_slug"] or ""),
+                    str(order["city_slug"] or ""),
+                    str(order["event_date"] or ""),
+                    str(order["label"] or ""),
+                    str(order["direction"] or ""),
+                    str(order["clob_token_id"] or ""),
+                    int(order_id),
+                    round(fill_shares, 6),
+                    round(notional, 6),
+                    avg_entry_price,
+                    round(fill_shares, 6),
+                    round(notional, 6),
+                    avg_entry_price,
+                    round(fill_shares * (avg_entry_price or 0.0), 6),
+                    0.0,
+                    0.0,
+                    filled_at,
+                    filled_at,
+                    filled_at,
+                    json.dumps({"entry_order_id": int(order_id)}, sort_keys=True),
+                ),
+            )
+            position_id = int(cursor.lastrowid)
+        else:
+            position_id = int(position["id"])
+            total_shares = round(float(position["total_entry_shares"] or 0.0) + fill_shares, 6)
+            total_notional = round(float(position["total_entry_notional_usd"] or 0.0) + notional, 6)
+            open_shares = round(float(position["open_shares"] or 0.0) + fill_shares, 6)
+            remaining_cost = round(float(position["remaining_cost_basis_usd"] or 0.0) + notional, 6)
+            avg_entry_price = round(total_notional / total_shares, 6) if total_shares > 0 else None
+            self.conn.execute(
+                """
+                UPDATE shadow_exec_positions
+                SET total_entry_shares = ?, total_entry_notional_usd = ?, avg_entry_price = ?,
+                    open_shares = ?, remaining_cost_basis_usd = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (total_shares, total_notional, avg_entry_price, open_shares, remaining_cost, filled_at, position_id),
+            )
+        self._refresh_shadow_exec_position_metrics_locked(position_id, marked_at=filled_at, source="entry_fill")
+        return position_id
+
+    def _apply_shadow_exit_fill_locked(
+        self,
+        position_id: int,
+        order_id: int,
+        fill_shares: float,
+        notional: float,
+        filled_at: str,
+    ) -> None:
+        position = self.conn.execute("SELECT * FROM shadow_exec_positions WHERE id = ?", (int(position_id),)).fetchone()
+        if position is None:
+            return
+        open_before = max(0.0, float(position["open_shares"] or 0.0))
+        if open_before <= 0:
+            return
+        close_shares = min(open_before, fill_shares)
+        cost_before = max(0.0, float(position["remaining_cost_basis_usd"] or 0.0))
+        cost_reduction = round(cost_before * (close_shares / open_before), 6) if open_before > 0 else 0.0
+        realized_delta = round(notional - cost_reduction, 6)
+        open_after = round(max(0.0, open_before - close_shares), 6)
+        closed_shares = round(float(position["closed_shares"] or 0.0) + close_shares, 6)
+        remaining_cost = round(max(0.0, cost_before - cost_reduction), 6)
+        exit_notional = round(float(position["exit_notional_usd"] or 0.0) + notional, 6)
+        realized_pnl = round(float(position["realized_pnl"] or 0.0) + realized_delta, 6)
+        avg_exit = round(exit_notional / closed_shares, 6) if closed_shares > 0 else None
+        status = "closed" if open_after <= 0.000001 else "open"
+        closed_at = filled_at if status == "closed" else position["closed_at"]
+        self.conn.execute(
+            """
+            UPDATE shadow_exec_positions
+            SET exit_order_id = ?, status = ?, open_shares = ?, closed_shares = ?,
+                remaining_cost_basis_usd = ?, exit_notional_usd = ?, avg_exit_price = ?,
+                realized_pnl = ?, closed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(order_id),
+                status,
+                open_after,
+                closed_shares,
+                remaining_cost,
+                exit_notional,
+                avg_exit,
+                realized_pnl,
+                closed_at,
+                filled_at,
+                int(position_id),
+            ),
+        )
+        self._refresh_shadow_exec_position_metrics_locked(position_id, marked_at=filled_at, source="exit_fill")
+
+    def _refresh_shadow_exec_position_metrics_locked(
+        self,
+        position_id: int,
+        *,
+        mark_price: float | None = None,
+        marked_at: str | None = None,
+        source: str = "mark",
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        marked_at = str(marked_at or iso_now())
+        row = self.conn.execute("SELECT * FROM shadow_exec_positions WHERE id = ?", (int(position_id),)).fetchone()
+        if row is None:
+            return None
+        effective_mark = _bounded_probability(mark_price)
+        if effective_mark is None:
+            effective_mark = _bounded_probability(row["mark_price"]) or _bounded_probability(row["avg_entry_price"]) or 0.0
+        open_shares = max(0.0, float(row["open_shares"] or 0.0))
+        remaining_cost = max(0.0, float(row["remaining_cost_basis_usd"] or 0.0))
+        realized_pnl = float(row["realized_pnl"] or 0.0)
+        mark_value = round(open_shares * effective_mark, 6)
+        unrealized_pnl = round(mark_value - remaining_cost, 6)
+        if str(row["status"] or "") == "closed" or open_shares <= 0.000001:
+            mark_value = 0.0
+            unrealized_pnl = 0.0
+        total_pnl = round(realized_pnl + unrealized_pnl, 6)
+        self.conn.execute(
+            """
+            UPDATE shadow_exec_positions
+            SET mark_price = ?, mark_value_usd = ?, unrealized_pnl = ?, total_pnl = ?,
+                last_marked_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (effective_mark, mark_value, unrealized_pnl, total_pnl, marked_at, marked_at, int(position_id)),
+        )
+        if source not in {"entry_fill", "exit_fill"}:
+            self.conn.execute(
+                """
+                INSERT INTO shadow_exec_marks (
+                    shadow_position_id, mark_price, mark_value_usd, unrealized_pnl,
+                    total_pnl, source, evidence_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(position_id),
+                    effective_mark,
+                    mark_value,
+                    unrealized_pnl,
+                    total_pnl,
+                    str(source or "mark"),
+                    json.dumps(evidence or {}, sort_keys=True),
+                    marked_at,
+                ),
+            )
+        return {
+            "id": int(position_id),
+            "mark_price": effective_mark,
+            "mark_value_usd": mark_value,
+            "unrealized_pnl": unrealized_pnl,
+            "total_pnl": total_pnl,
+        }
 
     def get_same_day_risk_tracking(self, *, limit: int | None = 5000) -> list[dict[str, Any]]:
         with self._lock:
@@ -1816,6 +2695,172 @@ def _serialize_shadow_order_intent(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _serialize_shadow_exec_order(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    payload_json = _json_object(payload.get("payload_json"))
+    created_at = _parse_iso_datetime(payload.get("created_at"))
+    age_seconds = None
+    if created_at is not None:
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - created_at).total_seconds())
+    requested = _as_float(payload.get("requested_shares")) or 0.0
+    filled = _as_float(payload.get("filled_shares")) or 0.0
+    target = _as_float(payload.get("target_price"))
+    pricing = _shadow_exec_pricing_summary(payload_json, target_price=target)
+    return {
+        "id": int(payload["id"]),
+        "shadow_intent_id": int(payload["shadow_intent_id"]) if payload.get("shadow_intent_id") is not None else None,
+        "paper_position_id": int(payload["paper_position_id"]) if payload.get("paper_position_id") is not None else None,
+        "shadow_position_id": int(payload["shadow_position_id"]) if payload.get("shadow_position_id") is not None else None,
+        "parent_order_id": int(payload["parent_order_id"]) if payload.get("parent_order_id") is not None else None,
+        "intent_kind": str(payload.get("intent_kind") or ""),
+        "execution_mode": str(payload.get("execution_mode") or ""),
+        "market_type": str(payload.get("market_type") or ""),
+        "market_slug": str(payload.get("market_slug") or ""),
+        "event_slug": str(payload.get("event_slug") or ""),
+        "city_slug": str(payload.get("city_slug") or ""),
+        "event_date": str(payload.get("event_date") or ""),
+        "label": str(payload.get("label") or ""),
+        "direction": str(payload.get("direction") or ""),
+        "order_action": str(payload.get("order_action") or ""),
+        "outcome_side": str(payload.get("outcome_side") or ""),
+        "target_price": target,
+        "original_target_price": pricing["original_target_price"],
+        "target_price_adjustment": pricing["target_price_adjustment"],
+        "execution_pricing_kind": pricing["execution_pricing_kind"],
+        "last_reprice_concession": pricing["last_reprice_concession"],
+        "reprice_event_count": pricing["reprice_event_count"],
+        "reference_price": _as_float(payload.get("reference_price")),
+        "requested_shares": requested,
+        "filled_shares": filled,
+        "fill_ratio": round(filled / requested, 6) if requested > 0 else 0.0,
+        "avg_fill_price": _as_float(payload.get("avg_fill_price")),
+        "filled_notional_usd": _as_float(payload.get("filled_notional_usd")) or 0.0,
+        "unfilled_shares": _as_float(payload.get("unfilled_shares")) or 0.0,
+        "estimated_fee_paid": _as_float(payload.get("estimated_fee_paid")) or 0.0,
+        "status": str(payload.get("status") or ""),
+        "status_reason": str(payload.get("status_reason") or ""),
+        "ttl_seconds": int(payload.get("ttl_seconds") or 0),
+        "expires_at": str(payload.get("expires_at") or ""),
+        "clob_token_id": str(payload.get("clob_token_id") or ""),
+        "taker_estimate_avg_price": _as_float(payload.get("taker_estimate_avg_price")),
+        "taker_estimate_notional_usd": _as_float(payload.get("taker_estimate_notional_usd")),
+        "taker_estimate_fill_shares": _as_float(payload.get("taker_estimate_fill_shares")),
+        "taker_estimate_pnl": _as_float(payload.get("taker_estimate_pnl")),
+        "queue_fill_fraction": _as_float(payload.get("queue_fill_fraction")),
+        "last_checked_at": str(payload.get("last_checked_at") or ""),
+        "created_at": str(payload.get("created_at") or ""),
+        "updated_at": str(payload.get("updated_at") or ""),
+        "age_seconds": age_seconds,
+        "payload": payload_json,
+    }
+
+
+def _serialize_shadow_exec_fill(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    return {
+        "id": int(payload["id"]),
+        "order_id": int(payload["order_id"]),
+        "shadow_position_id": int(payload["shadow_position_id"]) if payload.get("shadow_position_id") is not None else None,
+        "shadow_intent_id": int(payload["shadow_intent_id"]) if payload.get("shadow_intent_id") is not None else None,
+        "paper_position_id": int(payload["paper_position_id"]) if payload.get("paper_position_id") is not None else None,
+        "clob_token_id": str(payload.get("clob_token_id") or ""),
+        "action": str(payload.get("action") or ""),
+        "price": _as_float(payload.get("price")),
+        "shares": _as_float(payload.get("shares")) or 0.0,
+        "notional_usd": _as_float(payload.get("notional_usd")) or 0.0,
+        "liquidity_source": str(payload.get("liquidity_source") or ""),
+        "evidence": _json_object(payload.get("evidence_json")),
+        "filled_at": str(payload.get("filled_at") or ""),
+    }
+
+
+def _shadow_exec_pricing_summary(payload: dict[str, Any], *, target_price: float | None) -> dict[str, Any]:
+    shadow_intent = payload.get("shadow_intent") if isinstance(payload.get("shadow_intent"), dict) else {}
+    intent_payload = shadow_intent.get("payload") if isinstance(shadow_intent.get("payload"), dict) else {}
+    entry_pricing = (
+        intent_payload.get("shadow_execution_pricing")
+        if isinstance(intent_payload.get("shadow_execution_pricing"), dict)
+        else {}
+    )
+    repricing = payload.get("shadow_execution_repricing") if isinstance(payload.get("shadow_execution_repricing"), dict) else {}
+    reprice_events = repricing.get("events") if isinstance(repricing.get("events"), list) else []
+    original_target = _as_float(entry_pricing.get("original_target_price"))
+    if original_target is None:
+        original_target = _as_float(repricing.get("original_target_price"))
+    if original_target is None:
+        original_target = _as_float(shadow_intent.get("target_price"))
+    adjustment = None
+    if target_price is not None and original_target is not None:
+        adjustment = round(float(target_price) - float(original_target), 6)
+    last_concession = None
+    if reprice_events:
+        last = reprice_events[-1]
+        if isinstance(last, dict):
+            evidence = last.get("evidence") if isinstance(last.get("evidence"), dict) else {}
+            last_concession = _as_float(evidence.get("concession"))
+    pricing_kind = str(entry_pricing.get("kind") or repricing.get("last_reason") or "")
+    return {
+        "original_target_price": original_target,
+        "target_price_adjustment": adjustment,
+        "execution_pricing_kind": pricing_kind,
+        "last_reprice_concession": last_concession,
+        "reprice_event_count": len(reprice_events),
+    }
+
+
+def _serialize_shadow_exec_position(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    return {
+        "id": int(payload["id"]),
+        "paper_position_id": int(payload["paper_position_id"]) if payload.get("paper_position_id") is not None else None,
+        "market_type": str(payload.get("market_type") or ""),
+        "market_slug": str(payload.get("market_slug") or ""),
+        "event_slug": str(payload.get("event_slug") or ""),
+        "city_slug": str(payload.get("city_slug") or ""),
+        "event_date": str(payload.get("event_date") or ""),
+        "label": str(payload.get("label") or ""),
+        "direction": str(payload.get("direction") or ""),
+        "clob_token_id": str(payload.get("clob_token_id") or ""),
+        "entry_order_id": int(payload["entry_order_id"]) if payload.get("entry_order_id") is not None else None,
+        "exit_order_id": int(payload["exit_order_id"]) if payload.get("exit_order_id") is not None else None,
+        "status": str(payload.get("status") or ""),
+        "total_entry_shares": _as_float(payload.get("total_entry_shares")) or 0.0,
+        "total_entry_notional_usd": _as_float(payload.get("total_entry_notional_usd")) or 0.0,
+        "avg_entry_price": _as_float(payload.get("avg_entry_price")),
+        "open_shares": _as_float(payload.get("open_shares")) or 0.0,
+        "closed_shares": _as_float(payload.get("closed_shares")) or 0.0,
+        "remaining_cost_basis_usd": _as_float(payload.get("remaining_cost_basis_usd")) or 0.0,
+        "exit_notional_usd": _as_float(payload.get("exit_notional_usd")) or 0.0,
+        "avg_exit_price": _as_float(payload.get("avg_exit_price")),
+        "realized_pnl": _as_float(payload.get("realized_pnl")) or 0.0,
+        "mark_price": _as_float(payload.get("mark_price")),
+        "mark_value_usd": _as_float(payload.get("mark_value_usd")) or 0.0,
+        "unrealized_pnl": _as_float(payload.get("unrealized_pnl")) or 0.0,
+        "total_pnl": _as_float(payload.get("total_pnl")) or 0.0,
+        "taker_exit_estimated_pnl": _as_float(payload.get("taker_exit_estimated_pnl")),
+        "opened_at": str(payload.get("opened_at") or ""),
+        "closed_at": str(payload.get("closed_at") or ""),
+        "last_marked_at": str(payload.get("last_marked_at") or ""),
+        "updated_at": str(payload.get("updated_at") or ""),
+        "payload": _json_object(payload.get("payload_json")),
+    }
+
+
+def _serialize_shadow_exec_mark(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    return {
+        "id": int(payload["id"]),
+        "shadow_position_id": int(payload["shadow_position_id"]),
+        "mark_price": _as_float(payload.get("mark_price")),
+        "mark_value_usd": _as_float(payload.get("mark_value_usd")) or 0.0,
+        "unrealized_pnl": _as_float(payload.get("unrealized_pnl")) or 0.0,
+        "total_pnl": _as_float(payload.get("total_pnl")) or 0.0,
+        "source": str(payload.get("source") or ""),
+        "evidence": _json_object(payload.get("evidence_json")),
+        "created_at": str(payload.get("created_at") or ""),
+    }
+
+
 def _serialize_same_day_risk_tracking_row(row: sqlite3.Row) -> dict[str, Any]:
     payload = dict(row)
     metadata = _json_object(payload.get("metadata_json"))
@@ -2419,3 +3464,18 @@ def _summarize_open_book(open_positions: list[dict[str, Any]]) -> dict[str, Any]
             "model_pnl": round(sum(float(item.get("expected_value_pnl") or 0.0) for item in items), 6),
         }
     return summary
+
+
+def _paper_position_current_pnl(position: dict[str, Any]) -> float:
+    status = str(position.get("status") or "").lower()
+    if status in {"closed", "resolved"}:
+        return round(float(position.get("realized_pnl") or 0.0), 6)
+    return round(float(position.get("mark_to_market_pnl") or position.get("expected_value_pnl") or 0.0), 6)
+
+
+def _count_by_key(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts

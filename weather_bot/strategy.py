@@ -18,6 +18,7 @@ from .execution import (
     execution_mode_records_shadow_orders,
     normalize_execution_mode,
 )
+from .execution.shadow_execution import ShadowExecutionEngine
 from .execution.shadow_fill import enrich_shadow_intent_with_fill_rehearsal
 from .models import PaperPosition, WeatherDecision, WeatherSignal
 from .tracker import WeatherTracker
@@ -59,6 +60,10 @@ class WeatherStrategyEngine:
         self._paper_max_open_positions = max(1, int(self.config.paper.max_open_positions))
         self._paper_entry_min_edge_abs_override: float | None = None
         self._paper_execution_mode = normalize_execution_mode(getattr(self.config.paper, "execution_mode", PAPER_EXECUTION_MODE))
+        self.shadow_execution = ShadowExecutionEngine(
+            tracker=tracker,
+            config=getattr(self.config, "shadow_execution", None),
+        )
 
     def process_signals(
         self,
@@ -86,6 +91,11 @@ class WeatherStrategyEngine:
                     entry_slippage_bps=self.config.paper.entry_slippage_bps,
                 )
                 if shadow_intent is not None:
+                    shadow_payload = dict(shadow_intent.payload or {})
+                    shadow_payload["entry_edge_floor"] = _as_float(decision.metadata.get("entry_edge_floor"))
+                    shadow_payload["entry_edge_floor_source"] = str(decision.metadata.get("same_day_entry_floor_source") or "strategy")
+                    shadow_payload["same_day_temperature_entry"] = bool(decision.metadata.get("same_day_temperature_entry"))
+                    shadow_intent = replace(shadow_intent, payload=shadow_payload)
                     shadow_intent = enrich_shadow_intent_with_fill_rehearsal(shadow_intent)
             if decision.accepted:
                 if execution_mode_creates_paper_positions(self.paper_execution_mode):
@@ -102,13 +112,13 @@ class WeatherStrategyEngine:
                         exit_slippage_bps=self.config.paper.exit_slippage_bps,
                     )
                 if position is not None and shadow_intent is not None:
-                    self.tracker.record_shadow_order_intent(
-                        replace(
-                            shadow_intent,
-                            position_id=int(position.id),
-                            status="mirrored",
-                        )
+                    mirrored_intent = replace(
+                        shadow_intent,
+                        position_id=int(position.id),
+                        status="mirrored",
                     )
+                    intent_id = self.tracker.record_shadow_order_intent(mirrored_intent)
+                    self.shadow_execution.mirror_intent(intent_id, mirrored_intent)
                 if position is None:
                     decision = WeatherDecision(
                         signal_key=signal.signal_key,

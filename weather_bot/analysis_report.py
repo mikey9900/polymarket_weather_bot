@@ -76,6 +76,10 @@ def build_analysis_report(
     recent_operator_actions = tracker.get_recent_operator_actions(limit=250)
     review_history = tracker.get_position_review_history(limit=5000)
     shadow_order_intents = tracker.get_recent_shadow_order_intents(limit=5000)
+    shadow_exec_summary = tracker.get_shadow_execution_summary()
+    shadow_exec_orders = tracker.get_recent_shadow_exec_orders(limit=5000)
+    shadow_exec_positions = tracker.get_shadow_exec_positions(limit=5000)
+    shadow_exec_fills = tracker.get_recent_shadow_exec_fills(limit=5000)
     same_day_risk_tracking = tracker.get_same_day_risk_tracking(limit=5000)
     same_day_risk_summary = summarize_same_day_risk(same_day_risk_tracking, review_history)
 
@@ -98,6 +102,10 @@ def build_analysis_report(
     _build_positions_sheet(workbook.create_sheet("Position Ledger"), recent_positions, title="Position Ledger", status_default="")
     _build_review_history_sheet(workbook.create_sheet("Review History"), review_history)
     _build_shadow_orders_sheet(workbook.create_sheet("Shadow Orders"), shadow_order_intents)
+    _build_shadow_exec_summary_sheet(workbook.create_sheet("Shadow Exec Summary"), shadow_exec_summary)
+    _build_shadow_exec_orders_sheet(workbook.create_sheet("Shadow Exec Orders"), shadow_exec_orders)
+    _build_shadow_exec_positions_sheet(workbook.create_sheet("Shadow Exec Positions"), shadow_exec_positions)
+    _build_shadow_exec_fills_sheet(workbook.create_sheet("Shadow Exec Fills"), shadow_exec_fills)
     _build_same_day_risk_sheet(workbook.create_sheet("Same-Day Risk"), same_day_risk_tracking, same_day_risk_summary)
     _build_signals_sheet(workbook.create_sheet("Recent Signals"), recent_signals)
     _build_resolutions_sheet(workbook.create_sheet("Resolutions"), recent_resolutions)
@@ -114,6 +122,9 @@ def build_analysis_report(
         "recent_signal_count": len(recent_signals),
         "review_history_count": len(review_history),
         "shadow_order_count": len(shadow_order_intents),
+        "shadow_exec_order_count": len(shadow_exec_orders),
+        "shadow_exec_position_count": len(shadow_exec_positions),
+        "shadow_exec_fill_count": len(shadow_exec_fills),
         "same_day_risk_decision_count": len(same_day_risk_tracking),
         "same_day_low_edge_block_count": same_day_risk_summary["same_day_low_edge_block_count"],
         "same_day_price_collapse_exit_count": same_day_risk_summary["same_day_price_collapse_exit_count"],
@@ -496,6 +507,122 @@ def _build_shadow_orders_sheet(ws, rows: list[dict[str, Any]]) -> None:
         _fill_if_text(ws.cell(row=idx, column=19), row.get("direction"))
         _fill_if_text(ws.cell(row=idx, column=21), row.get("outcome_side"))
         _fill_shadow_status(ws.cell(row=idx, column=4), row.get("status"))
+
+
+def _build_shadow_exec_summary_sheet(ws, summary: dict[str, Any]) -> None:
+    _sheet_title(ws, "Shadow Exec Summary", subtitle="Executable shadow execution vs paper signal ledger")
+    items = [
+        ("Money Scoreboard P/L", summary.get("scoreboard_pnl", summary.get("realistic_total_pnl")), "currency"),
+        ("Paper Signal P/L", summary.get("paper_signal_total_pnl", summary.get("paper_total_pnl")), "currency"),
+        ("Exec - Signal Gap", summary.get("paper_vs_realistic_gap"), "currency"),
+        ("Signal - Exec Gap", summary.get("signal_vs_realistic_gap"), "currency"),
+        ("Realized P/L", summary.get("realistic_realized_pnl"), "currency"),
+        ("Unrealized P/L", summary.get("realistic_unrealized_pnl"), "currency"),
+        ("Taker Exit Estimate", summary.get("taker_exit_estimated_pnl"), "currency"),
+        ("Open Exposure", summary.get("open_exposure"), "currency"),
+        ("Missed Paper P/L", summary.get("missed_paper_pnl"), "currency"),
+        ("Entry Fill Rate", (summary.get("entry_fill_rate") or 0) / 100.0, "percent"),
+        ("Entry Fills", summary.get("realistic_entry_fill_count"), "int"),
+        ("Unfilled Entries", summary.get("unfilled_entry_order_count"), "int"),
+        ("Orders", summary.get("order_count"), "int"),
+        ("Positions", summary.get("position_count"), "int"),
+        ("Fills", summary.get("fill_count"), "int"),
+        ("Open Orders", summary.get("open_order_count"), "int"),
+        ("Expired Orders", summary.get("expired_order_count"), "int"),
+        ("No-Position Orders", summary.get("no_position_order_count"), "int"),
+        ("Generated", summary.get("generated_at"), "datetime"),
+    ]
+    _write_metric_block(ws, start_col=1, start_row=4, title="Shadow Execution", items=items)
+    for row in range(6, 24):
+        _pnl_style(ws.cell(row=row, column=2))
+
+
+def _build_shadow_exec_orders_sheet(ws, rows: list[dict[str, Any]]) -> None:
+    _sheet_title(ws, "Shadow Exec Orders", subtitle=f"{len(rows)} rows")
+    columns = [
+        ("Created", "created_at", "datetime"),
+        ("Kind", "intent_kind", "text"),
+        ("Status", "status", "text"),
+        ("Reason", "status_reason", "text"),
+        ("Action", "order_action", "text"),
+        ("Direction", "direction", "text"),
+        ("Pricing", "execution_pricing_kind", "text"),
+        ("Orig Target %", "original_target_price", "percent"),
+        ("Target %", "target_price", "percent"),
+        ("Target Adj %", "target_price_adjustment", "percent"),
+        ("Last Concession %", "last_reprice_concession", "percent"),
+        ("Requested Sh", "requested_shares", "number"),
+        ("Filled Sh", "filled_shares", "number"),
+        ("Fill Ratio", "fill_ratio", "percent"),
+        ("Avg Fill %", "avg_fill_price", "percent"),
+        ("Filled $", "filled_notional_usd", "currency_plain"),
+        ("Unfilled Sh", "unfilled_shares", "number"),
+        ("Taker Avg %", "taker_estimate_avg_price", "percent"),
+        ("Taker $", "taker_estimate_notional_usd", "currency_plain"),
+        ("Taker P/L", "taker_estimate_pnl", "currency_plain"),
+        ("Token ID", "clob_token_id", "text"),
+        ("Queue Frac", "queue_fill_fraction", "percent"),
+        ("Expires", "expires_at", "datetime"),
+        ("Paper Pos", "paper_position_id", "int"),
+        ("Shadow Pos", "shadow_position_id", "int"),
+        ("Market Slug", "market_slug", "text"),
+    ]
+    _write_table(ws, start_row=4, columns=columns, rows=rows)
+    for idx, row in enumerate(rows, start=5):
+        _fill_shadow_status(ws.cell(row=idx, column=3), row.get("status"))
+        _fill_if_text(ws.cell(row=idx, column=6), row.get("direction"))
+        _pnl_style(ws.cell(row=idx, column=20))
+
+
+def _build_shadow_exec_positions_sheet(ws, rows: list[dict[str, Any]]) -> None:
+    _sheet_title(ws, "Shadow Exec Positions", subtitle=f"{len(rows)} rows")
+    columns = [
+        ("Opened", "opened_at", "datetime"),
+        ("Status", "status", "text"),
+        ("City", "city_slug", "text"),
+        ("Date", "event_date", "text"),
+        ("Label", "label", "text"),
+        ("Direction", "direction", "text"),
+        ("Entry Sh", "total_entry_shares", "number"),
+        ("Open Sh", "open_shares", "number"),
+        ("Closed Sh", "closed_shares", "number"),
+        ("Avg Entry %", "avg_entry_price", "percent"),
+        ("Entry $", "total_entry_notional_usd", "currency_plain"),
+        ("Exit $", "exit_notional_usd", "currency_plain"),
+        ("Realized P/L", "realized_pnl", "currency_plain"),
+        ("Mark %", "mark_price", "percent"),
+        ("Mark $", "mark_value_usd", "currency_plain"),
+        ("Unrealized P/L", "unrealized_pnl", "currency_plain"),
+        ("Total P/L", "total_pnl", "currency_plain"),
+        ("Taker Exit P/L", "taker_exit_estimated_pnl", "currency_plain"),
+        ("Paper Pos", "paper_position_id", "int"),
+        ("Market Slug", "market_slug", "text"),
+    ]
+    _write_table(ws, start_row=4, columns=columns, rows=rows)
+    for idx, row in enumerate(rows, start=5):
+        _fill_status(ws.cell(row=idx, column=2), row.get("status"))
+        _fill_if_text(ws.cell(row=idx, column=6), row.get("direction"))
+        for column in (13, 16, 17, 18):
+            _pnl_style(ws.cell(row=idx, column=column))
+
+
+def _build_shadow_exec_fills_sheet(ws, rows: list[dict[str, Any]]) -> None:
+    _sheet_title(ws, "Shadow Exec Fills", subtitle=f"{len(rows)} rows")
+    shaped = [{**row, "evidence_json": json.dumps(row.get("evidence") or {}, sort_keys=True)} for row in rows]
+    columns = [
+        ("Filled", "filled_at", "datetime"),
+        ("Source", "liquidity_source", "text"),
+        ("Action", "action", "text"),
+        ("Price %", "price", "percent"),
+        ("Shares", "shares", "number"),
+        ("Notional $", "notional_usd", "currency_plain"),
+        ("Order ID", "order_id", "int"),
+        ("Shadow Pos", "shadow_position_id", "int"),
+        ("Paper Pos", "paper_position_id", "int"),
+        ("Token ID", "clob_token_id", "text"),
+        ("Evidence", "evidence_json", "text"),
+    ]
+    _write_table(ws, start_row=4, columns=columns, rows=shaped)
 
 
 def _build_same_day_risk_sheet(

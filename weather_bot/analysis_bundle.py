@@ -203,6 +203,10 @@ class AnalysisBundleExporter:
         included_entries: list[str] = []
         snapshot = self._current_snapshot()
         runtime_status = self.runtime.get_status_snapshot()
+        shadow_execution_config = _shadow_execution_config(
+            getattr(getattr(self.runtime, "config", None), "shadow_execution", None),
+            runtime_status,
+        )
         latest_bundle_path = self.latest_bundle_path
         latest_index_path = self.latest_index_path
         report_path = self.bundle_root / f"{stamp}_{self.bundle_label}_analysis_report.xlsx"
@@ -215,6 +219,12 @@ class AnalysisBundleExporter:
         position_review_history = self.tracker.get_position_review_history(limit=POSITION_REVIEW_HISTORY_EXPORT_LIMIT)
         shadow_order_intents = self.tracker.get_recent_shadow_order_intents(limit=None)
         shadow_fill_summary = _summarize_shadow_fills(shadow_order_intents)
+        shadow_exec_summary = self.tracker.get_shadow_execution_summary()
+        shadow_exec_orders = self.tracker.get_recent_shadow_exec_orders(limit=None)
+        shadow_exec_positions = self.tracker.get_shadow_exec_positions(limit=None)
+        shadow_exec_fills = self.tracker.get_recent_shadow_exec_fills(limit=None)
+        shadow_exec_marks = self.tracker.get_recent_shadow_exec_marks(limit=None)
+        shadow_exec_missed = self.tracker.get_shadow_execution_missed_paper_trades(limit=None)
         same_day_risk_tracking = self.tracker.get_same_day_risk_tracking(limit=SAME_DAY_RISK_EXPORT_LIMIT)
         same_day_risk_summary = summarize_same_day_risk(same_day_risk_tracking, position_review_history)
         position_review_count = (
@@ -278,6 +288,17 @@ class AnalysisBundleExporter:
                     included_entries.append("shadow_order_intents.json")
                     archive.writestr("shadow_order_intents.json", json.dumps(shadow_order_intents, indent=2, sort_keys=True))
 
+                    for entry_name, payload in (
+                        ("shadow_exec_summary.json", shadow_exec_summary),
+                        ("shadow_exec_orders.json", shadow_exec_orders),
+                        ("shadow_exec_positions.json", shadow_exec_positions),
+                        ("shadow_exec_fills.json", shadow_exec_fills),
+                        ("shadow_exec_marks.json", shadow_exec_marks),
+                        ("shadow_exec_missed.json", shadow_exec_missed),
+                    ):
+                        included_entries.append(entry_name)
+                        archive.writestr(entry_name, json.dumps(payload, indent=2, sort_keys=True))
+
                     included_entries.append("same_day_risk_tracking.json")
                     archive.writestr(
                         "same_day_risk_tracking.json",
@@ -313,6 +334,14 @@ class AnalysisBundleExporter:
                         "position_review_export_truncated": position_review_export_truncated,
                         "shadow_order_count": len(shadow_order_intents),
                         "shadow_fill_summary": shadow_fill_summary,
+                        "shadow_execution": shadow_exec_summary,
+                        "money_scoreboard": _money_scoreboard_manifest(shadow_exec_summary),
+                        "shadow_exec_order_count": len(shadow_exec_orders),
+                        "shadow_exec_position_count": len(shadow_exec_positions),
+                        "shadow_exec_fill_count": len(shadow_exec_fills),
+                        "shadow_exec_mark_count": len(shadow_exec_marks),
+                        "shadow_exec_missed_count": len(shadow_exec_missed),
+                        "shadow_execution_config": shadow_execution_config,
                         "same_day_risk": same_day_risk_summary,
                         "same_day_risk_decision_count": same_day_risk_summary["same_day_decision_count"],
                         "same_day_low_edge_block_count": same_day_risk_summary["same_day_low_edge_block_count"],
@@ -340,6 +369,8 @@ class AnalysisBundleExporter:
                 position_review_export_truncated=position_review_export_truncated,
                 shadow_order_count=len(shadow_order_intents),
                 shadow_fill_summary=shadow_fill_summary,
+                shadow_exec_summary=shadow_exec_summary,
+                shadow_execution_config=shadow_execution_config,
                 same_day_risk_summary=same_day_risk_summary,
                 runtime_status=runtime_status,
                 included_entries=[*included_entries, "manifest.json"],
@@ -372,6 +403,9 @@ class AnalysisBundleExporter:
                 "position_review_export_limit": POSITION_REVIEW_HISTORY_EXPORT_LIMIT,
                 "position_review_export_truncated": position_review_export_truncated,
                 "shadow_order_count": len(shadow_order_intents),
+                "shadow_exec_order_count": len(shadow_exec_orders),
+                "shadow_exec_position_count": len(shadow_exec_positions),
+                "shadow_exec_fill_count": len(shadow_exec_fills),
                 "same_day_risk_decision_count": same_day_risk_summary["same_day_decision_count"],
                 "same_day_low_edge_block_count": same_day_risk_summary["same_day_low_edge_block_count"],
                 "same_day_price_collapse_exit_count": same_day_risk_summary["same_day_price_collapse_exit_count"],
@@ -415,6 +449,8 @@ class AnalysisBundleExporter:
         position_review_export_truncated: bool,
         shadow_order_count: int,
         shadow_fill_summary: dict[str, int],
+        shadow_exec_summary: dict[str, Any],
+        shadow_execution_config: dict[str, Any],
         same_day_risk_summary: dict[str, int],
         runtime_status: dict[str, Any],
         included_entries: list[str],
@@ -458,6 +494,9 @@ class AnalysisBundleExporter:
             "position_review_export_truncated": bool(position_review_export_truncated),
             "shadow_order_count": int(shadow_order_count),
             "shadow_fill_summary": dict(shadow_fill_summary),
+            "shadow_execution": dict(shadow_exec_summary),
+            "money_scoreboard": _money_scoreboard_manifest(shadow_exec_summary),
+            "shadow_execution_config": dict(shadow_execution_config),
             "same_day_risk": dict(same_day_risk_summary),
             "same_day_risk_decision_count": int(same_day_risk_summary.get("same_day_decision_count", 0)),
             "same_day_low_edge_block_count": int(same_day_risk_summary.get("same_day_low_edge_block_count", 0)),
@@ -609,8 +648,63 @@ def _compact_db_limits() -> dict[str, int]:
         "decisions": COMPACT_DB_DECISION_LIMIT,
         "paper_position_reviews": COMPACT_DB_REVIEW_LIMIT,
         "shadow_order_intents": COMPACT_DB_SHADOW_ORDER_LIMIT,
+        "shadow_exec_orders": COMPACT_DB_SHADOW_ORDER_LIMIT,
+        "shadow_exec_positions": COMPACT_DB_SHADOW_ORDER_LIMIT,
+        "shadow_exec_fills": COMPACT_DB_SHADOW_ORDER_LIMIT,
+        "shadow_exec_marks": COMPACT_DB_SHADOW_ORDER_LIMIT,
         "operator_events": COMPACT_DB_OPERATOR_EVENT_LIMIT,
         "resolution_events": COMPACT_DB_RESOLUTION_EVENT_LIMIT,
+    }
+
+
+def _shadow_execution_config(settings: Any, runtime_status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": bool(getattr(settings, "enabled", runtime_status.get("shadow_execution_enabled", False))),
+        "entry_ttl_seconds": int(getattr(settings, "entry_ttl_seconds", 1800) or 1800),
+        "exit_ttl_seconds": int(getattr(settings, "exit_ttl_seconds", 300) or 300),
+        "queue_fill_fraction": float(getattr(settings, "queue_fill_fraction", 0.5) or 0.0),
+        "rest_fallback_seconds": int(getattr(settings, "rest_fallback_seconds", 5) or 5),
+        "show_taker_exit_estimate": bool(getattr(settings, "show_taker_exit_estimate", True)),
+        "entry_price_improvement_enabled": bool(getattr(settings, "entry_price_improvement_enabled", True)),
+        "entry_min_edge_abs": float(getattr(settings, "entry_min_edge_abs", 0.12) or 0.0),
+        "exit_repricing_enabled": bool(getattr(settings, "exit_repricing_enabled", True)),
+        "exit_ladder_step_seconds": int(getattr(settings, "exit_ladder_step_seconds", 60) or 60),
+        "exit_concession_steps": list(getattr(settings, "exit_concession_steps", (0.005, 0.01)) or []),
+        "exit_urgent_concession_steps": list(
+            getattr(settings, "exit_urgent_concession_steps", (0.005, 0.01, 0.02, 0.03)) or []
+        ),
+        "exit_urgent_reason_codes": list(
+            getattr(settings, "exit_urgent_reason_codes", ("same_day_price_collapse", "no_stop_loss", "score_breakdown")) or []
+        ),
+        "last_cycle_at": runtime_status.get("last_shadow_execution_cycle_at"),
+        "last_status": runtime_status.get("last_shadow_execution_status"),
+        "last_error": runtime_status.get("last_shadow_execution_error"),
+    }
+
+
+def _money_scoreboard_manifest(summary: dict[str, Any]) -> dict[str, Any]:
+    executable_pnl = float(summary.get("scoreboard_pnl", summary.get("realistic_total_pnl", 0.0)) or 0.0)
+    signal_pnl = float(summary.get("paper_signal_total_pnl", summary.get("paper_total_pnl", 0.0)) or 0.0)
+    entry_orders = int(summary.get("entry_order_count") or 0)
+    entry_fills = int(summary.get("realistic_entry_fill_count") or 0)
+    if entry_orders <= 0:
+        status = "awaiting_shadow_orders"
+    elif entry_fills <= 0:
+        status = "no_real_entry_fills"
+    elif int(summary.get("open_order_count") or 0) > 0:
+        status = "tracking_live_orders"
+    else:
+        status = "tracking_executable_pnl"
+    return {
+        "scoreboard_label": "Executable Shadow P/L",
+        "scoreboard_pnl": round(executable_pnl, 6),
+        "paper_signal_label": "Paper Signal P/L",
+        "paper_signal_pnl": round(signal_pnl, 6),
+        "signal_vs_execution_gap": round(signal_pnl - executable_pnl, 6),
+        "entry_order_count": entry_orders,
+        "entry_fill_count": entry_fills,
+        "entry_fill_rate": float(summary.get("entry_fill_rate") or 0.0),
+        "status": status,
     }
 
 

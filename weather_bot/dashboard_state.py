@@ -55,6 +55,7 @@ class DashboardStateService:
                 {
                     "timestamp_utc": snapshot["timestamp_utc"],
                     "paper_pnl": snapshot["summary"]["paper"]["pnl"],
+                    "execution_pnl": snapshot["summary"].get("execution", {}).get("scoreboard_pnl", 0.0),
                     "open_positions": snapshot["summary"]["paper"]["open_positions"],
                     "scan_in_progress": snapshot["controls"]["scan_in_progress"],
                 }
@@ -69,6 +70,7 @@ class DashboardStateService:
 
     def _build_snapshot(self) -> dict[str, Any]:
         paper_stats = self.tracker.get_paper_stats()
+        shadow_execution_summary = self.tracker.get_shadow_execution_summary()
         runtime_status = self.runtime.get_status_snapshot()
         analysis_status = self._analysis_export_status()
         stale_after_s = getattr(getattr(self.runtime, "config", None), "paper", None)
@@ -89,7 +91,11 @@ class DashboardStateService:
                     "wins": paper_stats["wins"],
                     "losses": paper_stats["losses"],
                     "win_rate": paper_stats["win_rate"],
-                }
+                },
+                "execution": _execution_scoreboard_summary(
+                    paper_stats=paper_stats,
+                    shadow_execution_summary=shadow_execution_summary,
+                ),
             },
             "pnl_analytics": self.tracker.get_pnl_analytics(timezone_name=app_timezone),
             "open_positions": self.tracker.get_dashboard_paper_positions(
@@ -110,6 +116,11 @@ class DashboardStateService:
             "recent_resolutions": self.tracker.get_recent_resolutions(limit=12),
             "recent_operator_actions": self.tracker.get_recent_operator_actions(limit=12),
             "recent_shadow_orders": self.tracker.get_recent_shadow_order_intents(limit=12),
+            "shadow_execution_summary": shadow_execution_summary,
+            "shadow_execution_orders": self.tracker.get_recent_shadow_exec_orders(limit=50),
+            "shadow_execution_positions": self.tracker.get_shadow_exec_positions(limit=50),
+            "shadow_execution_fills": self.tracker.get_recent_shadow_exec_fills(limit=50),
+            "shadow_execution_missed": self.tracker.get_shadow_execution_missed_paper_trades(limit=50),
             "signal_summary_24h": self.tracker.get_signal_summary(),
             "exports": {
                 "dashboard_state_path": str(self.state_export_path) if self.state_export_path is not None else None,
@@ -182,7 +193,7 @@ class DashboardStateService:
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                 "controls": self.control_plane.build_controls_payload(),
                 "runtime": self.runtime.get_status_snapshot(),
-                "summary": {"paper": {}},
+                "summary": {"paper": {}, "execution": {}},
                 "pnl_analytics": {"generated_at": datetime.now(timezone.utc).isoformat(), "open_book": {}, "windows": {}},
                 "open_positions": [],
                 "recent_signals": [],
@@ -191,6 +202,11 @@ class DashboardStateService:
                 "recent_resolutions": [],
                 "recent_operator_actions": [],
                 "recent_shadow_orders": [],
+                "shadow_execution_summary": {},
+                "shadow_execution_orders": [],
+                "shadow_execution_positions": [],
+                "shadow_execution_fills": [],
+                "shadow_execution_missed": [],
                 "signal_summary_24h": {},
                 "exports": {
                     "dashboard_state_path": str(self.state_export_path) if self.state_export_path is not None else None,
@@ -201,9 +217,18 @@ class DashboardStateService:
                 },
             }
         runtime_status = self.runtime.get_status_snapshot()
+        paper_stats = self.tracker.get_paper_stats()
+        shadow_execution_summary = self.tracker.get_shadow_execution_summary()
         snapshot["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
         snapshot["runtime"] = runtime_status
         snapshot["controls"] = self.control_plane.build_controls_payload()
+        summary = dict(snapshot.get("summary") or {})
+        summary["execution"] = _execution_scoreboard_summary(
+            paper_stats=paper_stats,
+            shadow_execution_summary=shadow_execution_summary,
+        )
+        snapshot["summary"] = summary
+        snapshot["shadow_execution_summary"] = shadow_execution_summary
         exports = dict(snapshot.get("exports") or {})
         exports["dashboard_state_path"] = str(self.state_export_path) if self.state_export_path is not None else None
         exports["dashboard_state_error"] = self._state_export_error
@@ -252,3 +277,56 @@ class DashboardStateService:
         from .control_plane import ControlRequest
 
         return ControlRequest.from_payload(payload)
+
+
+def _execution_scoreboard_summary(
+    *,
+    paper_stats: dict[str, Any],
+    shadow_execution_summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Money-like scoreboard derived from realistic shadow execution."""
+
+    paper_signal_pnl = float(
+        shadow_execution_summary.get(
+            "paper_signal_total_pnl",
+            shadow_execution_summary.get("paper_total_pnl", paper_stats.get("total_pnl", 0.0)),
+        )
+        or 0.0
+    )
+    scoreboard_pnl = float(
+        shadow_execution_summary.get(
+            "scoreboard_pnl",
+            shadow_execution_summary.get("realistic_total_pnl", 0.0),
+        )
+        or 0.0
+    )
+    entry_orders = int(shadow_execution_summary.get("entry_order_count") or 0)
+    entry_fills = int(shadow_execution_summary.get("realistic_entry_fill_count") or 0)
+    entry_fill_rate = float(shadow_execution_summary.get("entry_fill_rate") or 0.0)
+    if entry_orders <= 0:
+        status = "awaiting_shadow_orders"
+        status_label = "AWAITING ORDERS"
+    elif entry_fills <= 0:
+        status = "no_real_entry_fills"
+        status_label = "NO REAL FILLS"
+    elif int(shadow_execution_summary.get("open_order_count") or 0) > 0:
+        status = "tracking_live_orders"
+        status_label = "TRACKING LIVE ORDERS"
+    else:
+        status = "tracking_executable_pnl"
+        status_label = "TRACKING EXEC P/L"
+    return {
+        "scoreboard_label": "Executable Shadow P/L",
+        "scoreboard_pnl": round(scoreboard_pnl, 6),
+        "paper_signal_label": "Paper Signal P/L",
+        "paper_signal_pnl": round(paper_signal_pnl, 6),
+        "signal_vs_execution_gap": round(paper_signal_pnl - scoreboard_pnl, 6),
+        "execution_vs_signal_gap": round(scoreboard_pnl - paper_signal_pnl, 6),
+        "entry_order_count": entry_orders,
+        "entry_fill_count": entry_fills,
+        "entry_fill_rate": round(entry_fill_rate, 2),
+        "open_exposure": float(shadow_execution_summary.get("open_exposure") or 0.0),
+        "missed_paper_pnl": float(shadow_execution_summary.get("missed_paper_pnl") or 0.0),
+        "status": status,
+        "status_label": status_label,
+    }

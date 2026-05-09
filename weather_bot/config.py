@@ -80,6 +80,23 @@ class PaperSettings:
 
 
 @dataclass(frozen=True)
+class ShadowExecutionSettings:
+    enabled: bool = True
+    entry_ttl_seconds: int = 1800
+    exit_ttl_seconds: int = 300
+    queue_fill_fraction: float = 0.50
+    rest_fallback_seconds: int = 5
+    show_taker_exit_estimate: bool = True
+    entry_price_improvement_enabled: bool = True
+    entry_min_edge_abs: float = 0.12
+    exit_repricing_enabled: bool = True
+    exit_ladder_step_seconds: int = 60
+    exit_concession_steps: tuple[float, ...] | list[float] = (0.005, 0.01)
+    exit_urgent_concession_steps: tuple[float, ...] | list[float] = (0.005, 0.01, 0.02, 0.03)
+    exit_urgent_reason_codes: tuple[str, ...] | list[str] = ("same_day_price_collapse", "no_stop_loss", "score_breakdown")
+
+
+@dataclass(frozen=True)
 class AlertsSettings:
     telegram_enabled: bool
     send_scan_summary: bool
@@ -116,6 +133,7 @@ class WeatherBotConfig:
     temperature: MarketSettings
     precipitation: MarketSettings
     paper: PaperSettings
+    shadow_execution: ShadowExecutionSettings
     strategy: StrategySettings
     alerts: AlertsSettings
     dashboard: DashboardSettings
@@ -139,6 +157,7 @@ def load_config(
         temperature=MarketSettings(**_section(payload, "temperature")),
         precipitation=MarketSettings(**_section(payload, "precipitation")),
         paper=PaperSettings(**_section(payload, "paper")),
+        shadow_execution=ShadowExecutionSettings(**_section(payload, "shadow_execution")),
         strategy=StrategySettings(
             temperature=StrategyThresholds(**_section(_section(payload, "strategy"), "temperature")),
             precipitation=StrategyThresholds(**_section(_section(payload, "strategy"), "precipitation")),
@@ -234,6 +253,16 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("paper", {})["initial_capital"] = float(payload["paper_initial_capital"])
     if "paper_execution_mode" in payload:
         mapped.setdefault("paper", {})["execution_mode"] = str(payload["paper_execution_mode"])
+    if "shadow_execution_enabled" in payload:
+        mapped.setdefault("shadow_execution", {})["enabled"] = bool(payload["shadow_execution_enabled"])
+    if "shadow_execution_entry_ttl_seconds" in payload:
+        mapped.setdefault("shadow_execution", {})["entry_ttl_seconds"] = int(payload["shadow_execution_entry_ttl_seconds"])
+    if "shadow_execution_exit_ttl_seconds" in payload:
+        mapped.setdefault("shadow_execution", {})["exit_ttl_seconds"] = int(payload["shadow_execution_exit_ttl_seconds"])
+    if "shadow_execution_queue_fill_fraction" in payload:
+        mapped.setdefault("shadow_execution", {})["queue_fill_fraction"] = float(payload["shadow_execution_queue_fill_fraction"])
+    if "shadow_execution_rest_fallback_seconds" in payload:
+        mapped.setdefault("shadow_execution", {})["rest_fallback_seconds"] = int(payload["shadow_execution_rest_fallback_seconds"])
     if "dashboard_port" in payload:
         mapped.setdefault("dashboard", {})["port"] = int(payload["dashboard_port"])
     return mapped
@@ -301,6 +330,24 @@ def _load_env_overrides() -> dict[str, Any]:
         )
     if os.getenv("WEATHER_PAPER_EXECUTION_MODE"):
         payload.setdefault("paper", {})["execution_mode"] = os.getenv("WEATHER_PAPER_EXECUTION_MODE")
+    if os.getenv("WEATHER_SHADOW_EXECUTION_ENABLED"):
+        payload.setdefault("shadow_execution", {})["enabled"] = _is_truthy(os.getenv("WEATHER_SHADOW_EXECUTION_ENABLED"))
+    if os.getenv("WEATHER_SHADOW_EXECUTION_ENTRY_TTL_SECONDS"):
+        payload.setdefault("shadow_execution", {})["entry_ttl_seconds"] = int(
+            os.getenv("WEATHER_SHADOW_EXECUTION_ENTRY_TTL_SECONDS", "1800")
+        )
+    if os.getenv("WEATHER_SHADOW_EXECUTION_EXIT_TTL_SECONDS"):
+        payload.setdefault("shadow_execution", {})["exit_ttl_seconds"] = int(
+            os.getenv("WEATHER_SHADOW_EXECUTION_EXIT_TTL_SECONDS", "300")
+        )
+    if os.getenv("WEATHER_SHADOW_EXECUTION_QUEUE_FILL_FRACTION"):
+        payload.setdefault("shadow_execution", {})["queue_fill_fraction"] = float(
+            os.getenv("WEATHER_SHADOW_EXECUTION_QUEUE_FILL_FRACTION", "0.5")
+        )
+    if os.getenv("WEATHER_SHADOW_EXECUTION_REST_FALLBACK_SECONDS"):
+        payload.setdefault("shadow_execution", {})["rest_fallback_seconds"] = int(
+            os.getenv("WEATHER_SHADOW_EXECUTION_REST_FALLBACK_SECONDS", "5")
+        )
     return payload
 
 

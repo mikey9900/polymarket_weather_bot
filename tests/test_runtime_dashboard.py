@@ -477,12 +477,20 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert "analysis_report.xlsx" in names
     assert "position_review_history.json" in names
     assert "shadow_order_intents.json" in names
+    assert "shadow_exec_summary.json" in names
+    assert "shadow_exec_orders.json" in names
+    assert "shadow_exec_positions.json" in names
+    assert "shadow_exec_fills.json" in names
+    assert "shadow_exec_marks.json" in names
+    assert "shadow_exec_missed.json" in names
     assert "same_day_risk_tracking.json" in names
     assert "manifest.json" in names
     assert "scan_runs/20260427T120000_temperature_completed.json" in names
     with zipfile.ZipFile(bundle_path) as archive:
         review_history = json.loads(archive.read("position_review_history.json").decode("utf-8"))
         shadow_orders = json.loads(archive.read("shadow_order_intents.json").decode("utf-8"))
+        shadow_exec_summary = json.loads(archive.read("shadow_exec_summary.json").decode("utf-8"))
+        shadow_exec_orders = json.loads(archive.read("shadow_exec_orders.json").decode("utf-8"))
         same_day_risk = json.loads(archive.read("same_day_risk_tracking.json").decode("utf-8"))
         manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
     assert review_history
@@ -492,12 +500,23 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert shadow_orders[0]["execution_mode"] == "paper_shadow"
     assert shadow_orders[0]["status"] == "mirrored"
     assert manifest["shadow_order_count"] == 1
+    assert manifest["shadow_exec_order_count"] == 1
+    assert manifest["shadow_exec_position_count"] == 0
+    assert manifest["shadow_execution"]["order_count"] == 1
+    assert manifest["money_scoreboard"]["scoreboard_label"] == "Executable Shadow P/L"
+    assert manifest["money_scoreboard"]["paper_signal_label"] == "Paper Signal P/L"
+    assert shadow_exec_summary["order_count"] == 1
+    assert shadow_exec_orders[0]["status"] == "error"
     assert manifest["same_day_low_edge_block_count"] == 1
     assert same_day_risk["summary"]["same_day_low_edge_block_count"] == 1
     assert same_day_risk["decisions"][0]["same_day_low_edge_blocked"] is True
     workbook = load_workbook(report_path, data_only=True)
     assert "Review History" in workbook.sheetnames
     assert "Shadow Orders" in workbook.sheetnames
+    assert "Shadow Exec Summary" in workbook.sheetnames
+    assert "Shadow Exec Orders" in workbook.sheetnames
+    assert "Shadow Exec Positions" in workbook.sheetnames
+    assert "Shadow Exec Fills" in workbook.sheetnames
     assert "Same-Day Risk" in workbook.sheetnames
     shadow_sheet = workbook["Shadow Orders"]
     assert shadow_sheet["B5"].value == "entry"
@@ -512,6 +531,8 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert latest_index["latest_report"]["local_path"] == str(latest_report_path)
     assert latest_index["archive_report"]["local_path"] == str(report_path)
     assert latest_index["shadow_order_count"] == 1
+    assert latest_index["shadow_execution"]["order_count"] == 1
+    assert latest_index["money_scoreboard"]["scoreboard_label"] == "Executable Shadow P/L"
     assert latest_index["same_day_low_edge_block_count"] == 1
 
 
@@ -831,14 +852,14 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "renderPnlModal" in html
     assert "setPnlWindow" in html
     assert 'id="pnl-modal"' in html
-    assert "P&L ANALYTICS" in html
+    assert "PAPER SIGNAL P/L" in html
     assert "copyExportPath" in html
     assert "copyBundlePath" in html
     assert "copyCloudLink" in html
     assert "latestExportUrl" in html
     assert "downloadLatestExport" in html
     assert "./api/export/latest/" in html
-    assert "Showing ${shownStart}-${shownEnd} of ${total} open trades" in html
+    assert "Showing ${shownStart}-${shownEnd} of ${total} signal positions" in html
     assert "shiftOpenTradePage" in html
     assert 'id="trade-pager-top"' in html
     assert 'id="trade-pager-bottom"' in html
@@ -863,6 +884,13 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "shadowOrderCard" in html
     assert "renderShadowOrders" in html
     assert "recent_shadow_orders" in html
+    assert "SHADOW P/L" in html
+    assert "PAPER SIGNAL P/L" in html
+    assert "Real P/L" in html
+    assert "Signal P/L" in html
+    assert "renderShadowPnlModal" in html
+    assert "shadow_execution_summary" in html
+    assert 'id="shadow-pnl-modal"' in html
     assert "setEdgeLimit()" in html
     assert "setNoEntryCap()" in html
     assert "set_temperature_scan_interval_minutes" in html
@@ -1241,6 +1269,9 @@ def test_control_payload_exposes_paper_metrics(tmp_path: Path):
     assert payload["shadow_order_count"] == 0
     assert payload["shadow_entry_count"] == 0
     assert payload["shadow_exit_count"] == 0
+    assert payload["shadow_exec_order_count"] == 0
+    assert payload["shadow_exec_position_count"] == 0
+    assert payload["shadow_exec_fill_count"] == 0
     assert payload["temperature_scan_interval_minutes"] == config.app.auto_temperature_scan_minutes
     assert payload["precipitation_scan_interval_minutes"] == config.app.auto_precipitation_scan_minutes
     assert payload["next_temperature_scan_at"] is not None
@@ -1654,7 +1685,18 @@ def test_dashboard_snapshot_exposes_recent_shadow_orders(tmp_path: Path):
 
     assert state["controls"]["paper_execution_mode"] == "paper_shadow"
     assert state["controls"]["shadow_order_count"] == 1
+    assert state["controls"]["shadow_exec_order_count"] == 1
     assert len(state["recent_shadow_orders"]) == 1
+    assert state["shadow_execution_summary"]["order_count"] == 1
+    assert state["shadow_execution_summary"]["scoreboard_pnl"] == state["shadow_execution_summary"]["realistic_total_pnl"]
+    assert state["shadow_execution_summary"]["paper_signal_total_pnl"] == state["shadow_execution_summary"]["paper_total_pnl"]
+    assert state["summary"]["execution"]["scoreboard_label"] == "Executable Shadow P/L"
+    assert state["summary"]["execution"]["paper_signal_label"] == "Paper Signal P/L"
+    assert state["summary"]["execution"]["status"] == "no_real_entry_fills"
+    assert len(state["shadow_execution_orders"]) == 1
+    assert state["shadow_execution_positions"] == []
+    assert state["shadow_execution_fills"] == []
+    assert state["shadow_execution_missed"]
     assert state["recent_shadow_orders"][0]["intent_kind"] == "entry"
     assert state["recent_shadow_orders"][0]["status"] == "mirrored"
 
