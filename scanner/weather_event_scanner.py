@@ -14,11 +14,29 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 import requests
 
 GAMMA = "https://gamma-api.polymarket.com"
+
+
+def _safe_print(*parts: object, sep: str = " ", end: str = "\n") -> None:
+    text = sep.join(str(part) for part in parts) + end
+    stream = sys.stdout
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        stream.write(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
+    try:
+        stream.flush()
+    except Exception:
+        pass
+
+
+print = _safe_print
 
 
 # -------------------------------------------------------------

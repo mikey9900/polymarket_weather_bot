@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,7 @@ class WeatherTracker:
                 signal_key TEXT NOT NULL,
                 accepted INTEGER NOT NULL,
                 reason TEXT NOT NULL,
+                reason_code TEXT,
                 final_score REAL NOT NULL,
                 policy_action TEXT NOT NULL,
                 metadata_json TEXT NOT NULL,
@@ -364,6 +366,7 @@ class WeatherTracker:
             """
         )
         self._ensure_paper_position_columns()
+        self._ensure_decision_columns()
         self._ensure_shadow_order_columns()
         self.conn.commit()
 
@@ -549,9 +552,9 @@ class WeatherTracker:
                 """
                 INSERT INTO decisions (
                     signal_id, signal_key, accepted, reason, final_score,
-                    policy_action, metadata_json, created_at
+                    reason_code, policy_action, metadata_json, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     signal_id,
@@ -559,6 +562,7 @@ class WeatherTracker:
                     1 if decision.accepted else 0,
                     decision.reason,
                     decision.final_score,
+                    None if decision.reason_code is None else str(decision.reason_code),
                     decision.policy_action,
                     json.dumps(decision.metadata, sort_keys=True),
                     decision.created_at,
@@ -993,6 +997,8 @@ class WeatherTracker:
                         shadow_position_id,
                     ),
                 )
+            if intent.position_id is not None:
+                self._sync_paper_position_with_shadow_locked(int(intent.position_id), synced_at=created_at)
             self.conn.commit()
             return order_id
 
@@ -1112,6 +1118,8 @@ class WeatherTracker:
                         """,
                         ("No realistic shadow position exists for this exit order.", filled_at, filled_at, int(order_id)),
                     )
+                    if order["paper_position_id"] is not None:
+                        self._sync_paper_position_with_shadow_locked(int(order["paper_position_id"]), synced_at=filled_at)
                     self.conn.commit()
                     return None
                 position = self.conn.execute("SELECT * FROM shadow_exec_positions WHERE id = ?", (shadow_position_id,)).fetchone()
@@ -1124,6 +1132,8 @@ class WeatherTracker:
                         """,
                         ("Realistic shadow position was already closed.", filled_at, filled_at, int(order_id)),
                     )
+                    if order["paper_position_id"] is not None:
+                        self._sync_paper_position_with_shadow_locked(int(order["paper_position_id"]), synced_at=filled_at)
                     self.conn.commit()
                     return None
                 fill_shares = min(fill_shares, max(0.0, float(position["open_shares"] or 0.0)))
@@ -1216,6 +1226,8 @@ class WeatherTracker:
                     """,
                     ("Order TTL elapsed before remaining shares filled.", now, now, int(row["id"])),
                 )
+                if row["paper_position_id"] is not None:
+                    self._sync_paper_position_with_shadow_locked(int(row["paper_position_id"]), synced_at=now)
                 expired += 1
             self.conn.commit()
             return expired
@@ -1581,6 +1593,8 @@ class WeatherTracker:
                     marked_at,
                 ),
             )
+        if row["paper_position_id"] is not None:
+            self._sync_paper_position_with_shadow_locked(int(row["paper_position_id"]), synced_at=marked_at)
         return {
             "id": int(position_id),
             "mark_price": effective_mark,
@@ -1599,6 +1613,7 @@ class WeatherTracker:
                     d.signal_key AS signal_key,
                     d.accepted AS accepted,
                     d.reason AS reason,
+                    d.reason_code AS reason_code,
                     d.final_score AS final_score,
                     d.policy_action AS policy_action,
                     d.metadata_json AS metadata_json,
@@ -1652,8 +1667,11 @@ class WeatherTracker:
         entry_slippage_bps: float = 0.0,
         exit_fee_bps: float = 0.0,
         exit_slippage_bps: float = 0.0,
+        entry_context_override: dict[str, float | None] | None = None,
     ) -> PaperPosition | None:
         entry_context = _paper_entry_context(signal, entry_slippage_bps)
+        if entry_context_override is not None:
+            entry_context = _paper_entry_context_with_override(signal, entry_context_override)
         if entry_context is None:
             return None
         with self._lock:
@@ -1851,6 +1869,182 @@ class WeatherTracker:
                 closed_at=closed_at,
                 reason=reason,
             )
+
+    def sync_paper_position_with_shadow(
+        self,
+        position_id: int,
+        *,
+        synced_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        synced_at = str(synced_at or iso_now())
+        with self._lock:
+            payload = self._sync_paper_position_with_shadow_locked(int(position_id), synced_at=synced_at)
+            self.conn.commit()
+        return payload
+
+    def _sync_paper_position_with_shadow_locked(
+        self,
+        position_id: int,
+        *,
+        synced_at: str,
+    ) -> dict[str, Any] | None:
+        paper = self.conn.execute("SELECT * FROM paper_positions WHERE id = ?", (int(position_id),)).fetchone()
+        if paper is None:
+            return None
+        shadow_position = self.conn.execute(
+            """
+            SELECT *
+            FROM shadow_exec_positions
+            WHERE paper_position_id = ?
+            ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END,
+                     COALESCE(updated_at, last_marked_at, closed_at, opened_at) DESC,
+                     id DESC
+            LIMIT 1
+            """,
+            (int(position_id),),
+        ).fetchone()
+        entry_order = self.conn.execute(
+            """
+            SELECT *
+            FROM shadow_exec_orders
+            WHERE paper_position_id = ? AND intent_kind = 'entry'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (int(position_id),),
+        ).fetchone()
+        current_status = str(paper["status"] or "").lower()
+        old_locked_cost = max(0.0, float(paper["cost"] or 0.0)) if current_status in {"open", "pending"} else 0.0
+        old_realized = float(paper["realized_pnl"] or 0.0)
+        initial, available = self.get_paper_capital()
+
+        next_status = current_status or "open"
+        shares = float(paper["shares"] or 0.0)
+        cost = max(0.0, float(paper["cost"] or 0.0))
+        entry_price = _bounded_probability(paper["entry_price"])
+        mark_price = _bounded_probability(paper["mark_price"])
+        mark_updated_at = str(paper["mark_updated_at"] or "") or None
+        realized_pnl = old_realized
+        exit_price = _bounded_probability(paper["exit_price"])
+        exit_reference_price = _bounded_probability(paper["exit_reference_price"])
+        gross_exit_payout = _as_float(paper["gross_exit_payout"])
+        net_exit_payout = _as_float(paper["net_exit_payout"])
+        exit_reason = str(paper["exit_reason"] or "") or None
+        resolved_at = str(paper["resolved_at"] or "") or None
+        new_locked_cost = old_locked_cost
+
+        if shadow_position is not None:
+            shadow_status = str(shadow_position["status"] or "").lower()
+            open_shares = max(0.0, float(shadow_position["open_shares"] or 0.0))
+            total_entry_shares = max(0.0, float(shadow_position["total_entry_shares"] or 0.0))
+            total_entry_notional = max(0.0, float(shadow_position["total_entry_notional_usd"] or 0.0))
+            remaining_cost = max(0.0, float(shadow_position["remaining_cost_basis_usd"] or 0.0))
+            entry_price = _bounded_probability(shadow_position["avg_entry_price"]) or entry_price
+            mark_price = _bounded_probability(shadow_position["mark_price"]) or mark_price
+            mark_updated_at = str(shadow_position["last_marked_at"] or mark_updated_at or synced_at)
+            realized_pnl = round(float(shadow_position["realized_pnl"] or 0.0), 6)
+            avg_exit_price = _bounded_probability(shadow_position["avg_exit_price"])
+            exit_notional = round(float(shadow_position["exit_notional_usd"] or 0.0), 6)
+            if avg_exit_price is not None:
+                exit_price = avg_exit_price
+                exit_reference_price = avg_exit_price
+            if exit_notional > 0:
+                gross_exit_payout = exit_notional
+                net_exit_payout = exit_notional
+            if shadow_status == "closed" or open_shares <= 0.000001:
+                next_status = "closed"
+                shares = total_entry_shares
+                cost = total_entry_notional
+                new_locked_cost = 0.0
+                resolved_at = str(shadow_position["closed_at"] or synced_at)
+                exit_reason = exit_reason or "shadow_exec_exit_fill"
+            else:
+                next_status = "open"
+                shares = open_shares
+                cost = remaining_cost
+                new_locked_cost = remaining_cost
+                resolved_at = None
+        else:
+            entry_status = str((entry_order["status"] if entry_order is not None else "") or "").lower()
+            entry_filled_shares = max(0.0, float((entry_order["filled_shares"] if entry_order is not None else 0.0) or 0.0))
+            if entry_order is not None and entry_filled_shares <= 0.000001:
+                if entry_status in {"resting", "partial_fill"}:
+                    next_status = "pending"
+                    shares = 0.0
+                    cost = 0.0
+                    realized_pnl = 0.0
+                    new_locked_cost = 0.0
+                    exit_price = None
+                    exit_reference_price = None
+                    gross_exit_payout = None
+                    net_exit_payout = None
+                    exit_reason = None
+                    resolved_at = None
+                    mark_updated_at = synced_at
+                elif entry_status:
+                    next_status = "closed"
+                    shares = 0.0
+                    cost = 0.0
+                    realized_pnl = 0.0
+                    new_locked_cost = 0.0
+                    exit_price = None
+                    exit_reference_price = None
+                    gross_exit_payout = 0.0
+                    net_exit_payout = 0.0
+                    exit_reason = "shadow_entry_no_fill"
+                    resolved_at = synced_at
+                    mark_updated_at = synced_at
+
+        self.conn.execute(
+            """
+            UPDATE paper_positions
+            SET status = ?,
+                entry_price = COALESCE(?, entry_price),
+                shares = ?,
+                cost = ?,
+                realized_pnl = ?,
+                mark_price = ?,
+                mark_updated_at = ?,
+                exit_price = ?,
+                exit_reference_price = ?,
+                gross_exit_payout = ?,
+                net_exit_payout = ?,
+                exit_reason = ?,
+                resolved_at = ?
+            WHERE id = ?
+            """,
+            (
+                next_status,
+                entry_price,
+                round(max(0.0, shares), 6),
+                round(max(0.0, cost), 6),
+                round(realized_pnl, 6),
+                mark_price,
+                mark_updated_at,
+                exit_price,
+                exit_reference_price,
+                gross_exit_payout,
+                net_exit_payout,
+                exit_reason,
+                resolved_at,
+                int(position_id),
+            ),
+        )
+        capital_delta = round((old_locked_cost - new_locked_cost) + (realized_pnl - old_realized), 6)
+        if abs(capital_delta) > 0.0000005:
+            self.set_setting(
+                "paper_capital",
+                {"initial": initial, "available": round(available + capital_delta, 6)},
+            )
+        return {
+            "id": int(position_id),
+            "status": next_status,
+            "shares": round(max(0.0, shares), 6),
+            "cost": round(max(0.0, cost), 6),
+            "realized_pnl": round(realized_pnl, 6),
+            "exit_reason": exit_reason,
+            "resolved_at": resolved_at,
+        }
 
     def settle_market(self, market_slug: str, resolution: str) -> ResolutionOutcome:
         resolution = str(resolution or "").upper()
@@ -2177,6 +2371,417 @@ class WeatherTracker:
             payload["windows"][key] = _build_pnl_window_payload(label, window_positions)
         return payload
 
+    def get_paper_vs_shadow_daily_summary(
+        self,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        timezone_name: str | None = None,
+        weekend_only: bool = False,
+        limit_days: int = 14,
+    ) -> dict[str, Any]:
+        analytics_tz = _resolve_analytics_timezone(timezone_name)
+        local_now = datetime.now(analytics_tz)
+        start_date, end_date = _resolve_summary_window(
+            start=start,
+            end=end,
+            now_date=local_now.date(),
+            weekend_only=weekend_only,
+            limit_days=limit_days,
+        )
+        window_start_local = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=analytics_tz)
+        window_end_local = datetime.combine(end_date + timedelta(days=1), datetime.min.time()).replace(tzinfo=analytics_tz)
+        window_start_utc = window_start_local.astimezone(timezone.utc)
+        window_end_utc = window_end_local.astimezone(timezone.utc)
+        window_start = window_start_utc.isoformat()
+        window_end = window_end_utc.isoformat()
+        with self._lock:
+            paper_rows = self.conn.execute(
+                """
+                SELECT
+                    id,
+                    market_type,
+                    city_slug,
+                    label,
+                    direction,
+                    realized_pnl,
+                    cost,
+                    exit_reason,
+                    COALESCE(resolved_at, created_at) AS event_at
+                FROM paper_positions
+                WHERE status IN ('resolved', 'closed')
+                  AND COALESCE(resolved_at, created_at) >= ?
+                  AND COALESCE(resolved_at, created_at) < ?
+                ORDER BY event_at
+                """,
+                (window_start, window_end),
+            ).fetchall()
+            signal_rows = self.conn.execute(
+                """
+                SELECT market_type, created_at
+                FROM signals
+                WHERE created_at >= ? AND created_at < ?
+                ORDER BY created_at
+                """,
+                (window_start, window_end),
+            ).fetchall()
+            decision_rows = self.conn.execute(
+                """
+                SELECT accepted, reason_code, policy_action, created_at
+                FROM decisions
+                WHERE created_at >= ? AND created_at < ?
+                ORDER BY created_at
+                """,
+                (window_start, window_end),
+            ).fetchall()
+            shadow_position_rows = self.conn.execute(
+                """
+                SELECT
+                    id,
+                    market_type,
+                    city_slug,
+                    label,
+                    direction,
+                    realized_pnl,
+                    COALESCE(closed_at, opened_at) AS event_at,
+                    open_shares,
+                    mark_value_usd,
+                    status
+                FROM shadow_exec_positions
+                WHERE status IN ('closed', 'resolved')
+                  AND COALESCE(closed_at, opened_at) >= ?
+                  AND COALESCE(closed_at, opened_at) < ?
+                ORDER BY event_at
+                """,
+                (window_start, window_end),
+            ).fetchall()
+            shadow_intent_rows = self.conn.execute(
+                """
+                SELECT
+                    intent_kind,
+                    simulated_fill_status,
+                    created_at
+                FROM shadow_order_intents
+                WHERE created_at >= ? AND created_at < ?
+                ORDER BY created_at
+                """,
+                (window_start, window_end),
+            ).fetchall()
+            open_shadow_positions = self.conn.execute(
+                "SELECT COUNT(*) AS value, COALESCE(SUM(mark_value_usd), 0.0) AS open_exposure FROM shadow_exec_positions WHERE status = 'open'"
+            ).fetchone()
+            paper_open_positions = self._query_dashboard_paper_positions(limit=500, status="open")
+        paper_rows_by_day = _group_rows_by_local_date(paper_rows, timestamp_key="event_at", timezone=analytics_tz)
+        shadow_rows_by_day = _group_rows_by_local_date(shadow_position_rows, timestamp_key="event_at", timezone=analytics_tz)
+        signal_rows_by_day = _group_rows_by_local_date(signal_rows, timestamp_key="created_at", timezone=analytics_tz)
+        decision_rows_by_day = _group_rows_by_local_date(decision_rows, timestamp_key="created_at", timezone=analytics_tz)
+        shadow_intent_rows_by_day = _group_rows_by_local_date(shadow_intent_rows, timestamp_key="created_at", timezone=analytics_tz)
+        overall_decision_summary = _summarize_decision_rows([dict(item) for item in decision_rows])
+        day_count = max(0, (end_date - start_date).days) + 1
+        days = [str(start_date + timedelta(days=index)) for index in range(day_count)]
+        per_day: list[dict[str, Any]] = []
+        totals = {
+            "paper_realized_pnl": 0.0,
+            "paper_closed_trades": 0,
+            "paper_signals": len(signal_rows),
+            "paper_decisions": int(overall_decision_summary["decision_count"]),
+            "paper_accepted_decisions": int(overall_decision_summary["accepted_count"]),
+            "paper_rejected_decisions": int(overall_decision_summary["rejected_count"]),
+            "paper_accept_rate": float(overall_decision_summary["accept_rate"]),
+            "paper_accepted_by_policy_action": dict(overall_decision_summary["accepted_by_policy_action"]),
+            "paper_rejected_by_policy_action": dict(overall_decision_summary["rejected_by_policy_action"]),
+            "paper_rejected_reason_codes": dict(overall_decision_summary["rejected_reason_codes"]),
+            "paper_top_rejected_reason_codes": _ranked_count_items(
+                overall_decision_summary["rejected_reason_codes"],
+                limit=8,
+            ),
+            "shadow_realized_pnl": 0.0,
+            "shadow_closed_positions": 0,
+            "shadow_entry_intents": 0,
+            "shadow_filled_intents": 0,
+        }
+        for day in days:
+            papers = paper_rows_by_day.get(day, [])
+            shadows = shadow_rows_by_day.get(day, [])
+            signals = signal_rows_by_day.get(day, [])
+            decisions = decision_rows_by_day.get(day, [])
+            intents = shadow_intent_rows_by_day.get(day, [])
+            decision_summary = _summarize_decision_rows(decisions)
+            paper_realized_rows = [float(item.get("realized_pnl") or 0.0) for item in papers]
+            paper_realized_pnl = round(sum(paper_realized_rows), 6)
+            paper_wins = sum(1 for value in paper_realized_rows if value > 0)
+            paper_losses = sum(1 for value in paper_realized_rows if value < 0)
+            paper_closed = len(paper_realized_rows)
+            paper_best = round(max(paper_realized_rows), 6) if paper_realized_rows else 0.0
+            paper_worst = round(min(paper_realized_rows), 6) if paper_realized_rows else 0.0
+            shadow_realized_rows = [float(item.get("realized_pnl") or 0.0) for item in shadows]
+            shadow_realized_pnl = round(sum(shadow_realized_rows), 6)
+            shadow_closed = len(shadow_realized_rows)
+            shadow_closed_exposure = round(sum(float(item.get("mark_value_usd") or 0.0) for item in shadows if str(item.get("status") or "") == "closed"), 6)
+            totals["paper_realized_pnl"] += paper_realized_pnl
+            totals["paper_closed_trades"] += paper_closed
+            totals["shadow_realized_pnl"] += shadow_realized_pnl
+            totals["shadow_closed_positions"] += shadow_closed
+            totals["shadow_entry_intents"] += sum(1 for item in intents if str(item.get("intent_kind") or "") == "entry")
+            totals["shadow_filled_intents"] += sum(
+                1 for item in intents if str(item.get("simulated_fill_status") or "") in {"partial_fill", "full_fill"}
+            )
+            day_summary = {
+                "date": day,
+                "weekday": datetime.fromisoformat(f"{day}T00:00:00").strftime("%A"),
+                "paper": {
+                    "closed_trades": paper_closed,
+                    "realized_pnl": paper_realized_pnl,
+                    "wins": paper_wins,
+                    "losses": paper_losses,
+                    "win_rate": round((paper_wins / paper_closed * 100.0), 2) if paper_closed else 0.0,
+                    "best_trade_pnl": paper_best,
+                    "worst_trade_pnl": paper_worst,
+                    "signals": len(signals),
+                    "decisions": int(decision_summary["decision_count"]),
+                    "accepted_decisions": int(decision_summary["accepted_count"]),
+                    "rejected_decisions": int(decision_summary["rejected_count"]),
+                    "decision_accept_rate": float(decision_summary["accept_rate"]),
+                    "accepted_by_policy_action": dict(decision_summary["accepted_by_policy_action"]),
+                    "rejected_by_policy_action": dict(decision_summary["rejected_by_policy_action"]),
+                    "rejected_reason_codes": dict(decision_summary["rejected_reason_codes"]),
+                    "top_rejected_reason_codes": _ranked_count_items(
+                        decision_summary["rejected_reason_codes"],
+                        limit=5,
+                    ),
+                    "by_market": _count_by_key([dict(item) for item in papers], "market_type"),
+                    "by_direction": _count_by_key([dict(item) for item in papers], "direction"),
+                    "by_city": _count_by_key([dict(item) for item in papers], "city_slug"),
+                    "by_exit_reason": _count_by_key([dict(item) for item in papers], "exit_reason"),
+                },
+                "shadow": {
+                    "closed_positions": shadow_closed,
+                    "realized_pnl": shadow_realized_pnl,
+                    "closed_exposure": shadow_closed_exposure,
+                    "entry_intents": sum(
+                        1 for item in intents if str(item.get("intent_kind") or "") == "entry"
+                    ),
+                    "exit_intents": sum(
+                        1 for item in intents if str(item.get("intent_kind") or "") == "exit"
+                    ),
+                    "intents_full_fill": sum(
+                        1 for item in intents if str(item.get("simulated_fill_status") or "") == "full_fill"
+                    ),
+                    "intents_partial_fill": sum(
+                        1 for item in intents if str(item.get("simulated_fill_status") or "") == "partial_fill"
+                    ),
+                    "intents_no_fill": sum(
+                        1 for item in intents if str(item.get("simulated_fill_status") or "") == "no_fill"
+                    ),
+                    "by_market": _count_by_key([dict(item) for item in shadows], "market_type"),
+                    "by_direction": _count_by_key([dict(item) for item in shadows], "direction"),
+                    "by_city": _count_by_key([dict(item) for item in shadows], "city_slug"),
+                    "active_open_exposure_usd": round(float(open_shadow_positions["open_exposure"] or 0.0), 6) if open_shadow_positions else 0.0,
+                    "active_open_positions": int(open_shadow_positions["value"] or 0) if open_shadow_positions else 0,
+                },
+                "gap_real": {
+                    "paper_vs_shadow_realized": round(paper_realized_pnl - shadow_realized_pnl, 6),
+                    "paper_signals_minus_shadows": len(signals) - len(shadows),
+                },
+            }
+            per_day.append(day_summary)
+        totals["paper_open_positions"] = len(paper_open_positions)
+        totals["paper_open_exposure"] = round(
+            sum(float(item.get("net_liquidation_value") or 0.0) for item in paper_open_positions),
+            6,
+        )
+        totals["shadow_open_positions"] = int(open_shadow_positions["value"] or 0) if open_shadow_positions else 0
+        totals["shadow_open_exposure"] = round(float(open_shadow_positions["open_exposure"] or 0.0), 6) if open_shadow_positions else 0.0
+        totals["paper_realized_pnl"] = round(float(totals["paper_realized_pnl"]), 6)
+        totals["shadow_realized_pnl"] = round(float(totals["shadow_realized_pnl"]), 6)
+        totals["paper_vs_shadow_realized_total"] = round(
+            float(totals["paper_realized_pnl"]) - float(totals["shadow_realized_pnl"]),
+            6,
+        )
+        return {
+            "generated_at": iso_now(),
+            "timezone": str(analytics_tz),
+            "weekend_only": bool(weekend_only),
+            "window": {
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+                "start_utc": window_start_utc.isoformat(),
+                "end_utc": window_end_utc.isoformat(),
+            },
+            "days": per_day,
+            "totals": totals,
+        }
+
+    def get_decision_activity_summary(
+        self,
+        *,
+        hours: int = 12,
+        timezone_name: str | None = None,
+    ) -> dict[str, Any]:
+        analytics_tz = _resolve_analytics_timezone(timezone_name)
+        lookback_hours = max(1, int(hours or 12))
+        window_end_utc = datetime.now(timezone.utc)
+        window_start_utc = window_end_utc - timedelta(hours=lookback_hours)
+        window_start = window_start_utc.isoformat()
+        with self._lock:
+            signal_rows = self.conn.execute(
+                """
+                SELECT market_type, city_slug, direction, created_at
+                FROM signals
+                WHERE created_at >= ?
+                ORDER BY created_at
+                """,
+                (window_start,),
+            ).fetchall()
+            decision_rows = self.conn.execute(
+                """
+                SELECT accepted, reason_code, policy_action, created_at
+                FROM decisions
+                WHERE created_at >= ?
+                ORDER BY created_at
+                """,
+                (window_start,),
+            ).fetchall()
+            paper_opened_rows = self.conn.execute(
+                """
+                SELECT market_type, city_slug, direction, created_at
+                FROM paper_positions
+                WHERE created_at >= ?
+                ORDER BY created_at
+                """,
+                (window_start,),
+            ).fetchall()
+            paper_closed_rows = self.conn.execute(
+                """
+                SELECT market_type, city_slug, direction, status, exit_reason, realized_pnl,
+                       COALESCE(resolved_at, created_at) AS event_at
+                FROM paper_positions
+                WHERE status IN ('closed', 'resolved')
+                  AND COALESCE(resolved_at, created_at) >= ?
+                ORDER BY event_at
+                """,
+                (window_start,),
+            ).fetchall()
+            shadow_intent_rows = self.conn.execute(
+                """
+                SELECT intent_kind, execution_mode, simulated_fill_status, reason_code, created_at
+                FROM shadow_order_intents
+                WHERE created_at >= ?
+                ORDER BY created_at
+                """,
+                (window_start,),
+            ).fetchall()
+            shadow_order_rows = self.conn.execute(
+                """
+                SELECT intent_kind, status, created_at
+                FROM shadow_exec_orders
+                WHERE created_at >= ?
+                ORDER BY created_at
+                """,
+                (window_start,),
+            ).fetchall()
+            shadow_fill_rows = self.conn.execute(
+                """
+                SELECT action, filled_at
+                FROM shadow_exec_fills
+                WHERE filled_at >= ?
+                ORDER BY filled_at
+                """,
+                (window_start,),
+            ).fetchall()
+            shadow_opened_rows = self.conn.execute(
+                """
+                SELECT market_type, direction, opened_at
+                FROM shadow_exec_positions
+                WHERE opened_at >= ?
+                ORDER BY opened_at
+                """,
+                (window_start,),
+            ).fetchall()
+            shadow_closed_rows = self.conn.execute(
+                """
+                SELECT market_type, direction, status, realized_pnl,
+                       COALESCE(closed_at, updated_at, opened_at) AS event_at
+                FROM shadow_exec_positions
+                WHERE status IN ('closed', 'resolved')
+                  AND COALESCE(closed_at, updated_at, opened_at) >= ?
+                ORDER BY event_at
+                """,
+                (window_start,),
+            ).fetchall()
+        decision_summary = _summarize_decision_rows([dict(item) for item in decision_rows])
+        paper_closed_realized_pnl = round(sum(float(item["realized_pnl"] or 0.0) for item in paper_closed_rows), 6)
+        shadow_closed_realized_pnl = round(sum(float(item["realized_pnl"] or 0.0) for item in shadow_closed_rows), 6)
+        entry_intents = [dict(item) for item in shadow_intent_rows if str(item["intent_kind"] or "") == "entry"]
+        return {
+            "generated_at": iso_now(),
+            "timezone": str(analytics_tz),
+            "lookback_hours": lookback_hours,
+            "window": {
+                "start_utc": window_start_utc.isoformat(),
+                "end_utc": window_end_utc.isoformat(),
+                "start_local": window_start_utc.astimezone(analytics_tz).isoformat(),
+                "end_local": window_end_utc.astimezone(analytics_tz).isoformat(),
+            },
+            "signals": {
+                "count": len(signal_rows),
+                "by_market": _count_by_key([dict(item) for item in signal_rows], "market_type"),
+                "by_direction": _count_by_key([dict(item) for item in signal_rows], "direction"),
+                "by_city": _count_by_key([dict(item) for item in signal_rows], "city_slug"),
+                "last_at": str(signal_rows[-1]["created_at"]) if signal_rows else None,
+            },
+            "decisions": {
+                "count": int(decision_summary["decision_count"]),
+                "accepted_count": int(decision_summary["accepted_count"]),
+                "rejected_count": int(decision_summary["rejected_count"]),
+                "accept_rate": float(decision_summary["accept_rate"]),
+                "accepted_by_policy_action": dict(decision_summary["accepted_by_policy_action"]),
+                "rejected_by_policy_action": dict(decision_summary["rejected_by_policy_action"]),
+                "rejected_reason_codes": dict(decision_summary["rejected_reason_codes"]),
+                "top_rejected_reason_codes": _ranked_count_items(
+                    decision_summary["rejected_reason_codes"],
+                    limit=8,
+                ),
+                "last_at": str(decision_rows[-1]["created_at"]) if decision_rows else None,
+            },
+            "paper": {
+                "opened_positions": len(paper_opened_rows),
+                "opened_by_market": _count_by_key([dict(item) for item in paper_opened_rows], "market_type"),
+                "closed_positions": len(paper_closed_rows),
+                "closed_by_exit_reason": _count_by_key([dict(item) for item in paper_closed_rows], "exit_reason"),
+                "closed_realized_pnl": paper_closed_realized_pnl,
+                "last_opened_at": str(paper_opened_rows[-1]["created_at"]) if paper_opened_rows else None,
+                "last_closed_at": str(paper_closed_rows[-1]["event_at"]) if paper_closed_rows else None,
+            },
+            "shadow": {
+                "entry_intents": len(entry_intents),
+                "exit_intents": sum(1 for item in shadow_intent_rows if str(item["intent_kind"] or "") == "exit"),
+                "entry_fillable_intents": sum(
+                    1
+                    for item in entry_intents
+                    if str(item.get("simulated_fill_status") or "") in {"partial_fill", "full_fill"}
+                ),
+                "entry_no_fill_intents": sum(
+                    1 for item in entry_intents if str(item.get("simulated_fill_status") or "") == "no_fill"
+                ),
+                "entry_reason_codes": _count_reason_codes(entry_intents, key="reason_code"),
+                "orders_created": len(shadow_order_rows),
+                "fills": len(shadow_fill_rows),
+                "opened_positions": len(shadow_opened_rows),
+                "closed_positions": len(shadow_closed_rows),
+                "closed_realized_pnl": shadow_closed_realized_pnl,
+                "last_intent_at": str(shadow_intent_rows[-1]["created_at"]) if shadow_intent_rows else None,
+                "last_order_at": str(shadow_order_rows[-1]["created_at"]) if shadow_order_rows else None,
+                "last_fill_at": str(shadow_fill_rows[-1]["filled_at"]) if shadow_fill_rows else None,
+            },
+            "idle_flags": {
+                "no_signals": len(signal_rows) == 0,
+                "no_accepted_decisions": int(decision_summary["accepted_count"]) == 0,
+                "no_paper_entries": len(paper_opened_rows) == 0,
+                "no_shadow_entries": len(entry_intents) == 0,
+            },
+        }
+
     def get_shadow_order_summary(self) -> dict[str, Any]:
         with self._lock:
             row = self.conn.execute(
@@ -2245,6 +2850,7 @@ class WeatherTracker:
                 d.final_score AS decision_final_score,
                 d.reason AS decision_reason,
                 d.policy_action AS decision_policy_action,
+                d.reason_code AS decision_reason_code,
                 d.metadata_json AS decision_metadata_json
             FROM paper_positions p
             LEFT JOIN signals s ON s.id = p.signal_id
@@ -2286,6 +2892,14 @@ class WeatherTracker:
             if column in existing:
                 continue
             self.conn.execute(f"ALTER TABLE paper_positions ADD COLUMN {column} {column_type}")
+
+    def _ensure_decision_columns(self) -> None:
+        existing = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(decisions)").fetchall()
+        }
+        if "reason_code" not in existing:
+            self.conn.execute("ALTER TABLE decisions ADD COLUMN reason_code TEXT")
 
     def _ensure_shadow_order_columns(self) -> None:
         existing = {
@@ -2393,6 +3007,7 @@ class WeatherTracker:
                 d.final_score AS decision_final_score,
                 d.reason AS decision_reason,
                 d.policy_action AS decision_policy_action,
+                d.reason_code AS decision_reason_code,
                 d.metadata_json AS decision_metadata_json
             FROM paper_positions p
             LEFT JOIN signals s ON s.id = p.signal_id
@@ -2577,6 +3192,7 @@ def _serialize_dashboard_position(row: sqlite3.Row) -> dict[str, Any]:
         "adapter_score": _as_float(payload.get("signal_adapter_score")),
         "decision_final_score": _as_float(payload.get("decision_final_score")),
         "decision_reason": str(payload.get("decision_reason") or ""),
+        "decision_reason_code": str(payload.get("decision_reason_code") or ""),
         "decision_policy_action": str(payload.get("decision_policy_action") or ""),
         "decision_metadata": decision_metadata,
         "entry_price": pricing_metrics["entry_price"],
@@ -2871,6 +3487,7 @@ def _serialize_same_day_risk_tracking_row(row: sqlite3.Row) -> dict[str, Any]:
         "accepted": bool(payload.get("accepted")),
         "decision_created_at": str(payload.get("decision_created_at") or ""),
         "reason": str(payload.get("reason") or ""),
+        "reason_code": str(payload.get("reason_code") or ""),
         "policy_action": str(payload.get("policy_action") or ""),
         "final_score": _as_float(payload.get("final_score")),
         "market_type": str(payload.get("market_type") or ""),
@@ -2914,6 +3531,26 @@ def _paper_entry_context(signal: WeatherSignal, entry_slippage_bps: Any) -> dict
     return {
         "entry_reference_price": entry_reference_price,
         "mark_probability": _contract_probability(signal.direction, signal.forecast_prob),
+        "entry_price": entry_price,
+    }
+
+
+def _paper_entry_context_with_override(
+    signal: WeatherSignal,
+    entry_context_override: dict[str, float | None] | None,
+) -> dict[str, float | None] | None:
+    if not isinstance(entry_context_override, dict):
+        return None
+    entry_reference_price = _bounded_probability(entry_context_override.get("entry_reference_price"))
+    entry_price = _bounded_probability(entry_context_override.get("entry_price"))
+    mark_probability = _bounded_probability(entry_context_override.get("mark_probability"))
+    if entry_reference_price is None or entry_price is None or entry_price <= 0:
+        return None
+    if mark_probability is None:
+        mark_probability = _contract_probability(signal.direction, signal.forecast_prob)
+    return {
+        "entry_reference_price": entry_reference_price,
+        "mark_probability": mark_probability,
         "entry_price": entry_price,
     }
 
@@ -3136,6 +3773,7 @@ def _dashboard_pricing_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     )
     shares = _as_float(payload.get("shares")) or 0.0
     cost = _as_float(payload.get("cost")) or 0.0
+    realized_pnl = _as_float(payload.get("realized_pnl")) or 0.0
     entry_fee_paid = _as_float(payload.get("entry_fee_paid")) or 0.0
     entry_fee_bps = _bps(payload.get("entry_fee_bps"))
     entry_slippage_bps = _bps(payload.get("entry_slippage_bps"))
@@ -3154,9 +3792,9 @@ def _dashboard_pricing_metrics(payload: dict[str, Any]) -> dict[str, Any]:
         slippage_bps=exit_slippage_bps,
     )
     expected_payout = round(shares * outcome_probability, 6) if outcome_probability is not None else None
-    expected_value_pnl = round((net_model_value or 0.0) - cost, 6) if outcome_probability is not None else None
+    expected_value_pnl = round(realized_pnl + ((net_model_value or 0.0) - cost), 6) if outcome_probability is not None else None
     mark_to_market_payout = round(shares * mark_price, 6) if mark_price is not None else None
-    mark_to_market_pnl = round((net_liquidation_value or 0.0) - cost, 6) if mark_price is not None else None
+    mark_to_market_pnl = round(realized_pnl + ((net_liquidation_value or 0.0) - cost), 6) if mark_price is not None else None
     return {
         "entry_reference_price": entry_reference_price,
         "entry_model_probability": default_outcome_probability,
@@ -3479,3 +4117,142 @@ def _count_by_key(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
         value = str(row.get(key) or "unknown")
         counts[value] = counts.get(value, 0) + 1
     return counts
+
+
+def _split_reason_codes(value: Any) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split("|") if part.strip()]
+
+
+def _count_reason_codes(rows: list[dict[str, Any]], *, key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        for reason_code in _split_reason_codes(row.get(key)):
+            counts[reason_code] = counts.get(reason_code, 0) + 1
+    return counts
+
+
+def _summarize_decision_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    accepted_by_policy_action: dict[str, int] = {}
+    rejected_by_policy_action: dict[str, int] = {}
+    rejected_reason_codes: dict[str, int] = {}
+    accepted_count = 0
+    rejected_count = 0
+    for row in rows:
+        accepted = int(row.get("accepted") or 0) > 0
+        policy_action = str(row.get("policy_action") or "unknown")
+        if accepted:
+            accepted_count += 1
+            accepted_by_policy_action[policy_action] = accepted_by_policy_action.get(policy_action, 0) + 1
+            continue
+        rejected_count += 1
+        rejected_by_policy_action[policy_action] = rejected_by_policy_action.get(policy_action, 0) + 1
+        for reason_code in _split_reason_codes(row.get("reason_code")):
+            rejected_reason_codes[reason_code] = rejected_reason_codes.get(reason_code, 0) + 1
+    decision_count = len(rows)
+    return {
+        "decision_count": decision_count,
+        "accepted_count": accepted_count,
+        "rejected_count": rejected_count,
+        "accept_rate": round((accepted_count / decision_count * 100.0), 2) if decision_count else 0.0,
+        "accepted_by_policy_action": accepted_by_policy_action,
+        "rejected_by_policy_action": rejected_by_policy_action,
+        "rejected_reason_codes": rejected_reason_codes,
+    }
+
+
+def _ranked_count_items(counts: dict[str, int], *, limit: int | None = None) -> list[dict[str, Any]]:
+    items = [
+        {"label": str(label or "unknown"), "count": int(count or 0)}
+        for label, count in counts.items()
+    ]
+    items.sort(key=lambda item: (-int(item["count"]), str(item["label"])))
+    if limit is None:
+        return items
+    return items[: max(0, int(limit))]
+
+
+def _resolve_analytics_timezone(timezone_name: str | None) -> ZoneInfo:
+    raw_name = str(timezone_name or "UTC").strip() or "UTC"
+    try:
+        return ZoneInfo(raw_name)
+    except ZoneInfoNotFoundError:
+        return timezone.utc
+
+
+def _resolve_summary_window(
+    *,
+    start: str | None,
+    end: str | None,
+    now_date: datetime.date,
+    weekend_only: bool,
+    limit_days: int,
+) -> tuple[datetime.date, datetime.date]:
+    parsed_start = _parse_summary_date(start)
+    parsed_end = _parse_summary_date(end)
+    max_span = max(1, int(limit_days or 1))
+    if weekend_only:
+        if parsed_start is None or parsed_end is None:
+            weekend_start, weekend_end = _most_recent_weekend(now_date)
+            parsed_start = weekend_start
+            parsed_end = weekend_end
+    if parsed_start is None and parsed_end is None:
+        parsed_end = now_date
+        parsed_start = parsed_end - timedelta(days=max_span - 1)
+    elif parsed_start is None:
+        parsed_end = parsed_end or now_date
+        parsed_start = parsed_end - timedelta(days=max_span - 1)
+    elif parsed_end is None:
+        parsed_end = parsed_start + timedelta(days=max_span - 1)
+    if parsed_end < parsed_start:
+        parsed_start, parsed_end = parsed_end, parsed_start
+    window_span = (parsed_end - parsed_start).days + 1
+    if not weekend_only and window_span > max_span:
+        parsed_start = parsed_end - timedelta(days=max_span - 1)
+    return parsed_start, parsed_end
+
+
+def _most_recent_weekend(now_date: datetime.date) -> tuple[datetime.date, datetime.date]:
+    weekday = now_date.weekday()  # Monday=0 ... Sunday=6
+    if weekday >= 5:
+        saturday = now_date - timedelta(days=weekday - 5)
+    else:
+        saturday = now_date - timedelta(days=weekday + 2)
+    return saturday, saturday + timedelta(days=1)
+
+
+def _parse_summary_date(value: str | None) -> datetime.date | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if isinstance(parsed, datetime):
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed.date()
+    return parsed
+
+
+def _group_rows_by_local_date(
+    rows: Any,
+    *,
+    timestamp_key: str,
+    timezone: ZoneInfo,
+) -> dict[str, list[dict[str, Any]]]:
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        row_data = dict(row)
+        timestamp = row_data.get(timestamp_key)
+        parsed = _parse_iso_datetime(timestamp) if timestamp else None
+        if parsed is None:
+            continue
+        local_date = parsed.astimezone(timezone).date().isoformat()
+        buckets[local_date].append(row_data)
+    return buckets

@@ -28,6 +28,7 @@ import os
 import requests
 import math
 import json
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -38,6 +39,23 @@ from dotenv import load_dotenv
 from weather_bot.persistent_weather_cache import load_cached_payload, store_cached_payload
 
 load_dotenv()
+
+
+def _safe_print(*parts: object, sep: str = " ", end: str = "\n") -> None:
+    text = sep.join(str(part) for part in parts) + end
+    stream = sys.stdout
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        stream.write(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
+    try:
+        stream.flush()
+    except Exception:
+        pass
+
+
+print = _safe_print
 
 
 def _ha_option(name: str) -> str:

@@ -8,7 +8,18 @@ PAPER_SHADOW_EXECUTION_MODE = "paper_shadow"
 
 def normalize_execution_mode(value: object) -> str:
     raw = str(value or "").strip().lower().replace("-", "_").replace("+", "_")
-    if raw in {"paper_shadow", "paper__shadow", "shadow", "shadow_live", "shadowlive"}:
+    if raw in {
+        "paper_shadow",
+        "paper__shadow",
+        "shadow",
+        "shadow_live",
+        "shadowlive",
+        "real",
+        "paper_real",
+        "paper_live",
+        "realistic",
+        "live",
+    }:
         return PAPER_SHADOW_EXECUTION_MODE
     return PAPER_EXECUTION_MODE
 
@@ -24,5 +35,5 @@ def execution_mode_creates_paper_positions(value: object) -> bool:
 def execution_mode_label(value: object) -> str:
     mode = normalize_execution_mode(value)
     if mode == PAPER_SHADOW_EXECUTION_MODE:
-        return "PAPER+SHADOW"
+        return "Paper + Shadow-Live (sim)"
     return "PAPER"

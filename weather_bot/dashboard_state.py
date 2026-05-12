@@ -98,6 +98,14 @@ class DashboardStateService:
                 ),
             },
             "pnl_analytics": self.tracker.get_pnl_analytics(timezone_name=app_timezone),
+            "paper_vs_shadow_daily_summary": self.tracker.get_paper_vs_shadow_daily_summary(
+                timezone_name=app_timezone,
+                weekend_only=True,
+            ),
+            "decision_activity_12h": self.tracker.get_decision_activity_summary(
+                hours=12,
+                timezone_name=app_timezone,
+            ),
             "open_positions": self.tracker.get_dashboard_paper_positions(
                 limit=250,
                 status="open",
@@ -195,6 +203,8 @@ class DashboardStateService:
                 "runtime": self.runtime.get_status_snapshot(),
                 "summary": {"paper": {}, "execution": {}},
                 "pnl_analytics": {"generated_at": datetime.now(timezone.utc).isoformat(), "open_book": {}, "windows": {}},
+                "paper_vs_shadow_daily_summary": {},
+                "decision_activity_12h": {},
                 "open_positions": [],
                 "recent_signals": [],
                 "recent_trades": [],
@@ -219,6 +229,8 @@ class DashboardStateService:
         runtime_status = self.runtime.get_status_snapshot()
         paper_stats = self.tracker.get_paper_stats()
         shadow_execution_summary = self.tracker.get_shadow_execution_summary()
+        app_timezone = getattr(getattr(self.runtime, "config", None), "app", None)
+        app_timezone = getattr(app_timezone, "timezone", "UTC")
         snapshot["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
         snapshot["runtime"] = runtime_status
         snapshot["controls"] = self.control_plane.build_controls_payload()
@@ -226,6 +238,14 @@ class DashboardStateService:
         summary["execution"] = _execution_scoreboard_summary(
             paper_stats=paper_stats,
             shadow_execution_summary=shadow_execution_summary,
+        )
+        snapshot["paper_vs_shadow_daily_summary"] = self.tracker.get_paper_vs_shadow_daily_summary(
+            timezone_name=app_timezone,
+            weekend_only=True,
+        )
+        snapshot["decision_activity_12h"] = self.tracker.get_decision_activity_summary(
+            hours=12,
+            timezone_name=app_timezone,
         )
         snapshot["summary"] = summary
         snapshot["shadow_execution_summary"] = shadow_execution_summary

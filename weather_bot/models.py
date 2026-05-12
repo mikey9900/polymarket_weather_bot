@@ -72,6 +72,7 @@ class WeatherDecision:
     reason: str
     final_score: float
     policy_action: str
+    reason_code: str | None = None
     created_at: str = field(default_factory=iso_now)
     metadata: dict[str, Any] = field(default_factory=dict)
 

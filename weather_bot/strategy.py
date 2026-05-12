@@ -78,7 +78,11 @@ class WeatherStrategyEngine:
             decision_id = self.tracker.log_decision(signal_id, decision)
             position = None
             shadow_intent = None
-            if decision.accepted and execution_mode_records_shadow_orders(self.paper_execution_mode):
+            paper_entry_context = None
+            if decision.accepted and (
+                execution_mode_creates_paper_positions(self.paper_execution_mode)
+                or execution_mode_records_shadow_orders(self.paper_execution_mode)
+            ):
                 shadow_intent = self.tracker.preview_shadow_entry_intent(
                     signal_id=signal_id,
                     decision_id=decision_id,
@@ -96,7 +100,9 @@ class WeatherStrategyEngine:
                     shadow_payload["entry_edge_floor_source"] = str(decision.metadata.get("same_day_entry_floor_source") or "strategy")
                     shadow_payload["same_day_temperature_entry"] = bool(decision.metadata.get("same_day_temperature_entry"))
                     shadow_intent = replace(shadow_intent, payload=shadow_payload)
+                    shadow_intent = self.shadow_execution.price_entry_intent(shadow_intent)
                     shadow_intent = enrich_shadow_intent_with_fill_rehearsal(shadow_intent)
+                    paper_entry_context = _paper_entry_context_from_shadow_intent(signal, shadow_intent)
             if decision.accepted:
                 if execution_mode_creates_paper_positions(self.paper_execution_mode):
                     position = self.tracker.create_paper_position(
@@ -110,6 +116,7 @@ class WeatherStrategyEngine:
                         entry_slippage_bps=self.config.paper.entry_slippage_bps,
                         exit_fee_bps=self.config.paper.fee_bps,
                         exit_slippage_bps=self.config.paper.exit_slippage_bps,
+                        entry_context_override=paper_entry_context,
                     )
                 if position is not None and shadow_intent is not None:
                     mirrored_intent = replace(
@@ -119,11 +126,13 @@ class WeatherStrategyEngine:
                     )
                     intent_id = self.tracker.record_shadow_order_intent(mirrored_intent)
                     self.shadow_execution.mirror_intent(intent_id, mirrored_intent)
+                    self.tracker.sync_paper_position_with_shadow(int(position.id))
                 if position is None:
                     decision = WeatherDecision(
                         signal_key=signal.signal_key,
                         accepted=False,
                         reason="Paper capital unavailable.",
+                        reason_code="paper_capital_unavailable",
                         final_score=decision.final_score,
                         policy_action=decision.policy_action,
                         metadata={**decision.metadata, "capital_blocked": True},
@@ -190,6 +199,7 @@ class WeatherStrategyEngine:
         thresholds = self._thresholds(signal.market_type)
         profile = self._signal_profile(signal, thresholds)
         reasons: list[str] = []
+        reason_codes: list[str] = []
         final_score = float(profile["final_score"] or 0.0)
         policy_action = str(profile["policy_action"] or "advisory")
         metadata = dict(profile["metadata"])
@@ -226,10 +236,13 @@ class WeatherStrategyEngine:
             metadata["entry_edge_floor"] = entry_edge_floor
         if policy_action == "paper_blocked":
             reasons.append("Runtime policy blocked this signal.")
+            reason_codes.append("policy_blocked")
         if not auto_trade_enabled:
             reasons.append("Automatic paper trading is disabled.")
+            reason_codes.append("auto_trade_disabled")
         if not self.config.paper.enabled:
             reasons.append("Paper trading is disabled in config.")
+            reason_codes.append("paper_disabled")
         reasons.extend(
             self._entry_gate_reasons(
                 signal,
@@ -239,18 +252,31 @@ class WeatherStrategyEngine:
                 entry_edge_floor=entry_edge_floor,
             )
         )
+        gate_reasons = self._entry_gate_reject_codes(
+            signal,
+            thresholds,
+            final_score,
+            profile["signal_age_hours"],
+            entry_edge_floor=entry_edge_floor,
+        )
+        reason_codes.extend(gate_reasons)
         if self.tracker.count_open_positions() >= self.paper_max_open_positions:
             reasons.append("Maximum open paper positions reached.")
+            reason_codes.append("max_open_positions_reached")
         if self.tracker.count_open_positions_for_market(signal.market_slug) >= self.config.paper.max_positions_per_market:
             reasons.append("Maximum paper positions reached for this market.")
+            reason_codes.append("market_open_position_cap_reached")
         if self.tracker.has_open_position(signal.market_slug, signal.direction):
             reasons.append("A matching open paper position already exists.")
+            reason_codes.append("matching_open_position_exists")
 
         accepted = not reasons
+        reason_code = "|".join(reason_codes) if reason_codes else None
         return WeatherDecision(
             signal_key=signal.signal_key,
             accepted=accepted,
             reason="Accepted for paper trade." if accepted else " ".join(reasons),
+            reason_code=reason_code,
             final_score=final_score,
             policy_action="paper_trade_candidate" if accepted and policy_action == "advisory" else policy_action,
             metadata=metadata,
@@ -653,6 +679,43 @@ class WeatherStrategyEngine:
                 reasons.append(f"Too far from resolution ({hours:.1f}h).")
         return reasons
 
+    def _entry_gate_reject_codes(
+        self,
+        signal: WeatherSignal,
+        thresholds,
+        final_score: float,
+        signal_age_hours: float | None,
+        *,
+        entry_edge_floor: float | None = None,
+    ) -> list[str]:
+        reason_codes: list[str] = []
+        edge_floor = float(
+            self._entry_edge_floor(signal.market_type, thresholds, signal=signal)
+            if entry_edge_floor is None
+            else entry_edge_floor
+        )
+        if final_score < thresholds.min_score:
+            reason_codes.append("score_below_min")
+        if signal.edge_abs < edge_floor:
+            reason_codes.append("edge_below_min")
+            if self._is_same_day_temperature_signal(signal, _app_timezone(self.config)):
+                reason_codes.append("same_day_low_edge")
+        if signal.source_count < thresholds.min_source_count:
+            reason_codes.append("source_count_low")
+        if signal.liquidity < thresholds.min_liquidity:
+            reason_codes.append("liquidity_low")
+        if signal_age_hours is not None and signal_age_hours > thresholds.max_source_age_hours:
+            reason_codes.append("signal_stale")
+        if signal.source_dispersion_pct > thresholds.max_source_dispersion_pct:
+            reason_codes.append("source_dispersion_high")
+        if signal.time_to_resolution_s is not None:
+            hours = signal.time_to_resolution_s / 3600.0
+            if hours < thresholds.min_hours_to_event:
+                reason_codes.append("too_close_to_resolution")
+            if hours > thresholds.max_hours_to_event:
+                reason_codes.append("too_far_from_resolution")
+        return reason_codes
+
     def _is_entry_candidate(self, signal: WeatherSignal, thresholds, profile: dict[str, Any]) -> bool:
         if str(profile["policy_action"] or "") == "paper_blocked":
             return False
@@ -819,6 +882,21 @@ def _contract_probability(direction: str, yes_probability: float | None) -> floa
         return None
     raw = max(0.0, min(1.0, raw))
     return raw if str(direction or "").upper() == "YES" else round(1.0 - raw, 6)
+
+
+def _paper_entry_context_from_shadow_intent(
+    signal: WeatherSignal,
+    intent: Any,
+) -> dict[str, float | None] | None:
+    entry_reference_price = _as_float(getattr(intent, "reference_price", None))
+    entry_price = _as_float(getattr(intent, "target_price", None))
+    if entry_reference_price is None or entry_price is None or entry_price <= 0:
+        return None
+    return {
+        "entry_reference_price": entry_reference_price,
+        "mark_probability": _contract_probability(signal.direction, signal.forecast_prob),
+        "entry_price": entry_price,
+    }
 
 
 def _entry_model_probability(position: dict[str, Any]) -> float | None:

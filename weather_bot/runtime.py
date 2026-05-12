@@ -11,6 +11,7 @@ from collections import deque
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -23,7 +24,11 @@ from precipitation.precip_parser import parse_precip_bucket
 from parser.weather_parser import parse_temperature_bucket
 from scanner.weather_event_scanner import normalize_temperature_market_scope
 
-from .execution import execution_mode_records_shadow_orders, normalize_execution_mode
+from .execution import (
+    PAPER_SHADOW_EXECUTION_MODE,
+    execution_mode_records_shadow_orders,
+    normalize_execution_mode,
+)
 from .execution.shadow_fill import enrich_shadow_intent_with_fill_rehearsal
 from .messages import format_resolution_message, format_scan_summary, format_signal_message
 from .models import ForecastSnapshot, ResolutionOutcome, ScanBatch, WeatherSignal
@@ -48,6 +53,7 @@ class WeatherRuntime:
         resolution_fetcher=None,
         price_fetcher=None,
         scan_export_root: str | Path | None = None,
+        startup_health: dict[str, Any] | None = None,
     ):
         self.config = config
         self.tracker = tracker
@@ -77,6 +83,7 @@ class WeatherRuntime:
             "temperature": None,
             "precipitation": None,
         }
+        self.startup_health = self._normalize_startup_health(startup_health)
         default_state = {
             "state": "running",
             "temperature_enabled": bool(self.config.temperature.enabled),
@@ -125,6 +132,11 @@ class WeatherRuntime:
             "pending_scan_types": [],
             "active_scan_type": None,
             "active_scan_started_at": None,
+            "scan_block_reason": None,
+            "scan_block_type": None,
+            "scan_block_detail": None,
+            "scan_block_count": 0,
+            "last_scan_block_at": None,
             "scan_worker_healthy": False,
             "last_scan_worker_error": None,
             "last_scan_export_error": scan_export_error,
@@ -160,11 +172,22 @@ class WeatherRuntime:
             "last_shadow_execution_fills": 0,
             "last_shadow_execution_expired": 0,
             "last_shadow_execution_marked_positions": 0,
+            "startup_health": self.startup_health,
+            "startup_warnings": [],
+            "startup_mode_requested": normalize_execution_mode(
+                getattr(self.config.paper, "execution_mode", "paper")
+            ),
+            "last_execution_mode_warning": None,
         }
         saved_state = self.tracker.get_runtime_state("runtime_status", default=default_state)
         self._state = {**default_state, **saved_state}
         self._state["temperature_market_scope"] = normalize_temperature_market_scope(
             self._state.get("temperature_market_scope") or getattr(self.config.temperature, "market_scope", "both")
+        )
+        self._state["startup_health"] = self._normalize_startup_health(self._state.get("startup_health"))
+        self._state["startup_warnings"] = self._normalize_warning_list(self._state.get("startup_warnings"))
+        self._state["startup_mode_requested"] = normalize_execution_mode(
+            self._state.get("startup_mode_requested") or self._state.get("paper_execution_mode") or getattr(self.config.paper, "execution_mode", "paper")
         )
         self._state["precipitation_enabled"] = bool(self.config.precipitation.enabled)
         self._state["open_position_weather_refresh_interval_seconds"] = self._open_position_weather_refresh_interval_seconds()
@@ -179,14 +202,24 @@ class WeatherRuntime:
         if hasattr(self.strategy_engine, "set_paper_max_open_positions"):
             limit = self.strategy_engine.set_paper_max_open_positions(int(self._state.get("paper_max_open_positions") or self.config.paper.max_open_positions))
             self._state["paper_max_open_positions"] = int(limit)
+        requested_mode = normalize_execution_mode(
+            self._state.get("paper_execution_mode") or getattr(self.config.paper, "execution_mode", "paper")
+        )
+        applied_mode, startup_warning = self._resolve_paper_execution_mode(requested_mode)
         if hasattr(self.strategy_engine, "set_paper_execution_mode"):
-            self._state["paper_execution_mode"] = self.strategy_engine.set_paper_execution_mode(
-                self._state.get("paper_execution_mode") or getattr(self.config.paper, "execution_mode", "paper")
-            )
+            applied_mode = str(self.strategy_engine.set_paper_execution_mode(applied_mode))
         else:
-            self._state["paper_execution_mode"] = normalize_execution_mode(
-                self._state.get("paper_execution_mode") or getattr(self.config.paper, "execution_mode", "paper")
+            applied_mode = normalize_execution_mode(applied_mode)
+        if applied_mode != requested_mode and startup_warning is None:
+            startup_warning = (
+                f"Execution mode was normalized from {requested_mode!s} to {applied_mode!s} by strategy configuration."
             )
+        if hasattr(self.strategy_engine, "set_paper_execution_mode"):
+            self._state["paper_execution_mode"] = applied_mode
+        else:
+            self._state["paper_execution_mode"] = normalize_execution_mode(applied_mode)
+        self._state["paper_execution_mode_requested"] = requested_mode
+        self._set_startup_warning(startup_warning, code="execution_mode_override")
         edge_override = self._state.get("paper_entry_min_edge_abs_override")
         if edge_override is not None and hasattr(self.strategy_engine, "set_paper_entry_min_edge_abs"):
             edge_floor = self.strategy_engine.set_paper_entry_min_edge_abs(float(edge_override))
@@ -232,9 +265,81 @@ class WeatherRuntime:
             "paper_temperature_no_stop_loss_min_probability_drop",
             getattr(self.config.strategy.temperature, "no_stop_loss_min_probability_drop", None),
         )
-        if self._reconcile_boot_state():
+        should_persist_runtime_state = bool(self._reconcile_boot_state())
+        if self._state.get("startup_health") != (saved_state.get("startup_health") or {}):
+            should_persist_runtime_state = True
+        if self._state.get("startup_warnings") != saved_state.get("startup_warnings"):
+            should_persist_runtime_state = True
+        if self._state.get("paper_execution_mode") != (saved_state.get("paper_execution_mode") or self._state.get("paper_execution_mode_requested")):
+            should_persist_runtime_state = True
+        if self._state.get("paper_execution_mode_requested") != saved_state.get("paper_execution_mode_requested"):
+            should_persist_runtime_state = True
+        if self._state.get("startup_mode_requested") != saved_state.get("startup_mode_requested"):
+            should_persist_runtime_state = True
+        if should_persist_runtime_state:
             self.tracker.set_runtime_state("runtime_status", dict(self._state))
         self._prime_next_scheduled_scans()
+
+    def _resolve_paper_execution_mode(self, requested_mode: str) -> tuple[str, str | None]:
+        mode = normalize_execution_mode(requested_mode)
+        if mode != PAPER_SHADOW_EXECUTION_MODE:
+            return mode, None
+        shadow_enabled = bool(getattr(self.shadow_execution, "enabled", False)) if self.shadow_execution is not None else False
+        if not shadow_enabled:
+            return (
+                normalize_execution_mode("paper"),
+                "Paper-shadow execution requested but shadow execution is disabled. Falling back to paper mode.",
+            )
+        return mode, None
+
+    def _normalize_startup_health(self, value: Any) -> dict[str, Any]:
+        raw = dict(value) if isinstance(value, dict) else {}
+        health = {
+            "status": str(raw.get("status", "ok")),
+            "warnings": self._normalize_warning_list(raw.get("warnings")),
+            "checks": dict(raw.get("checks", {})) if isinstance(raw.get("checks", {}), dict) else {},
+            "environment": dict(raw.get("environment", {})) if isinstance(raw.get("environment", {}), dict) else {},
+            "checked_at": str(raw.get("checked_at", "")),
+            "candidate_dbs": raw.get("candidate_dbs", []),
+        }
+        health.setdefault("checks", {})
+        return health
+
+    def _normalize_warning_list(self, value: Any) -> list[dict[str, Any]]:
+        items = value if isinstance(value, list) else []
+        normalized: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                if isinstance(item, str) and item.strip():
+                    normalized.append({"code": "startup_warning", "message": item.strip(), "at": datetime.now(timezone.utc).isoformat()})
+                continue
+            message = str(item.get("message") or item.get("text") or "").strip()
+            if not message:
+                continue
+            normalized.append(
+                {
+                    "code": str(item.get("code") or "startup_warning").strip() or "startup_warning",
+                    "message": message,
+                    "at": str(item.get("at") or datetime.now(timezone.utc).isoformat()),
+                }
+            )
+        return normalized[:50]
+
+    def _set_startup_warning(self, warning: str | None, *, code: str) -> None:
+        warnings = list(self._normalize_warning_list(self._state.get("startup_warnings")))
+        if warning:
+            warning = str(warning).strip()
+            entry = {"code": str(code), "message": warning, "at": datetime.now(timezone.utc).isoformat()}
+            if not any(existing.get("message") == warning and existing.get("code") == code for existing in warnings):
+                warnings.append(entry)
+            warnings = warnings[-50:]
+            self._state["startup_warnings"] = warnings
+            self._state["last_execution_mode_warning"] = warning
+            self._state["startup_health"] = self._normalize_startup_health(
+                self._state.get("startup_health") | {"status": "warn", "warnings": warnings}
+            )
+        else:
+            self._state["last_execution_mode_warning"] = None
 
     def start_background_loops(self) -> None:
         if self._threads:
@@ -294,10 +399,18 @@ class WeatherRuntime:
         return bool(enabled)
 
     def set_paper_execution_mode(self, value: str) -> str:
-        mode = normalize_execution_mode(value)
+        requested_mode = normalize_execution_mode(value)
+        mode, warning = self._resolve_paper_execution_mode(requested_mode)
         if hasattr(self.strategy_engine, "set_paper_execution_mode"):
             mode = str(self.strategy_engine.set_paper_execution_mode(mode))
+        if mode != requested_mode and not warning:
+            warning = (
+                f"Execution mode was normalized from {requested_mode!s} to {mode!s} by strategy configuration."
+            )
+        self._state["paper_execution_mode_requested"] = requested_mode
+        self._set_startup_warning(warning, code="execution_mode_override")
         self._update_state(paper_execution_mode=mode)
+        self._update_state(paper_execution_mode_requested=requested_mode, last_execution_mode_warning=warning)
         return str(mode)
 
     def set_paper_max_open_positions(self, value: int) -> int:
@@ -496,11 +609,13 @@ class WeatherRuntime:
             if fresh_mark is not None
             else (position.get("mark_price") or position.get("market_probability") or position.get("entry_price"))
         )
+        paper_execution_mode = str(self.get_status_snapshot().get("paper_execution_mode") or "paper")
+        realistic_mode = execution_mode_records_shadow_orders(paper_execution_mode)
         shadow_exit_intent = None
-        if execution_mode_records_shadow_orders(self.get_status_snapshot().get("paper_execution_mode")):
+        if realistic_mode:
             shadow_exit_intent = self.tracker.preview_shadow_exit_intent(
                 int(position_id),
-                execution_mode=str(self.get_status_snapshot().get("paper_execution_mode") or "paper"),
+                execution_mode=paper_execution_mode,
                 exit_price=exit_price,
                 reason=str(reason or "manual_dashboard_sell"),
                 reason_code=str(reason or "manual_dashboard_sell"),
@@ -510,6 +625,32 @@ class WeatherRuntime:
             )
             if shadow_exit_intent is not None:
                 shadow_exit_intent = enrich_shadow_intent_with_fill_rehearsal(shadow_exit_intent)
+        if realistic_mode:
+            if shadow_exit_intent is None:
+                synced = self.tracker.sync_paper_position_with_shadow(int(position_id))
+                state = str((synced or {}).get("status") or position.get("status") or "open")
+                return {
+                    "ok": False,
+                    "status": 409,
+                    "message": f"Realistic exit is unavailable for paper position {position_id}; paper remains {state}.",
+                    "position": synced,
+                }
+            mirrored_intent = replace(shadow_exit_intent, status="mirrored")
+            intent_id = self.tracker.record_shadow_order_intent(mirrored_intent)
+            self._mirror_shadow_execution_intent(intent_id, mirrored_intent)
+            synced = self.tracker.sync_paper_position_with_shadow(int(position_id))
+            current_status = str((synced or {}).get("status") or position.get("status") or "open")
+            message = (
+                f"Closed paper position {position_id} via realistic shadow exit."
+                if current_status == "closed"
+                else f"Queued realistic exit for paper position {position_id}; paper remains {current_status} until shadow fills it."
+            )
+            return {
+                "ok": True,
+                "status": 200,
+                "message": message,
+                "position": synced,
+            }
         result = self.tracker.close_paper_position(
             int(position_id),
             exit_price=exit_price,
@@ -524,10 +665,6 @@ class WeatherRuntime:
         )
         if result is None:
             return {"ok": False, "status": 404, "message": f"Open paper position {position_id} was not found."}
-        if shadow_exit_intent is not None:
-            mirrored_intent = replace(shadow_exit_intent, status="mirrored")
-            intent_id = self.tracker.record_shadow_order_intent(mirrored_intent)
-            self._mirror_shadow_execution_intent(intent_id, mirrored_intent)
         return {
             "ok": True,
             "status": 200,
@@ -652,6 +789,34 @@ class WeatherRuntime:
             except Exception as exc:  # pragma: no cover - guarded by scan error handling
                 self._update_state(scan_worker_healthy=True, last_scan_worker_error=str(exc))
 
+    def _set_scan_block_state(
+        self,
+        *,
+        scan_type: str,
+        reason_code: str,
+        reason: str,
+        status_reason: str | None = None,
+    ) -> None:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        status_fields = _scan_status_fields(scan_type)
+        fields = {
+            "scan_in_progress": False,
+            "active_scan_type": None,
+            "active_scan_started_at": None,
+            "scan_block_reason": reason_code,
+            "scan_block_type": scan_type,
+            "scan_block_detail": str(status_reason or reason),
+            "scan_block_count": int(self._state.get("scan_block_count") or 0) + 1,
+            "last_scan_block_at": timestamp,
+            status_fields["status"]: "blocked",
+            status_fields["reason"]: str(reason),
+            status_fields["at"]: timestamp,
+            status_fields["duration_ms"]: 0,
+            status_fields["error_count"]: 0,
+            status_fields["error"]: None,
+        }
+        self._update_state(**fields)
+
     def _run_scan(
         self,
         *,
@@ -668,13 +833,28 @@ class WeatherRuntime:
         with self._scan_lock:
             state = self.get_status_snapshot()
             if not ignore_pause and state.get("state") == "paused":
+                self._set_scan_block_state(
+                    scan_type=scan_type,
+                    reason_code="runtime_paused",
+                    reason="Runtime paused",
+                    status_reason="Scan skipped because runtime is paused.",
+                )
                 return self._empty_batch(scan_type), []
             if not ignore_enabled and not state.get(enabled_key, True):
+                self._set_scan_block_state(
+                    scan_type=scan_type,
+                    reason_code="automation_disabled",
+                    reason=f"{scan_type.title()} scan disabled",
+                    status_reason="Scan skipped because scan type is disabled.",
+                )
                 return self._empty_batch(scan_type), []
 
             scan_started_monotonic = time.monotonic()
             status_fields = _scan_status_fields(scan_type)
             self._update_state(
+                scan_block_reason=None,
+                scan_block_type=None,
+                scan_block_detail=None,
                 scan_in_progress=True,
                 active_scan_type=scan_type,
                 active_scan_started_at=timestamp,
@@ -694,6 +874,7 @@ class WeatherRuntime:
                 )
                 accepted = sum(1 for item in results if item.decision.accepted)
                 opened = sum(1 for item in results if item.position is not None)
+                decision_summary = _summarize_scan_decision_results(results)
                 review_summary = self._review_positions_for_signals(
                     scan_type=scan_type,
                     signals=batch.signals,
@@ -742,6 +923,7 @@ class WeatherRuntime:
                     accepted_count=accepted,
                     opened_count=opened,
                     settled_count=sum(item.resolved_positions for item in settled),
+                    decision_summary=decision_summary,
                     error=None,
                 )
                 return batch, results
@@ -752,6 +934,9 @@ class WeatherRuntime:
                     scan_in_progress=False,
                     active_scan_type=None,
                     active_scan_started_at=None,
+                    scan_block_reason=None,
+                    scan_block_type=None,
+                    scan_block_detail=None,
                     **{
                         status_fields["at"]: finished_at,
                         status_fields["status"]: "failed",
@@ -768,6 +953,7 @@ class WeatherRuntime:
                     accepted_count=0,
                     opened_count=0,
                     settled_count=0,
+                    decision_summary=None,
                     error=str(exc),
                 )
                 if send_alerts and self.config.alerts.telegram_enabled:
@@ -801,6 +987,8 @@ class WeatherRuntime:
         reviewed = 0
         closed = 0
         reviewed_at = datetime.now(timezone.utc).isoformat()
+        paper_execution_mode = str(self.get_status_snapshot().get("paper_execution_mode") or "paper")
+        realistic_mode = execution_mode_records_shadow_orders(paper_execution_mode)
 
         for position in positions:
             market_slug = str(position.get("market_slug") or "")
@@ -831,10 +1019,10 @@ class WeatherRuntime:
             if not decision.should_close:
                 continue
             shadow_exit_intent = None
-            if execution_mode_records_shadow_orders(self.get_status_snapshot().get("paper_execution_mode")):
+            if realistic_mode:
                 shadow_exit_intent = self.tracker.preview_shadow_exit_intent(
                     int(position["id"]),
-                    execution_mode=str(self.get_status_snapshot().get("paper_execution_mode") or "paper"),
+                    execution_mode=paper_execution_mode,
                     exit_price=mark_price,
                     reason=decision.reason,
                     reason_code=decision.reason_code,
@@ -844,6 +1032,15 @@ class WeatherRuntime:
                 )
                 if shadow_exit_intent is not None:
                     shadow_exit_intent = enrich_shadow_intent_with_fill_rehearsal(shadow_exit_intent)
+            if realistic_mode:
+                if shadow_exit_intent is not None:
+                    mirrored_intent = replace(shadow_exit_intent, status="mirrored")
+                    intent_id = self.tracker.record_shadow_order_intent(mirrored_intent)
+                    self._mirror_shadow_execution_intent(intent_id, mirrored_intent)
+                synced = self.tracker.sync_paper_position_with_shadow(int(position["id"]), synced_at=reviewed_at)
+                if str((synced or {}).get("status") or "open") == "closed":
+                    closed += 1
+                continue
             result = self.tracker.close_paper_position(
                 int(position["id"]),
                 exit_price=mark_price,
@@ -856,10 +1053,6 @@ class WeatherRuntime:
                 reason_code=decision.reason_code,
             )
             if result is not None:
-                if shadow_exit_intent is not None:
-                    mirrored_intent = replace(shadow_exit_intent, status="mirrored")
-                    intent_id = self.tracker.record_shadow_order_intent(mirrored_intent)
-                    self._mirror_shadow_execution_intent(intent_id, mirrored_intent)
                 closed += 1
 
         return {"reviewed": reviewed, "closed": closed}
@@ -1606,7 +1799,24 @@ class WeatherRuntime:
                 continue
             try:
                 state = self.get_status_snapshot()
-                if state.get("state") == "paused" or not state.get(enabled_key, True):
+                if state.get("state") == "paused":
+                    blocked_at = datetime.now(timezone.utc).isoformat()
+                    self._update_state(
+                        scan_block_reason="runtime_paused",
+                        scan_block_type=scan_type,
+                        scan_block_detail="Scheduled scan skipped because runtime is paused.",
+                        last_scan_block_at=blocked_at,
+                    )
+                    last_cycle_at = time.monotonic()
+                    continue
+                if not state.get(enabled_key, True):
+                    blocked_at = datetime.now(timezone.utc).isoformat()
+                    self._update_state(
+                        scan_block_reason="automation_disabled",
+                        scan_block_type=scan_type,
+                        scan_block_detail=f"{scan_type.title()} scan disabled at runtime level.",
+                        last_scan_block_at=blocked_at,
+                    )
                     last_cycle_at = time.monotonic()
                     continue
                 runner()
@@ -1672,6 +1882,7 @@ class WeatherRuntime:
         accepted_count: int,
         opened_count: int,
         settled_count: int,
+        decision_summary: dict[str, Any] | None,
         error: str | None,
     ) -> None:
         if self.scan_export_root is None:
@@ -1686,6 +1897,7 @@ class WeatherRuntime:
             "accepted_count": accepted_count,
             "opened_count": opened_count,
             "settled_count": settled_count,
+            "decision_summary": decision_summary,
             "error": error,
             "batch": batch.to_dict() if batch is not None else None,
         }
@@ -1740,6 +1952,45 @@ class WeatherRuntime:
                 self._state[key] = value
                 changed = True
         return changed
+
+
+def _summarize_scan_decision_results(results: list[Any]) -> dict[str, Any]:
+    accepted_by_policy_action: dict[str, int] = {}
+    rejected_by_policy_action: dict[str, int] = {}
+    rejected_reason_codes: dict[str, int] = {}
+    accepted_count = 0
+    rejected_count = 0
+    opened_positions = 0
+    for result in results:
+        decision = getattr(result, "decision", None)
+        if decision is None:
+            continue
+        policy_action = str(getattr(decision, "policy_action", "") or "unknown")
+        if bool(getattr(decision, "accepted", False)):
+            accepted_count += 1
+            accepted_by_policy_action[policy_action] = accepted_by_policy_action.get(policy_action, 0) + 1
+        else:
+            rejected_count += 1
+            rejected_by_policy_action[policy_action] = rejected_by_policy_action.get(policy_action, 0) + 1
+            raw_reason_code = str(getattr(decision, "reason_code", "") or "").strip()
+            if raw_reason_code:
+                for reason_code in raw_reason_code.split("|"):
+                    normalized = reason_code.strip()
+                    if not normalized:
+                        continue
+                    rejected_reason_codes[normalized] = rejected_reason_codes.get(normalized, 0) + 1
+        if getattr(result, "position", None) is not None:
+            opened_positions += 1
+    return {
+        "decision_count": len(results),
+        "accepted_count": accepted_count,
+        "rejected_count": rejected_count,
+        "accept_rate": round((accepted_count / len(results) * 100.0), 2) if results else 0.0,
+        "opened_positions": opened_positions,
+        "accepted_by_policy_action": accepted_by_policy_action,
+        "rejected_by_policy_action": rejected_by_policy_action,
+        "rejected_reason_codes": rejected_reason_codes,
+    }
 
 
 def _scan_status_fields(scan_type: str) -> dict[str, str]:

@@ -103,6 +103,9 @@ class ShadowExecutionEngine:
             self._apply_book_cross_fill(order, liquidity_source="immediate_book")
         return order_id
 
+    def price_entry_intent(self, intent: ShadowOrderIntent) -> ShadowOrderIntent:
+        return self._execution_priced_intent(intent)
+
     def run_cycle(self, *, price_fetcher: Callable[[str], float | None] | None = None) -> dict[str, Any]:
         if not self.enabled:
             return {"enabled": False, "processed_orders": 0, "fills": 0, "expired": 0, "marked_positions": 0}
