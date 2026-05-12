@@ -5,6 +5,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -493,8 +494,7 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
         shadow_exec_orders = json.loads(archive.read("shadow_exec_orders.json").decode("utf-8"))
         same_day_risk = json.loads(archive.read("same_day_risk_tracking.json").decode("utf-8"))
         manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-    assert review_history
-    assert review_history[0]["event_kind"] in {"review", "close"}
+    assert review_history == []
     assert len(shadow_orders) == 1
     assert shadow_orders[0]["intent_kind"] == "entry"
     assert shadow_orders[0]["execution_mode"] == "paper_shadow"
@@ -2251,13 +2251,35 @@ def test_dashboard_manual_close_action_accepts_nested_id_alias_payload(tmp_path:
     assert latest_trade["exit_reason"] == "manual_test_close_nested_alias"
 
 
-def test_dashboard_manual_close_action_records_shadow_exit_in_paper_shadow_mode(tmp_path: Path):
+def test_dashboard_manual_close_action_records_shadow_exit_in_paper_shadow_mode(tmp_path: Path, monkeypatch):
     config = load_config(_write_config(tmp_path))
     object.__setattr__(config.paper, "execution_mode", "paper_shadow")
+    token_ids = ["yes-token-manual-shadow-close", "no-token-manual-shadow-close"]
+
+    def _book(_token: str):
+        return {
+            "hash": "manual-shadow-close-book",
+            "timestamp": "2026-04-24T12:00:00+00:00",
+            "asks": [{"price": "0.67", "size": "1000"}],
+            "bids": [{"price": "0.67", "size": "1000"}],
+        }
+
+    monkeypatch.setattr("weather_bot.execution.shadow_fill.fetch_clob_order_book", _book)
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     tracker.ensure_paper_capital(1000.0)
     strategy = WeatherStrategyEngine(config, tracker)
-    strategy.process_signals([_signal("manual-shadow-close-1")], auto_trade_enabled=True)
+    strategy.shadow_execution.book_fetcher = _book
+    signal = _signal("manual-shadow-close-1")
+    signal = replace(
+        signal,
+        raw_payload={
+            **signal.raw_payload,
+            "clob_token_ids": token_ids,
+            "yes_token_id": token_ids[0],
+            "no_token_id": token_ids[1],
+        },
+    )
+    strategy.process_signals([signal], auto_trade_enabled=True)
     runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
     control_plane = ControlPlane(runtime, tracker)
     dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)

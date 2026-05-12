@@ -79,10 +79,8 @@ class WeatherStrategyEngine:
             position = None
             shadow_intent = None
             paper_entry_context = None
-            if decision.accepted and (
-                execution_mode_creates_paper_positions(self.paper_execution_mode)
-                or execution_mode_records_shadow_orders(self.paper_execution_mode)
-            ):
+            realistic_mode = execution_mode_records_shadow_orders(self.paper_execution_mode)
+            if decision.accepted and realistic_mode:
                 shadow_intent = self.tracker.preview_shadow_entry_intent(
                     signal_id=signal_id,
                     decision_id=decision_id,
@@ -118,7 +116,7 @@ class WeatherStrategyEngine:
                         exit_slippage_bps=self.config.paper.exit_slippage_bps,
                         entry_context_override=paper_entry_context,
                     )
-                if position is not None and shadow_intent is not None:
+                if realistic_mode and position is not None and shadow_intent is not None:
                     mirrored_intent = replace(
                         shadow_intent,
                         position_id=int(position.id),
@@ -698,7 +696,7 @@ class WeatherStrategyEngine:
             reason_codes.append("score_below_min")
         if signal.edge_abs < edge_floor:
             reason_codes.append("edge_below_min")
-            if self._is_same_day_temperature_signal(signal, _app_timezone(self.config)):
+            if _is_same_day_temperature_signal(signal, _app_timezone(self.config)):
                 reason_codes.append("same_day_low_edge")
         if signal.source_count < thresholds.min_source_count:
             reason_codes.append("source_count_low")
