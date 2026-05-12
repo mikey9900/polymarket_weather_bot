@@ -108,8 +108,9 @@ class ShadowExecutionEngine:
 
     def run_cycle(self, *, price_fetcher: Callable[[str], float | None] | None = None) -> dict[str, Any]:
         if not self.enabled:
-            return {"enabled": False, "processed_orders": 0, "fills": 0, "expired": 0, "marked_positions": 0}
+            return {"enabled": False, "processed_orders": 0, "fills": 0, "expired": 0, "exit_retries_queued": 0, "marked_positions": 0}
         expired = self.tracker.expire_shadow_exec_orders()
+        exit_retries = self.queue_exit_retries()
         self.sync_market_stream()
         processed = 0
         fills = 0
@@ -125,8 +126,43 @@ class ShadowExecutionEngine:
             "processed_orders": processed,
             "fills": fills,
             "expired": expired,
+            "exit_retries_queued": exit_retries,
             "marked_positions": marked,
         }
+
+    def queue_exit_retries(self, *, limit: int = 500) -> int:
+        queued = 0
+        for candidate in self.tracker.get_shadow_exec_exit_retry_candidates(limit=limit):
+            exit_price = _bounded_price(
+                candidate.get("paper_mark_price")
+                if candidate.get("paper_mark_price") is not None
+                else candidate.get("shadow_mark_price")
+            )
+            if exit_price is None:
+                exit_price = _bounded_price(candidate.get("shadow_avg_entry_price"))
+            if exit_price is None:
+                exit_price = _bounded_price(candidate.get("paper_entry_price"))
+            intent = self.tracker.preview_shadow_exit_intent(
+                int(candidate["paper_position_id"]),
+                execution_mode=str(candidate.get("execution_mode") or "paper_shadow"),
+                exit_price=exit_price,
+                reason=str(candidate.get("exit_reason") or "shadow_exit_retry"),
+                reason_code=str(candidate.get("reason_code") or "shadow_exit_retry"),
+                decision_final_score=_as_float(candidate.get("mark_final_score")),
+            )
+            if intent is None:
+                continue
+            payload = dict(intent.payload or {})
+            payload["shadow_execution_retry"] = {
+                "shadow_position_id": int(candidate["shadow_position_id"]),
+                "reason": "open_shadow_position_still_has_exit_reason",
+                "queued_at": iso_now(),
+            }
+            intent = replace(intent, payload=payload)
+            intent_id = self.tracker.record_shadow_order_intent(intent)
+            self.mirror_intent(intent_id, intent)
+            queued += 1
+        return queued
 
     def stop(self) -> None:
         self._stop_market_stream()

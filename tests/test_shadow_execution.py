@@ -270,6 +270,103 @@ def test_exit_without_realistic_entry_is_marked_no_position(tmp_path):
     assert "No realistic shadow position" in order["status_reason"]
 
 
+def test_shadow_cycle_requeues_exit_for_stuck_open_shadow_position(tmp_path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    engine = _engine(
+        tracker,
+        book_fetcher=lambda _token: {
+            "hash": "empty-exit-book",
+            "timestamp": "2026-05-07T12:30:00+00:00",
+            "bids": [],
+            "asks": [],
+        },
+    )
+    position_id = _paper_position_id(tracker)
+    entry = _intent(
+        position_id=position_id,
+        simulated_fill_status="full_fill",
+        simulated_fill_shares=100.0,
+        simulated_avg_fill_price=0.40,
+        execution_checked_at="2026-05-07T12:00:01+00:00",
+    )
+    entry_id = tracker.record_shadow_order_intent(entry)
+    engine.mirror_intent(entry_id, entry)
+    tracker.conn.execute(
+        """
+        UPDATE paper_positions
+        SET exit_reason = ?, mark_price = ?, mark_final_score = ?, mark_updated_at = ?
+        WHERE id = ?
+        """,
+        ("Remaining model edge is at or below the near-fair threshold.", 0.42, 0.5, "2026-05-07T12:30:00+00:00", position_id),
+    )
+    tracker.conn.commit()
+
+    summary = engine.run_cycle()
+    exit_orders = [order for order in tracker.get_recent_shadow_exec_orders(limit=None) if order["intent_kind"] == "exit"]
+
+    assert summary["exit_retries_queued"] == 1
+    assert len(exit_orders) == 1
+    assert exit_orders[0]["status"] == "resting"
+    assert exit_orders[0]["target_price"] == 0.42
+    assert exit_orders[0]["payload"]["shadow_intent"]["payload"]["shadow_execution_retry"]["shadow_position_id"]
+
+    second_summary = engine.run_cycle()
+    exit_orders = [order for order in tracker.get_recent_shadow_exec_orders(limit=None) if order["intent_kind"] == "exit"]
+    assert second_summary["exit_retries_queued"] == 0
+    assert len(exit_orders) == 1
+
+
+def test_shadow_cycle_requeues_after_retry_exit_expires(tmp_path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    engine = _engine(
+        tracker,
+        config=ShadowExecutionRuntimeConfig(
+            enabled=True,
+            entry_ttl_seconds=1800,
+            exit_ttl_seconds=300,
+            queue_fill_fraction=0.5,
+            rest_fallback_seconds=5,
+            show_taker_exit_estimate=False,
+        ),
+        book_fetcher=lambda _token: {
+            "hash": "empty-exit-book",
+            "timestamp": "2026-05-07T12:30:00+00:00",
+            "bids": [],
+            "asks": [],
+        },
+    )
+    position_id = _paper_position_id(tracker)
+    entry = _intent(
+        position_id=position_id,
+        simulated_fill_status="full_fill",
+        simulated_fill_shares=100.0,
+        simulated_avg_fill_price=0.40,
+        execution_checked_at="2026-05-07T12:00:01+00:00",
+    )
+    entry_id = tracker.record_shadow_order_intent(entry)
+    engine.mirror_intent(entry_id, entry)
+    tracker.conn.execute(
+        """
+        UPDATE paper_positions
+        SET exit_reason = ?, mark_price = ?, mark_updated_at = ?
+        WHERE id = ?
+        """,
+        ("Remaining model edge is at or below the near-fair threshold.", 0.42, "2026-05-07T12:30:00+00:00", position_id),
+    )
+    tracker.conn.commit()
+
+    assert engine.run_cycle()["exit_retries_queued"] == 1
+    first_exit = [order for order in tracker.get_recent_shadow_exec_orders(limit=None) if order["intent_kind"] == "exit"][0]
+    expires_after = datetime.fromisoformat(first_exit["expires_at"]) + timedelta(seconds=1)
+    tracker.expire_shadow_exec_orders(now=expires_after.astimezone(timezone.utc).isoformat())
+
+    assert engine.run_cycle()["exit_retries_queued"] == 1
+    exit_orders = [order for order in tracker.get_recent_shadow_exec_orders(limit=None) if order["intent_kind"] == "exit"]
+    assert len(exit_orders) == 2
+    assert exit_orders[0]["status"] == "resting"
+    assert exit_orders[1]["status"] == "expired"
+
+
 def test_entry_bid_improvement_lifts_only_to_edge_cap_and_resizes_budget(tmp_path):
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     engine = _engine(

@@ -845,6 +845,8 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert 'JSON.stringify(plan.body)' in html
     assert "dashboardBaseCandidates" in html
     assert "recoverControlState" in html
+    assert "closePositionControlSucceeded" in html
+    assert "closePositionRecoveredMessage" in html
     assert "renderControlDiagnostics" in html
     assert 'id="control-diagnostics"' in html
     assert "openProposalModal" in html
@@ -912,6 +914,7 @@ def test_dashboard_posts_controls_with_recovery_and_query_fallback():
     assert "LAST 30D" in html
     assert "YES / NO WIN-LOSS BARS" in html
     assert "BUNDLE DATA" in html
+    assert "EXIT QUEUED" in html
     assert "DOWNLOAD XLSX" in html
     assert "DOWNLOAD ZIP" in html
     assert "COPY BUNDLE PATH" in html
@@ -1701,6 +1704,41 @@ def test_dashboard_snapshot_exposes_recent_shadow_orders(tmp_path: Path):
     assert state["recent_shadow_orders"][0]["status"] == "mirrored"
 
 
+def test_runtime_startup_reconciles_stuck_shadow_backed_paper_positions(tmp_path: Path):
+    config = load_config(_write_config(tmp_path))
+    object.__setattr__(config.paper, "execution_mode", "paper_shadow")
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    result = strategy.process_signals([_signal("stuck-shadow-open-1")], auto_trade_enabled=True)[0]
+    assert result.position is not None
+    position_id = int(result.position.id)
+    tracker.conn.execute(
+        """
+        UPDATE paper_positions
+        SET status = 'open',
+            shares = 10,
+            cost = 10,
+            realized_pnl = 0,
+            exit_reason = NULL,
+            resolved_at = NULL
+        WHERE id = ?
+        """,
+        (position_id,),
+    )
+    tracker.conn.commit()
+    assert tracker.get_dashboard_paper_positions(limit=10, status="open")
+
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+
+    open_positions = tracker.get_dashboard_paper_positions(limit=10, status="open")
+    all_positions = tracker.get_dashboard_paper_positions(limit=10)
+    assert open_positions == []
+    assert all_positions[0]["status"] == "closed"
+    assert all_positions[0]["exit_reason"] == "shadow_entry_no_fill"
+    assert runtime.get_status_snapshot()["startup_shadow_sync"]["closed"] == 1
+
+
 def test_dashboard_export_failure_is_non_fatal(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
@@ -2298,6 +2336,64 @@ def test_dashboard_manual_close_action_records_shadow_exit_in_paper_shadow_mode(
     assert intents[0]["execution_mode"] == "paper_shadow"
     assert response["state"]["controls"]["shadow_exit_count"] == 1
     assert response["state"]["recent_shadow_orders"][0]["intent_kind"] == "exit"
+
+
+def test_manual_shadow_close_persists_exit_request_for_retry_when_not_filled(tmp_path: Path, monkeypatch):
+    config = load_config(_write_config(tmp_path))
+    object.__setattr__(config.paper, "execution_mode", "paper_shadow")
+    token_ids = ["yes-token-manual-shadow-retry", "no-token-manual-shadow-retry"]
+
+    def _book(_token: str):
+        return {
+            "hash": "manual-shadow-retry-book",
+            "timestamp": "2026-04-24T12:00:00+00:00",
+            "asks": [{"price": "0.67", "size": "1000"}],
+            "bids": [],
+        }
+
+    monkeypatch.setattr("weather_bot.execution.shadow_fill.fetch_clob_order_book", _book)
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(1000.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    strategy.shadow_execution.book_fetcher = _book
+    signal = replace(
+        _signal("manual-shadow-retry-1"),
+        raw_payload={
+            "event_title": "Highest temperature in NYC on April 25",
+            "label": "70-71F",
+            "direction": "YES",
+            "clob_token_ids": token_ids,
+            "yes_token_id": token_ids[0],
+            "no_token_id": token_ids[1],
+        },
+    )
+    strategy.process_signals([signal], auto_trade_enabled=True)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    dashboard = DashboardStateService(tracker=tracker, runtime=runtime, control_plane=control_plane)
+    open_position = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+
+    response = dashboard.apply_control_threadsafe(
+        {"action": "close_position", "value": {"position_id": open_position["id"], "reason": "manual_shadow_retry"}}
+    )
+
+    assert response["ok"] is True
+    refreshed = tracker.get_dashboard_paper_positions(limit=1, status="open")[0]
+    assert refreshed["exit_reason"] == "manual_shadow_retry"
+    assert response["state"]["open_positions"][0]["exit_reason"] == "manual_shadow_retry"
+    exit_orders = [order for order in tracker.get_recent_shadow_exec_orders(limit=None) if order["intent_kind"] == "exit"]
+    assert len(exit_orders) == 1
+    assert exit_orders[0]["status"] == "resting"
+
+    expires_after = datetime.fromisoformat(exit_orders[0]["expires_at"]) + timedelta(seconds=1)
+    tracker.expire_shadow_exec_orders(now=expires_after.astimezone(timezone.utc).isoformat())
+    retry_summary = strategy.shadow_execution.run_cycle()
+    exit_orders = [order for order in tracker.get_recent_shadow_exec_orders(limit=None) if order["intent_kind"] == "exit"]
+
+    assert retry_summary["exit_retries_queued"] == 1
+    assert len(exit_orders) == 2
+    assert exit_orders[0]["status"] == "resting"
+    assert exit_orders[0]["payload"]["shadow_intent"]["reason_code"] == "manual_shadow_retry"
 
 
 def _stale_open_position(tmp_path: Path):

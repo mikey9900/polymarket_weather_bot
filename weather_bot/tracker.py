@@ -1084,6 +1084,85 @@ class WeatherTracker:
             ).fetchall()
         return [_serialize_shadow_exec_order(row) for row in rows]
 
+    def get_shadow_exec_exit_retry_candidates(self, *, limit: int | None = 500) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self.conn.execute(
+                f"""
+                WITH latest_review AS (
+                    SELECT r.*
+                    FROM paper_position_reviews r
+                    JOIN (
+                        SELECT position_id, MAX(id) AS max_id
+                        FROM paper_position_reviews
+                        WHERE reason_code IS NOT NULL AND reason_code != ''
+                        GROUP BY position_id
+                    ) latest ON latest.max_id = r.id
+                ),
+                latest_entry AS (
+                    SELECT o.*
+                    FROM shadow_exec_orders o
+                    JOIN (
+                        SELECT paper_position_id, MAX(id) AS max_id
+                        FROM shadow_exec_orders
+                        WHERE intent_kind = 'entry'
+                        GROUP BY paper_position_id
+                    ) latest ON latest.max_id = o.id
+                )
+                SELECT
+                    sp.id AS shadow_position_id,
+                    sp.paper_position_id AS paper_position_id,
+                    sp.mark_price AS shadow_mark_price,
+                    sp.avg_entry_price AS shadow_avg_entry_price,
+                    sp.open_shares AS shadow_open_shares,
+                    p.mark_price AS paper_mark_price,
+                    p.entry_price AS paper_entry_price,
+                    p.exit_reason AS exit_reason,
+                    p.mark_final_score AS mark_final_score,
+                    COALESCE(latest_review.reason_code, 'shadow_exit_retry') AS reason_code,
+                    COALESCE(latest_entry.execution_mode, 'paper_shadow') AS execution_mode
+                FROM shadow_exec_positions sp
+                JOIN paper_positions p ON p.id = sp.paper_position_id
+                LEFT JOIN latest_review ON latest_review.position_id = p.id
+                LEFT JOIN latest_entry ON latest_entry.paper_position_id = p.id
+                WHERE sp.status = 'open'
+                  AND sp.open_shares > 0.000001
+                  AND p.status = 'open'
+                  AND p.exit_reason IS NOT NULL
+                  AND p.exit_reason != ''
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM shadow_exec_orders active
+                      WHERE active.shadow_position_id = sp.id
+                        AND active.intent_kind = 'exit'
+                        AND active.status IN ('resting', 'partial_fill')
+                  )
+                ORDER BY p.event_date ASC, p.created_at ASC, sp.id ASC
+                {limit_clause}
+                """,
+                tuple(params),
+            ).fetchall()
+        return [
+            {
+                "shadow_position_id": int(row["shadow_position_id"]),
+                "paper_position_id": int(row["paper_position_id"]),
+                "shadow_mark_price": _as_float(row["shadow_mark_price"]),
+                "shadow_avg_entry_price": _as_float(row["shadow_avg_entry_price"]),
+                "shadow_open_shares": _as_float(row["shadow_open_shares"]),
+                "paper_mark_price": _as_float(row["paper_mark_price"]),
+                "paper_entry_price": _as_float(row["paper_entry_price"]),
+                "exit_reason": str(row["exit_reason"] or ""),
+                "mark_final_score": _as_float(row["mark_final_score"]),
+                "reason_code": str(row["reason_code"] or "shadow_exit_retry"),
+                "execution_mode": str(row["execution_mode"] or "paper_shadow"),
+            }
+            for row in rows
+        ]
+
     def record_shadow_exec_fill(
         self,
         order_id: int,
@@ -1778,6 +1857,63 @@ class WeatherTracker:
             self.conn.commit()
             return updated
 
+    def request_paper_position_exit(
+        self,
+        position_id: int,
+        *,
+        reason: str,
+        reason_code: str | None = None,
+        requested_at: str | None = None,
+        mark_price: float | None = None,
+        mark_probability: float | None = None,
+        edge_abs: float | None = None,
+        final_score: float | None = None,
+        mark_reason: str | None = None,
+        exit_fee_bps: float | None = None,
+        exit_slippage_bps: float | None = None,
+    ) -> bool:
+        requested_at = str(requested_at or iso_now())
+        reason_text = str(reason or "exit_requested")
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                UPDATE paper_positions
+                SET exit_reason = ?,
+                    mark_price = COALESCE(?, mark_price),
+                    mark_probability = COALESCE(?, mark_probability),
+                    mark_edge_abs = COALESCE(?, mark_edge_abs),
+                    mark_final_score = COALESCE(?, mark_final_score),
+                    mark_updated_at = COALESCE(?, mark_updated_at),
+                    mark_reason = COALESCE(?, mark_reason),
+                    exit_fee_bps = COALESCE(?, exit_fee_bps),
+                    exit_slippage_bps = COALESCE(?, exit_slippage_bps)
+                WHERE id = ? AND status = 'open'
+                """,
+                (
+                    reason_text,
+                    _bounded_probability(mark_price),
+                    _bounded_probability(mark_probability),
+                    _as_float(edge_abs),
+                    _as_float(final_score),
+                    requested_at,
+                    str(mark_reason) if mark_reason else reason_text,
+                    _as_float(_bps(exit_fee_bps)) if exit_fee_bps is not None else None,
+                    _as_float(_bps(exit_slippage_bps)) if exit_slippage_bps is not None else None,
+                    int(position_id),
+                ),
+            )
+            updated = bool(cursor.rowcount)
+            if updated:
+                self._record_position_review_snapshot(
+                    int(position_id),
+                    reviewed_at=requested_at,
+                    event_kind="exit_requested",
+                    reason=reason_text,
+                    reason_code=reason_code,
+                )
+            self.conn.commit()
+            return updated
+
     def close_paper_position(
         self,
         position_id: int,
@@ -1881,6 +2017,45 @@ class WeatherTracker:
             payload = self._sync_paper_position_with_shadow_locked(int(position_id), synced_at=synced_at)
             self.conn.commit()
         return payload
+
+    def sync_shadow_backed_paper_positions(self, *, synced_at: str | None = None) -> dict[str, Any]:
+        synced_at = str(synced_at or iso_now())
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT DISTINCT p.id
+                FROM paper_positions p
+                LEFT JOIN shadow_exec_orders o ON o.paper_position_id = p.id
+                LEFT JOIN shadow_exec_positions s ON s.paper_position_id = p.id
+                WHERE p.status IN ('open', 'pending')
+                  AND (o.id IS NOT NULL OR s.id IS NOT NULL)
+                ORDER BY p.created_at ASC, p.id ASC
+                """
+            ).fetchall()
+            synced = 0
+            closed = 0
+            pending = 0
+            open_count = 0
+            for row in rows:
+                payload = self._sync_paper_position_with_shadow_locked(int(row["id"]), synced_at=synced_at)
+                if payload is None:
+                    continue
+                synced += 1
+                status = str(payload.get("status") or "").lower()
+                if status in {"closed", "resolved"}:
+                    closed += 1
+                elif status == "pending":
+                    pending += 1
+                elif status == "open":
+                    open_count += 1
+            self.conn.commit()
+        return {
+            "synced": synced,
+            "closed": closed,
+            "pending": pending,
+            "open": open_count,
+            "synced_at": synced_at,
+        }
 
     def _sync_paper_position_with_shadow_locked(
         self,

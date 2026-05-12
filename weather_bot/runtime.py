@@ -170,12 +170,14 @@ class WeatherRuntime:
             "last_shadow_execution_processed_orders": 0,
             "last_shadow_execution_fills": 0,
             "last_shadow_execution_expired": 0,
+            "last_shadow_execution_exit_retries": 0,
             "last_shadow_execution_marked_positions": 0,
             "startup_health": self.startup_health,
             "startup_warnings": [],
             "startup_mode_requested": normalize_execution_mode(
                 getattr(self.config.paper, "execution_mode", "paper")
             ),
+            "startup_shadow_sync": {},
             "last_execution_mode_warning": None,
         }
         saved_state = self.tracker.get_runtime_state("runtime_status", default=default_state)
@@ -275,9 +277,32 @@ class WeatherRuntime:
             should_persist_runtime_state = True
         if self._state.get("startup_mode_requested") != saved_state.get("startup_mode_requested"):
             should_persist_runtime_state = True
+        shadow_sync = self._sync_shadow_backed_positions_on_boot()
+        if shadow_sync.get("synced"):
+            self._state["startup_shadow_sync"] = shadow_sync
+            should_persist_runtime_state = True
         if should_persist_runtime_state:
             self.tracker.set_runtime_state("runtime_status", dict(self._state))
         self._prime_next_scheduled_scans()
+
+    def _sync_shadow_backed_positions_on_boot(self) -> dict[str, Any]:
+        if not execution_mode_records_shadow_orders(self._state.get("paper_execution_mode")):
+            return {}
+        expired = 0
+        try:
+            expired = int(self.tracker.expire_shadow_exec_orders())
+        except Exception as exc:
+            warning = f"Startup shadow order expiration failed: {exc}"
+            self._set_startup_warning(warning, code="startup_shadow_sync_failed")
+            return {"error": warning, "expired": 0, "synced": 0}
+        try:
+            summary = self.tracker.sync_shadow_backed_paper_positions()
+        except Exception as exc:
+            warning = f"Startup paper/shadow reconciliation failed: {exc}"
+            self._set_startup_warning(warning, code="startup_shadow_sync_failed")
+            return {"error": warning, "expired": expired, "synced": 0}
+        summary["expired"] = expired
+        return summary
 
     def _resolve_paper_execution_mode(self, requested_mode: str) -> tuple[str, str | None]:
         mode = normalize_execution_mode(requested_mode)
@@ -612,6 +637,20 @@ class WeatherRuntime:
         realistic_mode = execution_mode_records_shadow_orders(paper_execution_mode)
         shadow_exit_intent = None
         if realistic_mode:
+            exit_requested_at = datetime.now(timezone.utc).isoformat()
+            self.tracker.request_paper_position_exit(
+                int(position_id),
+                reason=str(reason or "manual_dashboard_sell"),
+                reason_code=str(reason or "manual_dashboard_sell"),
+                requested_at=exit_requested_at,
+                mark_price=exit_price,
+                mark_probability=_as_probability(position.get("mark_probability") or position.get("outcome_probability")),
+                edge_abs=_as_float(position.get("mark_edge_abs") or position.get("edge_abs")),
+                final_score=_as_float(position.get("mark_final_score") or position.get("decision_final_score")),
+                mark_reason=str(position.get("mark_reason") or "Manual dashboard sell."),
+                exit_fee_bps=self.config.paper.fee_bps,
+                exit_slippage_bps=self.config.paper.exit_slippage_bps,
+            )
             shadow_exit_intent = self.tracker.preview_shadow_exit_intent(
                 int(position_id),
                 execution_mode=paper_execution_mode,
@@ -747,6 +786,7 @@ class WeatherRuntime:
                     last_shadow_execution_processed_orders=int(summary.get("processed_orders") or 0),
                     last_shadow_execution_fills=int(summary.get("fills") or 0),
                     last_shadow_execution_expired=int(summary.get("expired") or 0),
+                    last_shadow_execution_exit_retries=int(summary.get("exit_retries_queued") or 0),
                     last_shadow_execution_marked_positions=int(summary.get("marked_positions") or 0),
                 )
             except Exception as exc:
@@ -1019,6 +1059,19 @@ class WeatherRuntime:
                 continue
             shadow_exit_intent = None
             if realistic_mode:
+                self.tracker.request_paper_position_exit(
+                    int(position["id"]),
+                    reason=decision.reason,
+                    reason_code=decision.reason_code,
+                    requested_at=reviewed_at,
+                    mark_price=mark_price,
+                    mark_probability=mark_probability,
+                    edge_abs=decision.edge_abs,
+                    final_score=decision.final_score,
+                    mark_reason=f"{trigger}: {decision.reason}",
+                    exit_fee_bps=self.config.paper.fee_bps,
+                    exit_slippage_bps=self.config.paper.exit_slippage_bps,
+                )
                 shadow_exit_intent = self.tracker.preview_shadow_exit_intent(
                     int(position["id"]),
                     execution_mode=paper_execution_mode,
