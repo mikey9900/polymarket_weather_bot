@@ -2106,6 +2106,12 @@ class WeatherTracker:
         net_exit_payout = _as_float(paper["net_exit_payout"])
         exit_reason = str(paper["exit_reason"] or "") or None
         resolved_at = str(paper["resolved_at"] or "") or None
+        paper_resolution = str(paper["resolution"] or "").upper()
+        paper_was_resolved = (
+            current_status == "resolved"
+            or paper_resolution in {"YES", "NO"}
+            or str(exit_reason or "").lower().startswith("resolved:")
+        )
         new_locked_cost = old_locked_cost
 
         if shadow_position is not None:
@@ -2127,7 +2133,7 @@ class WeatherTracker:
                 gross_exit_payout = exit_notional
                 net_exit_payout = exit_notional
             if shadow_status == "closed" or open_shares <= 0.000001:
-                next_status = "closed"
+                next_status = "resolved" if paper_was_resolved else "closed"
                 shares = total_entry_shares
                 cost = total_entry_notional
                 new_locked_cost = 0.0
@@ -2232,6 +2238,13 @@ class WeatherTracker:
                 (market_slug,),
             ).fetchall()
             if not rows:
+                shadow_settled = self._settle_shadow_exec_positions_for_market_locked(
+                    market_slug=market_slug,
+                    resolution=resolution,
+                    resolved_at=resolved_at,
+                )
+                if shadow_settled:
+                    self.conn.commit()
                 return ResolutionOutcome(market_slug=market_slug, resolution=resolution, resolved_positions=0, total_realized_pnl=0.0)
 
             initial, available = self.get_paper_capital()
@@ -2275,6 +2288,11 @@ class WeatherTracker:
                         int(row["id"]),
                     ),
                 )
+            self._settle_shadow_exec_positions_for_market_locked(
+                market_slug=market_slug,
+                resolution=resolution,
+                resolved_at=resolved_at,
+            )
             self.conn.execute(
                 """
                 INSERT INTO resolution_events(
@@ -2300,6 +2318,97 @@ class WeatherTracker:
                 total_realized_pnl=round(total_pnl, 6),
                 resolved_at=resolved_at,
             )
+
+    def _settle_shadow_exec_positions_for_market_locked(
+        self,
+        *,
+        market_slug: str,
+        resolution: str,
+        resolved_at: str,
+    ) -> int:
+        positions = self.conn.execute(
+            "SELECT * FROM shadow_exec_positions WHERE market_slug = ? AND status = 'open'",
+            (market_slug,),
+        ).fetchall()
+        status_reason = f"Market resolved {resolution}; shadow position settled at final payout."
+        self.conn.execute(
+            """
+            UPDATE shadow_exec_orders
+            SET status = 'resolved',
+                status_reason = ?,
+                last_checked_at = ?,
+                updated_at = ?
+            WHERE market_slug = ?
+              AND status IN ('resting', 'partial_fill')
+            """,
+            (status_reason, resolved_at, resolved_at, market_slug),
+        )
+        settled = 0
+        for position in positions:
+            open_shares = max(0.0, float(position["open_shares"] or 0.0))
+            if open_shares <= 0.000001:
+                continue
+            direction = str(position["direction"] or "").upper()
+            payout = round(open_shares if direction == resolution else 0.0, 6)
+            remaining_cost = max(0.0, float(position["remaining_cost_basis_usd"] or 0.0))
+            closed_shares = round(max(0.0, float(position["closed_shares"] or 0.0)) + open_shares, 6)
+            exit_notional = round(max(0.0, float(position["exit_notional_usd"] or 0.0)) + payout, 6)
+            realized_pnl = round(float(position["realized_pnl"] or 0.0) + payout - remaining_cost, 6)
+            avg_exit_price = round(exit_notional / closed_shares, 6) if closed_shares > 0 else None
+            active_exit = self.conn.execute(
+                """
+                SELECT id
+                FROM shadow_exec_orders
+                WHERE shadow_position_id = ?
+                  AND intent_kind = 'exit'
+                  AND status = 'resolved'
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (int(position["id"]),),
+            ).fetchone()
+            exit_order_id = int(active_exit["id"]) if active_exit is not None else position["exit_order_id"]
+            self.conn.execute(
+                """
+                UPDATE shadow_exec_positions
+                SET exit_order_id = ?,
+                    status = 'closed',
+                    open_shares = 0,
+                    closed_shares = ?,
+                    remaining_cost_basis_usd = 0,
+                    exit_notional_usd = ?,
+                    avg_exit_price = ?,
+                    realized_pnl = ?,
+                    mark_price = ?,
+                    mark_value_usd = 0,
+                    unrealized_pnl = 0,
+                    total_pnl = ?,
+                    closed_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    exit_order_id,
+                    closed_shares,
+                    exit_notional,
+                    avg_exit_price,
+                    realized_pnl,
+                    1.0 if direction == resolution else 0.0,
+                    realized_pnl,
+                    resolved_at,
+                    resolved_at,
+                    int(position["id"]),
+                ),
+            )
+            self._refresh_shadow_exec_position_metrics_locked(
+                int(position["id"]),
+                mark_price=1.0 if direction == resolution else 0.0,
+                marked_at=resolved_at,
+                source="resolution",
+                evidence={"market_slug": market_slug, "resolution": resolution},
+            )
+            settled += 1
+        return settled
 
     def get_open_positions(self) -> list[dict[str, Any]]:
         with self._lock:

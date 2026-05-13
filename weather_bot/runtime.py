@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -587,8 +588,9 @@ class WeatherRuntime:
     def settle_due_positions(self, *, send_alerts: bool = True) -> list[ResolutionOutcome]:
         outcomes: list[ResolutionOutcome] = []
         open_positions = self.tracker.get_open_positions()
+        open_shadow_positions = self.tracker.get_shadow_exec_positions(limit=500, status="open")
         seen_markets: set[str] = set()
-        for position in open_positions:
+        for position in [*open_positions, *open_shadow_positions]:
             market_slug = str(position.get("market_slug") or "")
             if not market_slug or market_slug in seen_markets:
                 continue
@@ -2303,22 +2305,53 @@ def _as_probability(value: Any) -> float | None:
 
 
 def get_market_resolution(market_slug: str) -> str | None:
+    market_slug = str(market_slug or "").strip()
+    if not market_slug:
+        return None
     try:
         response = requests.get(
-            "https://gamma-api.polymarket.com/markets",
-            params={"slug": market_slug},
+            f"https://gamma-api.polymarket.com/markets/slug/{quote(market_slug, safe='')}",
             timeout=10,
         )
         response.raise_for_status()
-        payload = response.json()
-        if not payload:
-            return None
-        market = payload[0]
-        if not market.get("closed"):
-            return None
-        resolution_price = market.get("resolutionPrice")
-        if resolution_price is None:
-            return None
-        return "YES" if float(resolution_price) >= 0.5 else "NO"
+        return _resolution_from_gamma_market(response.json())
     except Exception:
         return None
+
+
+def _resolution_from_gamma_market(market: Any) -> str | None:
+    if not isinstance(market, dict):
+        return None
+    closed = bool(market.get("closed")) or str(market.get("umaResolutionStatus") or "").lower() == "resolved"
+    if not closed:
+        return None
+    resolution_price = _as_float(market.get("resolutionPrice"))
+    if resolution_price is not None:
+        return "YES" if resolution_price >= 0.5 else "NO"
+    outcomes = _coerce_json_list(market.get("outcomes"))
+    prices = _coerce_json_list(market.get("outcomePrices"))
+    winning_outcome: str | None = None
+    winning_price = -1.0
+    for outcome, raw_price in zip(outcomes, prices):
+        price = _as_float(raw_price)
+        if price is None:
+            continue
+        label = str(outcome or "").strip().upper()
+        if label in {"YES", "NO"} and price > winning_price:
+            winning_outcome = label
+            winning_price = price
+    if winning_outcome is not None and winning_price >= 0.99:
+        return winning_outcome
+    return None
+
+
+def _coerce_json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+        return payload if isinstance(payload, list) else []
+    return []

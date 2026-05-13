@@ -367,6 +367,84 @@ def test_shadow_cycle_requeues_after_retry_exit_expires(tmp_path):
     assert exit_orders[1]["status"] == "expired"
 
 
+def test_resolved_market_settles_open_shadow_position_instead_of_retrying(tmp_path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    engine = _engine(
+        tracker,
+        book_fetcher=lambda _token: {
+            "hash": "empty-resolved-book",
+            "timestamp": "2026-05-07T12:30:00+00:00",
+            "bids": [],
+            "asks": [],
+        },
+    )
+    position_id = _paper_position_id(tracker)
+    market_slug = "market-shadow-exec-paper"
+    event_slug = "event-shadow-exec-paper"
+    entry = _intent(
+        position_id=position_id,
+        market_slug=market_slug,
+        event_slug=event_slug,
+        simulated_fill_status="full_fill",
+        simulated_fill_shares=100.0,
+        simulated_avg_fill_price=0.40,
+        execution_checked_at="2026-05-07T12:00:01+00:00",
+    )
+    entry_id = tracker.record_shadow_order_intent(entry)
+    engine.mirror_intent(entry_id, entry)
+    exit_intent = _intent(
+        intent_kind="exit",
+        position_id=position_id,
+        market_slug=market_slug,
+        event_slug=event_slug,
+        order_action="SELL",
+        order_intent="SELL_TO_CLOSE",
+        target_price=0.42,
+        reference_price=0.42,
+        shares=100.0,
+        notional_usd=42.0,
+        simulated_fill_status="no_fill",
+        created_at="2026-05-07T12:30:00+00:00",
+    )
+    exit_id = tracker.record_shadow_order_intent(exit_intent)
+    exit_order_id = engine.mirror_intent(exit_id, exit_intent)
+
+    outcome = tracker.settle_market(market_slug, "YES")
+
+    exit_order = tracker.get_shadow_exec_order(exit_order_id)
+    positions = tracker.get_shadow_exec_positions(limit=None)
+    paper = tracker.conn.execute("SELECT * FROM paper_positions WHERE id = ?", (position_id,)).fetchone()
+    assert outcome.resolved_positions == 1
+    assert exit_order["status"] == "resolved"
+    assert positions[0]["status"] == "closed"
+    assert positions[0]["open_shares"] == 0.0
+    assert positions[0]["mark_price"] == 1.0
+    assert positions[0]["realized_pnl"] == 60.0
+    assert paper["status"] == "resolved"
+    assert paper["exit_reason"] == "resolved:YES"
+
+
+def test_shadow_only_resolved_market_still_settles(tmp_path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    engine = _engine(tracker)
+    entry = _intent(
+        simulated_fill_status="full_fill",
+        simulated_fill_shares=50.0,
+        simulated_avg_fill_price=0.30,
+        execution_checked_at="2026-05-07T12:00:01+00:00",
+    )
+    entry_id = tracker.record_shadow_order_intent(entry)
+    engine.mirror_intent(entry_id, entry)
+
+    outcome = tracker.settle_market("market-shadow-exec-1", "NO")
+
+    positions = tracker.get_shadow_exec_positions(limit=None)
+    assert outcome.resolved_positions == 0
+    assert positions[0]["status"] == "closed"
+    assert positions[0]["mark_price"] == 0.0
+    assert positions[0]["realized_pnl"] == -15.0
+
+
 def test_entry_bid_improvement_lifts_only_to_edge_cap_and_resizes_budget(tmp_path):
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     engine = _engine(
