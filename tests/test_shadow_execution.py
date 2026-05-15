@@ -445,6 +445,66 @@ def test_shadow_only_resolved_market_still_settles(tmp_path):
     assert positions[0]["realized_pnl"] == -15.0
 
 
+def test_shadow_settlement_does_not_double_count_capital_for_already_resolved_paper(tmp_path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    engine = _engine(tracker)
+    position_id = _paper_position_id(tracker)
+    market_slug = "market-shadow-exec-paper"
+    event_slug = "event-shadow-exec-paper"
+    entry = _intent(
+        position_id=position_id,
+        market_slug=market_slug,
+        event_slug=event_slug,
+        simulated_fill_status="full_fill",
+        simulated_fill_shares=100.0,
+        simulated_avg_fill_price=0.40,
+        execution_checked_at="2026-05-07T12:00:01+00:00",
+    )
+    engine.mirror_intent(tracker.record_shadow_order_intent(entry), entry)
+    partial_exit = _intent(
+        intent_kind="exit",
+        position_id=position_id,
+        market_slug=market_slug,
+        event_slug=event_slug,
+        order_action="SELL",
+        order_intent="SELL_TO_CLOSE",
+        target_price=0.50,
+        reference_price=0.50,
+        shares=100.0,
+        notional_usd=50.0,
+        simulated_fill_status="partial_fill",
+        simulated_fill_shares=50.0,
+        simulated_avg_fill_price=0.50,
+        execution_checked_at="2026-05-07T12:30:00+00:00",
+        created_at="2026-05-07T12:30:00+00:00",
+    )
+    engine.mirror_intent(tracker.record_shadow_order_intent(partial_exit), partial_exit)
+    tracker.conn.execute(
+        """
+        UPDATE paper_positions
+        SET status = 'resolved',
+            resolution = 'YES',
+            realized_pnl = 30.0,
+            exit_reason = 'resolved:YES',
+            resolved_at = '2026-05-07T18:00:00+00:00'
+        WHERE id = ?
+        """,
+        (position_id,),
+    )
+    tracker.set_setting("paper_capital", {"initial": 1000.0, "available": 1035.0})
+    tracker.conn.commit()
+
+    tracker.settle_market(market_slug, "YES")
+
+    _, available = tracker.get_paper_capital()
+    paper = tracker.conn.execute("SELECT realized_pnl FROM paper_positions WHERE id = ?", (position_id,)).fetchone()
+    positions = tracker.get_shadow_exec_positions(limit=None)
+    assert available == 1035.0
+    assert paper["realized_pnl"] == 35.0
+    assert positions[0]["status"] == "closed"
+    assert positions[0]["realized_pnl"] == 35.0
+
+
 def test_entry_bid_improvement_lifts_only_to_edge_cap_and_resizes_budget(tmp_path):
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     engine = _engine(

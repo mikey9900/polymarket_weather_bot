@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -109,6 +110,7 @@ DAYS_AHEAD = 7
 
 # Cache file stores slugs already confirmed missing so repeat scans skip them.
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "seen_events.json")
+SLUG_DATE_RE = re.compile(r"-on-([a-z]+)-(\d{1,2})-(\d{4})$")
 
 
 def normalize_temperature_market_scope(market_scope: str | None) -> str:
@@ -148,7 +150,8 @@ def _load_cache() -> set[str]:
     except Exception as exc:
         print(f"  WARNING Cache unreadable ({exc}) - starting fresh")
         return set()
-    return set(payload)
+    today = datetime.now(timezone.utc).date()
+    return _filter_cache_slugs(payload, today)
 
 
 def _save_cache(seen: set[str]) -> None:
@@ -158,6 +161,30 @@ def _save_cache(seen: set[str]) -> None:
             json.dump(sorted(seen), handle, indent=2)
     except Exception as exc:
         print(f"  WARNING Could not save cache: {exc}")
+
+
+def _filter_cache_slugs(slugs: object, today) -> set[str]:
+    if not isinstance(slugs, list):
+        return set()
+    return {str(slug) for slug in slugs if _is_missing_slug_cacheable(str(slug), today)}
+
+
+def _is_missing_slug_cacheable(slug: str, today) -> bool:
+    event_date = _slug_event_date(slug)
+    if event_date is None:
+        return True
+    return event_date < today
+
+
+def _slug_event_date(slug: str):
+    match = SLUG_DATE_RE.search(str(slug or ""))
+    if not match:
+        return None
+    month, day, year = match.groups()
+    try:
+        return datetime.strptime(f"{month} {day} {year}", "%B %d %Y").date()
+    except ValueError:
+        return None
 
 
 def clear_cache() -> None:
@@ -241,13 +268,15 @@ def fetch_weather_events(limit: int = 300, *, market_scope: str = "both") -> lis
 
             if not data or (isinstance(data, list) and len(data) == 0):
                 not_found += 1
-                seen.add(slug)
+                if _is_missing_slug_cacheable(slug, today.date()):
+                    seen.add(slug)
                 continue
 
             event = data[0] if isinstance(data, list) else data
             if event.get("slug") != slug:
                 not_found += 1
-                seen.add(slug)
+                if _is_missing_slug_cacheable(slug, today.date()):
+                    seen.add(slug)
                 continue
 
             markets = event.get("markets") or []

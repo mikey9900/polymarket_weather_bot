@@ -588,7 +588,7 @@ class WeatherRuntime:
     def settle_due_positions(self, *, send_alerts: bool = True) -> list[ResolutionOutcome]:
         outcomes: list[ResolutionOutcome] = []
         open_positions = self.tracker.get_open_positions()
-        open_shadow_positions = self.tracker.get_shadow_exec_positions(limit=500, status="open")
+        open_shadow_positions = self.tracker.get_shadow_exec_positions(limit=None, status="open")
         seen_markets: set[str] = set()
         for position in [*open_positions, *open_shadow_positions]:
             market_slug = str(position.get("market_slug") or "")

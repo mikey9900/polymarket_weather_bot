@@ -2211,7 +2211,7 @@ class WeatherTracker:
                 int(position_id),
             ),
         )
-        capital_delta = round((old_locked_cost - new_locked_cost) + (realized_pnl - old_realized), 6)
+        capital_delta = 0.0 if paper_was_resolved else round((old_locked_cost - new_locked_cost) + (realized_pnl - old_realized), 6)
         if abs(capital_delta) > 0.0000005:
             self.set_setting(
                 "paper_capital",
