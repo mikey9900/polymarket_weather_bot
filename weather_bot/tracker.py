@@ -263,6 +263,7 @@ class WeatherTracker:
                 ttl_seconds INTEGER NOT NULL,
                 expires_at TEXT,
                 clob_token_id TEXT,
+                condition_id TEXT,
                 taker_estimate_avg_price REAL,
                 taker_estimate_notional_usd REAL,
                 taker_estimate_fill_shares REAL,
@@ -281,6 +282,7 @@ class WeatherTracker:
             CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_status ON shadow_exec_orders(status);
             CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_created_at ON shadow_exec_orders(created_at);
             CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_token ON shadow_exec_orders(clob_token_id);
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_condition ON shadow_exec_orders(condition_id);
             CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_paper_position ON shadow_exec_orders(paper_position_id);
 
             CREATE TABLE IF NOT EXISTS shadow_exec_fills (
@@ -363,11 +365,40 @@ class WeatherTracker:
 
             CREATE INDEX IF NOT EXISTS idx_shadow_exec_marks_position ON shadow_exec_marks(shadow_position_id);
             CREATE INDEX IF NOT EXISTS idx_shadow_exec_marks_created_at ON shadow_exec_marks(created_at);
+
+            CREATE TABLE IF NOT EXISTS shadow_exec_trade_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_uid TEXT NOT NULL UNIQUE,
+                condition_id TEXT NOT NULL,
+                clob_token_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price REAL NOT NULL,
+                size REAL NOT NULL,
+                trade_timestamp INTEGER NOT NULL,
+                transaction_hash TEXT,
+                source TEXT NOT NULL,
+                raw_json TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                processed_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_trade_events_condition ON shadow_exec_trade_events(condition_id);
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_trade_events_token ON shadow_exec_trade_events(clob_token_id);
+            CREATE INDEX IF NOT EXISTS idx_shadow_exec_trade_events_timestamp ON shadow_exec_trade_events(trade_timestamp);
+
+            CREATE TABLE IF NOT EXISTS shadow_exec_trade_cursors (
+                condition_id TEXT PRIMARY KEY,
+                last_trade_timestamp INTEGER NOT NULL DEFAULT 0,
+                last_event_uid TEXT,
+                source TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         self._ensure_paper_position_columns()
         self._ensure_decision_columns()
         self._ensure_shadow_order_columns()
+        self._ensure_shadow_exec_columns()
         self.conn.commit()
 
     def backup_database(self, destination: str | Path) -> str:
@@ -420,6 +451,7 @@ class WeatherTracker:
                 (max(0, int(shadow_order_limit)),),
             )
             for table_name, order_column in (
+                ("shadow_exec_trade_events", "observed_at"),
                 ("shadow_exec_marks", "created_at"),
                 ("shadow_exec_fills", "filled_at"),
                 ("shadow_exec_orders", "created_at"),
@@ -922,6 +954,7 @@ class WeatherTracker:
         }
         if taker_estimate:
             payload["taker_estimate"] = taker_estimate
+        condition_id = _condition_id_from_shadow_intent(intent)
         with self._lock:
             existing = self.conn.execute(
                 "SELECT id FROM shadow_exec_orders WHERE shadow_intent_id = ? LIMIT 1",
@@ -938,11 +971,11 @@ class WeatherTracker:
                     reference_price, requested_shares, filled_shares, avg_fill_price,
                     filled_notional_usd, unfilled_shares, estimated_fee_paid, status,
                     status_reason, ttl_seconds, expires_at, clob_token_id,
-                    taker_estimate_avg_price, taker_estimate_notional_usd,
+                    condition_id, taker_estimate_avg_price, taker_estimate_notional_usd,
                     taker_estimate_fill_shares, taker_estimate_pnl, queue_fill_fraction,
                     last_checked_at, created_at, updated_at, payload_json
                 )
-                VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     int(shadow_intent_id),
@@ -969,6 +1002,7 @@ class WeatherTracker:
                     ttl_seconds,
                     expires_at,
                     str(intent.clob_token_id or ""),
+                    condition_id,
                     _as_float((taker_estimate or {}).get("avg_fill_price")),
                     _as_float((taker_estimate or {}).get("notional_usd")),
                     _as_float((taker_estimate or {}).get("fill_shares")),
@@ -1162,6 +1196,146 @@ class WeatherTracker:
             }
             for row in rows
         ]
+
+    def record_shadow_exec_trade_event(
+        self,
+        *,
+        condition_id: str,
+        clob_token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        trade_timestamp: int,
+        transaction_hash: str | None = None,
+        source: str = "rest_trade_tape",
+        raw_event: dict[str, Any] | None = None,
+        observed_at: str | None = None,
+        processed_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        condition_id = str(condition_id or "").strip()
+        clob_token_id = str(clob_token_id or "").strip()
+        side = str(side or "").strip().upper()
+        price = _bounded_probability(price) or 0.0
+        size = max(0.0, float(size or 0.0))
+        trade_timestamp = max(0, int(trade_timestamp or 0))
+        if not condition_id or not clob_token_id or side not in {"BUY", "SELL"} or price <= 0 or size <= 0 or trade_timestamp <= 0:
+            return None
+        observed_at = str(observed_at or iso_now())
+        event_uid = _shadow_exec_trade_event_uid(
+            condition_id=condition_id,
+            clob_token_id=clob_token_id,
+            side=side,
+            price=price,
+            size=size,
+            trade_timestamp=trade_timestamp,
+            transaction_hash=transaction_hash,
+        )
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                INSERT OR IGNORE INTO shadow_exec_trade_events (
+                    event_uid, condition_id, clob_token_id, side, price, size,
+                    trade_timestamp, transaction_hash, source, raw_json,
+                    observed_at, processed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_uid,
+                    condition_id,
+                    clob_token_id,
+                    side,
+                    price,
+                    round(size, 6),
+                    trade_timestamp,
+                    str(transaction_hash or ""),
+                    str(source or "rest_trade_tape"),
+                    json.dumps(raw_event or {}, sort_keys=True),
+                    observed_at,
+                    processed_at,
+                ),
+            )
+            inserted = cursor.rowcount > 0
+            self._update_shadow_exec_trade_cursor_locked(
+                condition_id,
+                trade_timestamp=trade_timestamp,
+                event_uid=event_uid,
+                source=str(source or "rest_trade_tape"),
+                updated_at=observed_at,
+            )
+            self.conn.commit()
+            row = self.conn.execute(
+                "SELECT * FROM shadow_exec_trade_events WHERE event_uid = ?",
+                (event_uid,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = _serialize_shadow_exec_trade_event(row)
+        payload["inserted"] = bool(inserted)
+        return payload
+
+    def mark_shadow_exec_trade_event_processed(self, event_uid: str, *, processed_at: str | None = None) -> None:
+        processed_at = str(processed_at or iso_now())
+        with self._lock:
+            self.conn.execute(
+                """
+                UPDATE shadow_exec_trade_events
+                SET processed_at = COALESCE(processed_at, ?)
+                WHERE event_uid = ?
+                """,
+                (processed_at, str(event_uid or "")),
+            )
+            self.conn.commit()
+
+    def get_recent_shadow_exec_trade_events(self, *, limit: int | None = 5000) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM shadow_exec_trade_events ORDER BY trade_timestamp DESC, id DESC {limit_clause}",
+                tuple(params),
+            ).fetchall()
+        return [_serialize_shadow_exec_trade_event(row) for row in rows]
+
+    def get_shadow_exec_trade_cursors(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM shadow_exec_trade_cursors ORDER BY updated_at DESC, condition_id ASC"
+            ).fetchall()
+        return [_serialize_shadow_exec_trade_cursor(row) for row in rows]
+
+    def _update_shadow_exec_trade_cursor_locked(
+        self,
+        condition_id: str,
+        *,
+        trade_timestamp: int,
+        event_uid: str,
+        source: str,
+        updated_at: str,
+    ) -> None:
+        current = self.conn.execute(
+            "SELECT * FROM shadow_exec_trade_cursors WHERE condition_id = ?",
+            (condition_id,),
+        ).fetchone()
+        if current is not None and int(current["last_trade_timestamp"] or 0) > int(trade_timestamp):
+            return
+        self.conn.execute(
+            """
+            INSERT INTO shadow_exec_trade_cursors (
+                condition_id, last_trade_timestamp, last_event_uid, source, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(condition_id) DO UPDATE SET
+                last_trade_timestamp = excluded.last_trade_timestamp,
+                last_event_uid = excluded.last_event_uid,
+                source = excluded.source,
+                updated_at = excluded.updated_at
+            """,
+            (condition_id, int(trade_timestamp), event_uid, source, updated_at),
+        )
 
     def record_shadow_exec_fill(
         self,
@@ -1432,11 +1606,16 @@ class WeatherTracker:
             order_rows = self.conn.execute("SELECT * FROM shadow_exec_orders").fetchall()
             position_rows = self.conn.execute("SELECT * FROM shadow_exec_positions").fetchall()
             fill_rows = self.conn.execute("SELECT * FROM shadow_exec_fills").fetchall()
+            trade_event_rows = self.conn.execute("SELECT * FROM shadow_exec_trade_events").fetchall()
+            trade_cursor_rows = self.conn.execute("SELECT * FROM shadow_exec_trade_cursors").fetchall()
             last_order = self.conn.execute("SELECT MAX(created_at) AS value FROM shadow_exec_orders").fetchone()
             last_fill = self.conn.execute("SELECT MAX(filled_at) AS value FROM shadow_exec_fills").fetchone()
+            last_trade_event = self.conn.execute("SELECT MAX(observed_at) AS value FROM shadow_exec_trade_events").fetchone()
         orders = [_serialize_shadow_exec_order(row) for row in order_rows]
         positions = [_serialize_shadow_exec_position(row) for row in position_rows]
         fills = [_serialize_shadow_exec_fill(row) for row in fill_rows]
+        trade_events = [_serialize_shadow_exec_trade_event(row) for row in trade_event_rows]
+        trade_cursors = [_serialize_shadow_exec_trade_cursor(row) for row in trade_cursor_rows]
         paper_stats = self.get_paper_stats()
         missed = self.get_shadow_execution_missed_paper_trades(limit=None)
         total_pnl = round(sum(float(item.get("total_pnl") or 0.0) for item in positions), 6)
@@ -1448,6 +1627,13 @@ class WeatherTracker:
         filled_entries = [item for item in entry_orders if float(item.get("filled_shares") or 0.0) > 0]
         unfilled_entries = [item for item in entry_orders if float(item.get("filled_shares") or 0.0) <= 0]
         filled_orders = [item for item in orders if float(item.get("filled_shares") or 0.0) > 0]
+        trade_tape_fills = [item for item in fills if item.get("liquidity_source") == "rest_trade_tape"]
+        websocket_fills = [item for item in fills if item.get("liquidity_source") == "market_websocket"]
+        trade_tape_order_ids = {
+            int(item.get("order_id") or 0)
+            for item in trade_tape_fills
+            if int(item.get("order_id") or 0) > 0
+        }
         paper_pnl = float(paper_stats.get("total_pnl") or 0.0)
         missed_paper_pnl = round(sum(float(item.get("paper_pnl") or 0.0) for item in missed), 6)
         taker_exit_estimated_pnl = round(
@@ -1467,6 +1653,11 @@ class WeatherTracker:
             "open_position_count": sum(1 for item in positions if item.get("status") == "open"),
             "closed_position_count": sum(1 for item in positions if item.get("status") == "closed"),
             "fill_count": len(fills),
+            "trade_event_count": len(trade_events),
+            "trade_cursor_count": len(trade_cursors),
+            "rest_trade_tape_fill_count": len(trade_tape_fills),
+            "market_websocket_fill_count": len(websocket_fills),
+            "trade_tape_rescued_order_count": len(trade_tape_order_ids),
             "entry_fill_rate": round((len(filled_entries) / len(entry_orders) * 100.0), 2) if entry_orders else 0.0,
             "realistic_total_pnl": total_pnl,
             "realistic_realized_pnl": realized_pnl,
@@ -1484,7 +1675,9 @@ class WeatherTracker:
             "unfilled_entry_order_count": len(unfilled_entries),
             "last_order_at": last_order["value"] if last_order is not None else None,
             "last_fill_at": last_fill["value"] if last_fill is not None else None,
+            "last_trade_event_at": last_trade_event["value"] if last_trade_event is not None else None,
             "by_status": _count_by_key(orders, "status"),
+            "fills_by_source": _count_by_key(fills, "liquidity_source"),
         }
 
     def _apply_shadow_entry_fill_locked(
@@ -3212,6 +3405,15 @@ class WeatherTracker:
                 continue
             self.conn.execute(f"ALTER TABLE shadow_order_intents ADD COLUMN {column} {column_type}")
 
+    def _ensure_shadow_exec_columns(self) -> None:
+        order_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(shadow_exec_orders)").fetchall()
+        }
+        if "condition_id" not in order_columns:
+            self.conn.execute("ALTER TABLE shadow_exec_orders ADD COLUMN condition_id TEXT")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_condition ON shadow_exec_orders(condition_id)")
+
     def _record_position_review_snapshot(
         self,
         position_id: int,
@@ -3642,6 +3844,7 @@ def _serialize_shadow_exec_order(row: sqlite3.Row) -> dict[str, Any]:
         "ttl_seconds": int(payload.get("ttl_seconds") or 0),
         "expires_at": str(payload.get("expires_at") or ""),
         "clob_token_id": str(payload.get("clob_token_id") or ""),
+        "condition_id": str(payload.get("condition_id") or _condition_id_from_shadow_exec_payload(payload_json) or ""),
         "taker_estimate_avg_price": _as_float(payload.get("taker_estimate_avg_price")),
         "taker_estimate_notional_usd": _as_float(payload.get("taker_estimate_notional_usd")),
         "taker_estimate_fill_shares": _as_float(payload.get("taker_estimate_fill_shares")),
@@ -3671,6 +3874,36 @@ def _serialize_shadow_exec_fill(row: sqlite3.Row) -> dict[str, Any]:
         "liquidity_source": str(payload.get("liquidity_source") or ""),
         "evidence": _json_object(payload.get("evidence_json")),
         "filled_at": str(payload.get("filled_at") or ""),
+    }
+
+
+def _serialize_shadow_exec_trade_event(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    return {
+        "id": int(payload["id"]),
+        "event_uid": str(payload.get("event_uid") or ""),
+        "condition_id": str(payload.get("condition_id") or ""),
+        "clob_token_id": str(payload.get("clob_token_id") or ""),
+        "side": str(payload.get("side") or ""),
+        "price": _as_float(payload.get("price")),
+        "size": _as_float(payload.get("size")) or 0.0,
+        "trade_timestamp": int(payload.get("trade_timestamp") or 0),
+        "transaction_hash": str(payload.get("transaction_hash") or ""),
+        "source": str(payload.get("source") or ""),
+        "raw": _json_object(payload.get("raw_json")),
+        "observed_at": str(payload.get("observed_at") or ""),
+        "processed_at": str(payload.get("processed_at") or ""),
+    }
+
+
+def _serialize_shadow_exec_trade_cursor(row: sqlite3.Row) -> dict[str, Any]:
+    payload = dict(row)
+    return {
+        "condition_id": str(payload.get("condition_id") or ""),
+        "last_trade_timestamp": int(payload.get("last_trade_timestamp") or 0),
+        "last_event_uid": str(payload.get("last_event_uid") or ""),
+        "source": str(payload.get("source") or ""),
+        "updated_at": str(payload.get("updated_at") or ""),
     }
 
 
@@ -4116,6 +4349,61 @@ def _json_object(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _condition_id_from_shadow_intent(intent: ShadowOrderIntent) -> str:
+    payload = intent.payload if isinstance(intent.payload, dict) else {}
+    direct = _condition_id_from_shadow_payload(payload)
+    if direct:
+        return direct
+    return ""
+
+
+def _condition_id_from_shadow_exec_payload(payload: dict[str, Any]) -> str:
+    shadow_intent = payload.get("shadow_intent") if isinstance(payload.get("shadow_intent"), dict) else {}
+    intent_payload = shadow_intent.get("payload") if isinstance(shadow_intent.get("payload"), dict) else {}
+    direct = _condition_id_from_shadow_payload(intent_payload)
+    if direct:
+        return direct
+    return _condition_id_from_shadow_payload(payload)
+
+
+def _condition_id_from_shadow_payload(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("condition_id", "conditionId", "market", "book_market"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    rehearsal = payload.get("shadow_fill_rehearsal") if isinstance(payload.get("shadow_fill_rehearsal"), dict) else {}
+    for key in ("book_market", "market", "condition_id", "conditionId"):
+        value = str(rehearsal.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _shadow_exec_trade_event_uid(
+    *,
+    condition_id: str,
+    clob_token_id: str,
+    side: str,
+    price: float,
+    size: float,
+    trade_timestamp: int,
+    transaction_hash: str | None,
+) -> str:
+    tx = str(transaction_hash or "").strip()
+    parts = [
+        str(condition_id or "").strip(),
+        str(clob_token_id or "").strip(),
+        str(side or "").strip().upper(),
+        f"{float(price or 0.0):.6f}",
+        f"{float(size or 0.0):.6f}",
+        str(int(trade_timestamp or 0)),
+        tx,
+    ]
+    return "|".join(parts)
 
 
 def _deserialize_position_review_row(row: sqlite3.Row) -> dict[str, Any]:

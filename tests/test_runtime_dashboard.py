@@ -84,6 +84,16 @@ def test_load_config_accepts_temperature_market_scope_ha_override(tmp_path: Path
     assert config.temperature.market_scope == "north_america"
 
 
+def test_load_config_accepts_paper_open_cap_ha_override(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    options_path = tmp_path / "options.json"
+    options_path.write_text(json.dumps({"paper_max_open_positions": 60}), encoding="utf-8")
+
+    config = load_config(config_path, ha_options_path=options_path)
+
+    assert config.paper.max_open_positions == 60
+
+
 def test_load_config_accepts_temperature_forecast_spread_ha_override(tmp_path: Path):
     config_path = _write_config(tmp_path)
     options_path = tmp_path / "options.json"
@@ -483,6 +493,8 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert "shadow_exec_positions.json" in names
     assert "shadow_exec_fills.json" in names
     assert "shadow_exec_marks.json" in names
+    assert "shadow_exec_trade_events.json" in names
+    assert "shadow_exec_trade_cursors.json" in names
     assert "shadow_exec_missed.json" in names
     assert "same_day_risk_tracking.json" in names
     assert "manifest.json" in names
@@ -492,6 +504,7 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
         shadow_orders = json.loads(archive.read("shadow_order_intents.json").decode("utf-8"))
         shadow_exec_summary = json.loads(archive.read("shadow_exec_summary.json").decode("utf-8"))
         shadow_exec_orders = json.loads(archive.read("shadow_exec_orders.json").decode("utf-8"))
+        shadow_exec_trade_events = json.loads(archive.read("shadow_exec_trade_events.json").decode("utf-8"))
         same_day_risk = json.loads(archive.read("same_day_risk_tracking.json").decode("utf-8"))
         manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
     assert review_history == []
@@ -502,10 +515,13 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert manifest["shadow_order_count"] == 1
     assert manifest["shadow_exec_order_count"] == 1
     assert manifest["shadow_exec_position_count"] == 0
+    assert manifest["shadow_exec_trade_event_count"] == 0
     assert manifest["shadow_execution"]["order_count"] == 1
     assert manifest["money_scoreboard"]["scoreboard_label"] == "Executable Shadow P/L"
     assert manifest["money_scoreboard"]["paper_signal_label"] == "Paper Signal P/L"
     assert shadow_exec_summary["order_count"] == 1
+    assert shadow_exec_summary["trade_event_count"] == 0
+    assert shadow_exec_trade_events == []
     assert shadow_exec_orders[0]["status"] == "error"
     assert manifest["same_day_low_edge_block_count"] == 1
     assert same_day_risk["summary"]["same_day_low_edge_block_count"] == 1
@@ -517,6 +533,7 @@ def test_dashboard_exports_analysis_bundle(tmp_path: Path):
     assert "Shadow Exec Orders" in workbook.sheetnames
     assert "Shadow Exec Positions" in workbook.sheetnames
     assert "Shadow Exec Fills" in workbook.sheetnames
+    assert "Shadow Exec Trades" in workbook.sheetnames
     assert "Same-Day Risk" in workbook.sheetnames
     shadow_sheet = workbook["Shadow Orders"]
     assert shadow_sheet["B5"].value == "entry"
@@ -1699,6 +1716,7 @@ def test_dashboard_snapshot_exposes_recent_shadow_orders(tmp_path: Path):
     assert len(state["shadow_execution_orders"]) == 1
     assert state["shadow_execution_positions"] == []
     assert state["shadow_execution_fills"] == []
+    assert state["shadow_execution_trade_events"] == []
     assert state["shadow_execution_missed"]
     assert state["recent_shadow_orders"][0]["intent_kind"] == "entry"
     assert state["recent_shadow_orders"][0]["status"] == "mirrored"

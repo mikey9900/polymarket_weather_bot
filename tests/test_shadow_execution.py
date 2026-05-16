@@ -40,7 +40,13 @@ def _intent(**overrides) -> ShadowOrderIntent:
     return ShadowOrderIntent(**values)
 
 
-def _engine(tracker: WeatherTracker, *, config: ShadowExecutionRuntimeConfig | None = None, book_fetcher=None) -> ShadowExecutionEngine:
+def _engine(
+    tracker: WeatherTracker,
+    *,
+    config: ShadowExecutionRuntimeConfig | None = None,
+    book_fetcher=None,
+    trade_fetcher=None,
+) -> ShadowExecutionEngine:
     return ShadowExecutionEngine(
         tracker=tracker,
         config=config
@@ -53,6 +59,7 @@ def _engine(tracker: WeatherTracker, *, config: ShadowExecutionRuntimeConfig | N
             show_taker_exit_estimate=False,
         ),
         book_fetcher=book_fetcher or (lambda _token: None),
+        trade_fetcher=trade_fetcher,
     )
 
 
@@ -188,6 +195,121 @@ def test_market_channel_last_trade_price_message_fills_resting_order(tmp_path):
     assert len(fills) == 1
     assert fills[0]["shares"] == 25.0
     assert fills[0]["evidence"]["event_type"] == "last_trade_price"
+    assert fills[0]["liquidity_source"] == "market_websocket"
+
+
+def test_rest_trade_tape_fallback_fills_before_expiring_order(tmp_path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    trade_ts = int(datetime.fromisoformat("2026-05-07T12:05:00+00:00").timestamp())
+    engine = _engine(
+        tracker,
+        trade_fetcher=lambda condition_id, limit: [
+            {
+                "asset": "yes-token-shadow-exec",
+                "side": "SELL",
+                "price": 0.49,
+                "size": 200.0,
+                "timestamp": trade_ts,
+                "transactionHash": "0xtrade-fill",
+            }
+        ],
+    )
+    engine.sync_market_stream = lambda: None
+    intent = _intent(
+        payload={
+            "clob_token_ids": ["yes-token-shadow-exec", "no-token-shadow-exec"],
+            "shadow_fill_rehearsal": {"book_market": "0xcondition-shadow-exec"},
+        }
+    )
+    intent_id = tracker.record_shadow_order_intent(intent)
+    order_id = engine.mirror_intent(intent_id, intent)
+
+    summary = engine.run_cycle()
+
+    order = tracker.get_shadow_exec_order(order_id)
+    fills = tracker.get_recent_shadow_exec_fills(limit=None)
+    trade_events = tracker.get_recent_shadow_exec_trade_events(limit=None)
+    cursors = tracker.get_shadow_exec_trade_cursors()
+    assert summary["rest_trade_tape_events"] == 1
+    assert summary["rest_trade_tape_fills"] == 1
+    assert order["condition_id"] == "0xcondition-shadow-exec"
+    assert order["status"] == "filled"
+    assert fills[0]["liquidity_source"] == "rest_trade_tape"
+    assert fills[0]["evidence"]["transaction_hash"] == "0xtrade-fill"
+    assert len(trade_events) == 1
+    assert trade_events[0]["condition_id"] == "0xcondition-shadow-exec"
+    assert cursors[0]["last_trade_timestamp"] == trade_ts
+
+
+def test_rest_trade_tape_fallback_dedupes_replayed_trades(tmp_path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    trade_ts = int(datetime.fromisoformat("2026-05-07T12:05:00+00:00").timestamp())
+    trades = [
+        {
+            "asset": "yes-token-shadow-exec",
+            "side": "SELL",
+            "price": 0.49,
+            "size": 80.0,
+            "timestamp": trade_ts,
+            "transactionHash": "0xtrade-partial",
+        }
+    ]
+    engine = _engine(tracker, trade_fetcher=lambda condition_id, limit: trades)
+    engine.sync_market_stream = lambda: None
+    intent = _intent(
+        payload={
+            "clob_token_ids": ["yes-token-shadow-exec", "no-token-shadow-exec"],
+            "shadow_fill_rehearsal": {"book_market": "0xcondition-shadow-exec"},
+        }
+    )
+    order_id = engine.mirror_intent(tracker.record_shadow_order_intent(intent), intent)
+
+    first = engine.run_cycle()
+    second = engine.run_cycle()
+
+    order = tracker.get_shadow_exec_order(order_id)
+    fills = tracker.get_recent_shadow_exec_fills(limit=None)
+    trade_events = tracker.get_recent_shadow_exec_trade_events(limit=None)
+    assert first["rest_trade_tape_events"] == 1
+    assert first["rest_trade_tape_fills"] == 1
+    assert second["rest_trade_tape_events"] == 0
+    assert len(fills) == 1
+    assert len(trade_events) == 1
+    assert order["filled_shares"] == 40.0
+
+
+def test_rest_trade_tape_fallback_does_not_fill_after_order_expiry(tmp_path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    trade_ts = int(datetime.fromisoformat("2026-05-07T12:40:00+00:00").timestamp())
+    engine = _engine(
+        tracker,
+        trade_fetcher=lambda condition_id, limit: [
+            {
+                "asset": "yes-token-shadow-exec",
+                "side": "SELL",
+                "price": 0.49,
+                "size": 200.0,
+                "timestamp": trade_ts,
+                "transactionHash": "0xtrade-too-late",
+            }
+        ],
+    )
+    engine.sync_market_stream = lambda: None
+    intent = _intent(
+        payload={
+            "clob_token_ids": ["yes-token-shadow-exec", "no-token-shadow-exec"],
+            "shadow_fill_rehearsal": {"book_market": "0xcondition-shadow-exec"},
+        }
+    )
+    order_id = engine.mirror_intent(tracker.record_shadow_order_intent(intent), intent)
+
+    summary = engine.run_cycle()
+
+    order = tracker.get_shadow_exec_order(order_id)
+    assert summary["rest_trade_tape_events"] == 0
+    assert summary["rest_trade_tape_fills"] == 0
+    assert order["status"] == "expired"
+    assert tracker.get_recent_shadow_exec_fills(limit=None) == []
 
 
 def test_shadow_entry_order_expires_after_ttl_when_unfilled(tmp_path):

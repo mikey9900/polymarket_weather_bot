@@ -251,6 +251,8 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("paper", {})["stake_usd"] = float(payload["paper_stake_usd"])
     if "paper_initial_capital" in payload:
         mapped.setdefault("paper", {})["initial_capital"] = float(payload["paper_initial_capital"])
+    if "paper_max_open_positions" in payload:
+        mapped.setdefault("paper", {})["max_open_positions"] = int(payload["paper_max_open_positions"])
     if "paper_execution_mode" in payload:
         mapped.setdefault("paper", {})["execution_mode"] = str(payload["paper_execution_mode"])
     if "shadow_execution_enabled" in payload:
@@ -330,6 +332,8 @@ def _load_env_overrides() -> dict[str, Any]:
         )
     if os.getenv("WEATHER_PAPER_EXECUTION_MODE"):
         payload.setdefault("paper", {})["execution_mode"] = os.getenv("WEATHER_PAPER_EXECUTION_MODE")
+    if os.getenv("WEATHER_PAPER_MAX_OPEN_POSITIONS"):
+        payload.setdefault("paper", {})["max_open_positions"] = int(os.getenv("WEATHER_PAPER_MAX_OPEN_POSITIONS", "20"))
     if os.getenv("WEATHER_SHADOW_EXECUTION_ENABLED"):
         payload.setdefault("shadow_execution", {})["enabled"] = _is_truthy(os.getenv("WEATHER_SHADOW_EXECUTION_ENABLED"))
     if os.getenv("WEATHER_SHADOW_EXECUTION_ENTRY_TTL_SECONDS"):

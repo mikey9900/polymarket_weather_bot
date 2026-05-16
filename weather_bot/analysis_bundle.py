@@ -224,6 +224,8 @@ class AnalysisBundleExporter:
         shadow_exec_positions = self.tracker.get_shadow_exec_positions(limit=None)
         shadow_exec_fills = self.tracker.get_recent_shadow_exec_fills(limit=None)
         shadow_exec_marks = self.tracker.get_recent_shadow_exec_marks(limit=None)
+        shadow_exec_trade_events = self.tracker.get_recent_shadow_exec_trade_events(limit=None)
+        shadow_exec_trade_cursors = self.tracker.get_shadow_exec_trade_cursors()
         shadow_exec_missed = self.tracker.get_shadow_execution_missed_paper_trades(limit=None)
         same_day_risk_tracking = self.tracker.get_same_day_risk_tracking(limit=SAME_DAY_RISK_EXPORT_LIMIT)
         same_day_risk_summary = summarize_same_day_risk(same_day_risk_tracking, position_review_history)
@@ -294,6 +296,8 @@ class AnalysisBundleExporter:
                         ("shadow_exec_positions.json", shadow_exec_positions),
                         ("shadow_exec_fills.json", shadow_exec_fills),
                         ("shadow_exec_marks.json", shadow_exec_marks),
+                        ("shadow_exec_trade_events.json", shadow_exec_trade_events),
+                        ("shadow_exec_trade_cursors.json", shadow_exec_trade_cursors),
                         ("shadow_exec_missed.json", shadow_exec_missed),
                     ):
                         included_entries.append(entry_name)
@@ -340,6 +344,8 @@ class AnalysisBundleExporter:
                         "shadow_exec_position_count": len(shadow_exec_positions),
                         "shadow_exec_fill_count": len(shadow_exec_fills),
                         "shadow_exec_mark_count": len(shadow_exec_marks),
+                        "shadow_exec_trade_event_count": len(shadow_exec_trade_events),
+                        "shadow_exec_trade_cursor_count": len(shadow_exec_trade_cursors),
                         "shadow_exec_missed_count": len(shadow_exec_missed),
                         "shadow_execution_config": shadow_execution_config,
                         "same_day_risk": same_day_risk_summary,
@@ -406,6 +412,7 @@ class AnalysisBundleExporter:
                 "shadow_exec_order_count": len(shadow_exec_orders),
                 "shadow_exec_position_count": len(shadow_exec_positions),
                 "shadow_exec_fill_count": len(shadow_exec_fills),
+                "shadow_exec_trade_event_count": len(shadow_exec_trade_events),
                 "same_day_risk_decision_count": same_day_risk_summary["same_day_decision_count"],
                 "same_day_low_edge_block_count": same_day_risk_summary["same_day_low_edge_block_count"],
                 "same_day_price_collapse_exit_count": same_day_risk_summary["same_day_price_collapse_exit_count"],
@@ -652,6 +659,7 @@ def _compact_db_limits() -> dict[str, int]:
         "shadow_exec_positions": COMPACT_DB_SHADOW_ORDER_LIMIT,
         "shadow_exec_fills": COMPACT_DB_SHADOW_ORDER_LIMIT,
         "shadow_exec_marks": COMPACT_DB_SHADOW_ORDER_LIMIT,
+        "shadow_exec_trade_events": COMPACT_DB_SHADOW_ORDER_LIMIT,
         "operator_events": COMPACT_DB_OPERATOR_EVENT_LIMIT,
         "resolution_events": COMPACT_DB_RESOLUTION_EVENT_LIMIT,
     }

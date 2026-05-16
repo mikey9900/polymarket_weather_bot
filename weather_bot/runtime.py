@@ -790,6 +790,10 @@ class WeatherRuntime:
                     last_shadow_execution_expired=int(summary.get("expired") or 0),
                     last_shadow_execution_exit_retries=int(summary.get("exit_retries_queued") or 0),
                     last_shadow_execution_marked_positions=int(summary.get("marked_positions") or 0),
+                    last_shadow_execution_rest_trade_tape_conditions=int(summary.get("rest_trade_tape_conditions") or 0),
+                    last_shadow_execution_rest_trade_tape_events=int(summary.get("rest_trade_tape_events") or 0),
+                    last_shadow_execution_rest_trade_tape_fills=int(summary.get("rest_trade_tape_fills") or 0),
+                    last_shadow_execution_rest_trade_tape_errors=int(summary.get("rest_trade_tape_errors") or 0),
                 )
             except Exception as exc:
                 logger.warning("shadow execution cycle failed: %s", exc)

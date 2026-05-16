@@ -80,6 +80,7 @@ def build_analysis_report(
     shadow_exec_orders = tracker.get_recent_shadow_exec_orders(limit=5000)
     shadow_exec_positions = tracker.get_shadow_exec_positions(limit=5000)
     shadow_exec_fills = tracker.get_recent_shadow_exec_fills(limit=5000)
+    shadow_exec_trade_events = tracker.get_recent_shadow_exec_trade_events(limit=5000)
     same_day_risk_tracking = tracker.get_same_day_risk_tracking(limit=5000)
     same_day_risk_summary = summarize_same_day_risk(same_day_risk_tracking, review_history)
 
@@ -106,6 +107,7 @@ def build_analysis_report(
     _build_shadow_exec_orders_sheet(workbook.create_sheet("Shadow Exec Orders"), shadow_exec_orders)
     _build_shadow_exec_positions_sheet(workbook.create_sheet("Shadow Exec Positions"), shadow_exec_positions)
     _build_shadow_exec_fills_sheet(workbook.create_sheet("Shadow Exec Fills"), shadow_exec_fills)
+    _build_shadow_exec_trade_events_sheet(workbook.create_sheet("Shadow Exec Trades"), shadow_exec_trade_events)
     _build_same_day_risk_sheet(workbook.create_sheet("Same-Day Risk"), same_day_risk_tracking, same_day_risk_summary)
     _build_signals_sheet(workbook.create_sheet("Recent Signals"), recent_signals)
     _build_resolutions_sheet(workbook.create_sheet("Resolutions"), recent_resolutions)
@@ -125,6 +127,7 @@ def build_analysis_report(
         "shadow_exec_order_count": len(shadow_exec_orders),
         "shadow_exec_position_count": len(shadow_exec_positions),
         "shadow_exec_fill_count": len(shadow_exec_fills),
+        "shadow_exec_trade_event_count": len(shadow_exec_trade_events),
         "same_day_risk_decision_count": len(same_day_risk_tracking),
         "same_day_low_edge_block_count": same_day_risk_summary["same_day_low_edge_block_count"],
         "same_day_price_collapse_exit_count": same_day_risk_summary["same_day_price_collapse_exit_count"],
@@ -524,6 +527,10 @@ def _build_shadow_exec_summary_sheet(ws, summary: dict[str, Any]) -> None:
         ("Entry Fill Rate", (summary.get("entry_fill_rate") or 0) / 100.0, "percent"),
         ("Entry Fills", summary.get("realistic_entry_fill_count"), "int"),
         ("Unfilled Entries", summary.get("unfilled_entry_order_count"), "int"),
+        ("Trade Events", summary.get("trade_event_count"), "int"),
+        ("REST Tape Fills", summary.get("rest_trade_tape_fill_count"), "int"),
+        ("WS Fills", summary.get("market_websocket_fill_count"), "int"),
+        ("Tape Rescued Orders", summary.get("trade_tape_rescued_order_count"), "int"),
         ("Orders", summary.get("order_count"), "int"),
         ("Positions", summary.get("position_count"), "int"),
         ("Fills", summary.get("fill_count"), "int"),
@@ -533,7 +540,7 @@ def _build_shadow_exec_summary_sheet(ws, summary: dict[str, Any]) -> None:
         ("Generated", summary.get("generated_at"), "datetime"),
     ]
     _write_metric_block(ws, start_col=1, start_row=4, title="Shadow Execution", items=items)
-    for row in range(6, 24):
+    for row in range(6, 28):
         _pnl_style(ws.cell(row=row, column=2))
 
 
@@ -561,6 +568,7 @@ def _build_shadow_exec_orders_sheet(ws, rows: list[dict[str, Any]]) -> None:
         ("Taker $", "taker_estimate_notional_usd", "currency_plain"),
         ("Taker P/L", "taker_estimate_pnl", "currency_plain"),
         ("Token ID", "clob_token_id", "text"),
+        ("Condition ID", "condition_id", "text"),
         ("Queue Frac", "queue_fill_fraction", "percent"),
         ("Expires", "expires_at", "datetime"),
         ("Paper Pos", "paper_position_id", "int"),
@@ -621,6 +629,26 @@ def _build_shadow_exec_fills_sheet(ws, rows: list[dict[str, Any]]) -> None:
         ("Paper Pos", "paper_position_id", "int"),
         ("Token ID", "clob_token_id", "text"),
         ("Evidence", "evidence_json", "text"),
+    ]
+    _write_table(ws, start_row=4, columns=columns, rows=shaped)
+
+
+def _build_shadow_exec_trade_events_sheet(ws, rows: list[dict[str, Any]]) -> None:
+    _sheet_title(ws, "Shadow Exec Trades", subtitle=f"{len(rows)} rows")
+    shaped = [{**row, "raw_json": json.dumps(row.get("raw") or {}, sort_keys=True)} for row in rows]
+    columns = [
+        ("Observed", "observed_at", "datetime"),
+        ("Processed", "processed_at", "datetime"),
+        ("Source", "source", "text"),
+        ("Side", "side", "text"),
+        ("Price %", "price", "percent"),
+        ("Size", "size", "number"),
+        ("Trade TS", "trade_timestamp", "int"),
+        ("Condition ID", "condition_id", "text"),
+        ("Token ID", "clob_token_id", "text"),
+        ("Tx Hash", "transaction_hash", "text"),
+        ("Event UID", "event_uid", "text"),
+        ("Raw", "raw_json", "text"),
     ]
     _write_table(ws, start_row=4, columns=columns, rows=shaped)
 

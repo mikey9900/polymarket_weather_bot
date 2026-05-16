@@ -14,13 +14,17 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+import requests
+
 from ..models import iso_now
 from .models import ShadowOrderIntent
 from .shadow_fill import fetch_clob_order_book
 
 
 BookFetcher = Callable[[str], dict[str, Any] | None]
+TradeFetcher = Callable[[str, int], list[dict[str, Any]]]
 MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+POLYMARKET_DATA_API_TRADES_URL = "https://data-api.polymarket.com/trades"
 logger = logging.getLogger(__name__)
 
 
@@ -70,10 +74,12 @@ class ShadowExecutionEngine:
         tracker,
         config: ShadowExecutionRuntimeConfig | Any,
         book_fetcher: BookFetcher = fetch_clob_order_book,
+        trade_fetcher: TradeFetcher | None = None,
     ):
         self.tracker = tracker
         self.config = config if isinstance(config, ShadowExecutionRuntimeConfig) else ShadowExecutionRuntimeConfig.from_settings(config)
         self.book_fetcher = book_fetcher
+        self.trade_fetcher = trade_fetcher or fetch_polymarket_market_trades
         self._ws_lock = threading.RLock()
         self._ws_stop = threading.Event()
         self._ws_thread: threading.Thread | None = None
@@ -109,9 +115,10 @@ class ShadowExecutionEngine:
     def run_cycle(self, *, price_fetcher: Callable[[str], float | None] | None = None) -> dict[str, Any]:
         if not self.enabled:
             return {"enabled": False, "processed_orders": 0, "fills": 0, "expired": 0, "exit_retries_queued": 0, "marked_positions": 0}
-        expired = self.tracker.expire_shadow_exec_orders()
         exit_retries = self.queue_exit_retries()
         self.sync_market_stream()
+        trade_tape = self.apply_trade_tape_fallback()
+        expired = self.tracker.expire_shadow_exec_orders()
         processed = 0
         fills = 0
         for order in self.tracker.get_active_shadow_exec_orders(limit=500):
@@ -128,6 +135,86 @@ class ShadowExecutionEngine:
             "expired": expired,
             "exit_retries_queued": exit_retries,
             "marked_positions": marked,
+            "rest_trade_tape_conditions": trade_tape.get("conditions", 0),
+            "rest_trade_tape_events": trade_tape.get("events", 0),
+            "rest_trade_tape_fills": trade_tape.get("fills", 0),
+            "rest_trade_tape_errors": trade_tape.get("errors", 0),
+        }
+
+    def apply_trade_tape_fallback(self, *, limit_per_condition: int = 1000) -> dict[str, int]:
+        active_orders = [
+            order
+            for order in self.tracker.get_active_shadow_exec_orders(limit=500)
+            if str(order.get("condition_id") or "").strip() and str(order.get("clob_token_id") or "").strip()
+        ]
+        if not active_orders:
+            return {"conditions": 0, "events": 0, "fills": 0, "errors": 0}
+        by_condition: dict[str, list[dict[str, Any]]] = {}
+        for order in active_orders:
+            by_condition.setdefault(str(order.get("condition_id") or "").strip(), []).append(order)
+        observed_at = iso_now()
+        event_count = 0
+        fill_count = 0
+        error_count = 0
+        for condition_id, orders in by_condition.items():
+            active_tokens = {str(order.get("clob_token_id") or "").strip() for order in orders}
+            created_times = [value for value in (_parse_iso_datetime(order.get("created_at")) for order in orders) if value is not None]
+            expiry_times = [value for value in (_parse_iso_datetime(order.get("expires_at")) for order in orders) if value is not None]
+            earliest = min(created_times) if created_times else None
+            latest_expiry = max(expiry_times) if expiry_times else None
+            try:
+                trades = self.trade_fetcher(condition_id, int(limit_per_condition))
+            except Exception as exc:
+                error_count += 1
+                logger.debug("shadow trade-tape fallback failed for %s: %s", condition_id, exc)
+                continue
+            for trade in sorted(_normalize_trade_tape_events(trades), key=lambda item: (item["trade_timestamp"], item["event_uid"])):
+                token = str(trade.get("clob_token_id") or "").strip()
+                if token not in active_tokens:
+                    continue
+                trade_dt = datetime.fromtimestamp(int(trade["trade_timestamp"]), tz=timezone.utc)
+                if earliest is not None and trade_dt < earliest:
+                    continue
+                if latest_expiry is not None and trade_dt > latest_expiry:
+                    continue
+                stored = self.tracker.record_shadow_exec_trade_event(
+                    condition_id=condition_id,
+                    clob_token_id=token,
+                    side=str(trade["side"]),
+                    price=float(trade["price"]),
+                    size=float(trade["size"]),
+                    trade_timestamp=int(trade["trade_timestamp"]),
+                    transaction_hash=str(trade.get("transaction_hash") or ""),
+                    source="rest_trade_tape",
+                    raw_event=trade.get("raw") if isinstance(trade.get("raw"), dict) else trade,
+                    observed_at=observed_at,
+                )
+                if stored is None or not stored.get("inserted"):
+                    continue
+                event_count += 1
+                traded_at = trade_dt.isoformat()
+                fills = self.apply_trade_event(
+                    clob_token_id=token,
+                    side=str(trade["side"]),
+                    price=float(trade["price"]),
+                    size=float(trade["size"]),
+                    traded_at=traded_at,
+                    liquidity_source="rest_trade_tape",
+                    evidence={
+                        "event_uid": stored.get("event_uid"),
+                        "condition_id": condition_id,
+                        "transaction_hash": stored.get("transaction_hash"),
+                        "trade_timestamp": int(trade["trade_timestamp"]),
+                        "source": "polymarket_data_api",
+                    },
+                )
+                fill_count += len(fills)
+                self.tracker.mark_shadow_exec_trade_event_processed(str(stored.get("event_uid") or ""), processed_at=iso_now())
+        return {
+            "conditions": len(by_condition),
+            "events": event_count,
+            "fills": fill_count,
+            "errors": error_count,
         }
 
     def queue_exit_retries(self, *, limit: int = 500) -> int:
@@ -205,6 +292,7 @@ class ShadowExecutionEngine:
         price: float,
         size: float,
         traded_at: str | None = None,
+        liquidity_source: str = "trade_through",
         evidence: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Credit resting fills from a later public trade event.
@@ -224,10 +312,17 @@ class ShadowExecutionEngine:
             return []
         fills: list[dict[str, Any]] = []
         traded_at = str(traded_at or iso_now())
+        traded_dt = _parse_iso_datetime(traded_at)
         for order in self.tracker.get_active_shadow_exec_orders(limit=500):
             if remaining_trade_size <= 0:
                 break
             if str(order.get("clob_token_id") or "") != token:
+                continue
+            created_dt = _parse_iso_datetime(order.get("created_at"))
+            expires_dt = _parse_iso_datetime(order.get("expires_at"))
+            if traded_dt is not None and created_dt is not None and traded_dt < created_dt:
+                continue
+            if traded_dt is not None and expires_dt is not None and traded_dt > expires_dt:
                 continue
             order = self._apply_order_repricing(order, now=traded_at)
             if not _trade_qualifies_order(order, trade_side=trade_side, trade_price=trade_price):
@@ -237,7 +332,7 @@ class ShadowExecutionEngine:
                 int(order["id"]),
                 price=trade_price,
                 shares=fill_shares,
-                liquidity_source="trade_through",
+                liquidity_source=str(liquidity_source or "trade_through"),
                 evidence={
                     **(evidence or {}),
                     "trade_side": trade_side,
@@ -272,6 +367,7 @@ class ShadowExecutionEngine:
             price=float(message.get("price") or 0.0),
             size=float(message.get("size") or 0.0),
             traded_at=traded_at,
+            liquidity_source="market_websocket",
             evidence={
                 "event_type": "last_trade_price",
                 "market": message.get("market"),
@@ -565,6 +661,65 @@ def _trade_qualifies_order(order: dict[str, Any], *, trade_side: str, trade_pric
     return False
 
 
+def fetch_polymarket_market_trades(condition_id: str, limit: int = 1000) -> list[dict[str, Any]]:
+    condition_id = str(condition_id or "").strip()
+    if not condition_id:
+        return []
+    response = requests.get(
+        POLYMARKET_DATA_API_TRADES_URL,
+        params={
+            "market": condition_id,
+            "limit": max(1, min(10000, int(limit or 1000))),
+            "offset": 0,
+            "takerOnly": "true",
+        },
+        timeout=5,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, list) else []
+
+
+def _normalize_trade_tape_events(trades: Any) -> list[dict[str, Any]]:
+    if not isinstance(trades, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        token = str(trade.get("asset") or trade.get("asset_id") or trade.get("clob_token_id") or "").strip()
+        side = str(trade.get("side") or "").strip().upper()
+        price = _bounded_price(trade.get("price"))
+        size = _as_float(trade.get("size"))
+        timestamp = _trade_timestamp_seconds(trade.get("timestamp") or trade.get("trade_timestamp"))
+        if not token or side not in {"BUY", "SELL"} or price is None or size is None or size <= 0 or timestamp <= 0:
+            continue
+        tx_hash = str(trade.get("transactionHash") or trade.get("transaction_hash") or "").strip()
+        event_uid = "|".join(
+            [
+                token,
+                side,
+                f"{price:.6f}",
+                f"{float(size):.6f}",
+                str(timestamp),
+                tx_hash,
+            ]
+        )
+        normalized.append(
+            {
+                "event_uid": event_uid,
+                "clob_token_id": token,
+                "side": side,
+                "price": price,
+                "size": round(float(size), 6),
+                "trade_timestamp": timestamp,
+                "transaction_hash": tx_hash,
+                "raw": trade,
+            }
+        )
+    return normalized
+
+
 def _original_order_target_price(order: dict[str, Any]) -> float | None:
     payload = order.get("payload") if isinstance(order.get("payload"), dict) else {}
     pricing = payload.get("shadow_execution_repricing") if isinstance(payload.get("shadow_execution_repricing"), dict) else {}
@@ -702,6 +857,15 @@ def _timestamp_ms_to_iso(value: Any) -> str | None:
     from datetime import datetime, timezone
 
     return datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc).isoformat()
+
+
+def _trade_timestamp_seconds(value: Any) -> int:
+    raw = _as_float(value)
+    if raw is None or raw <= 0:
+        return 0
+    if raw > 10_000_000_000:
+        raw = raw / 1000.0
+    return int(raw)
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:

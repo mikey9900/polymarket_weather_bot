@@ -128,6 +128,7 @@ class DashboardStateService:
             "shadow_execution_orders": self.tracker.get_recent_shadow_exec_orders(limit=50),
             "shadow_execution_positions": self.tracker.get_shadow_exec_positions(limit=50),
             "shadow_execution_fills": self.tracker.get_recent_shadow_exec_fills(limit=50),
+            "shadow_execution_trade_events": self.tracker.get_recent_shadow_exec_trade_events(limit=50),
             "shadow_execution_missed": self.tracker.get_shadow_execution_missed_paper_trades(limit=50),
             "signal_summary_24h": self.tracker.get_signal_summary(),
             "exports": {
@@ -216,6 +217,7 @@ class DashboardStateService:
                 "shadow_execution_orders": [],
                 "shadow_execution_positions": [],
                 "shadow_execution_fills": [],
+                "shadow_execution_trade_events": [],
                 "shadow_execution_missed": [],
                 "signal_summary_24h": {},
                 "exports": {
