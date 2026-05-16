@@ -361,16 +361,38 @@ class ShadowExecutionEngine:
         if str(message.get("event_type") or "") != "last_trade_price":
             return []
         traded_at = _timestamp_ms_to_iso(message.get("timestamp")) or iso_now()
+        token = str(message.get("asset_id") or "")
+        side = str(message.get("side") or "")
+        price = float(message.get("price") or 0.0)
+        size = float(message.get("size") or 0.0)
+        condition_id = str(message.get("market") or "")
+        stored = None
+        if condition_id and token:
+            stored = self.tracker.record_shadow_exec_trade_event(
+                condition_id=condition_id,
+                clob_token_id=token,
+                side=side,
+                price=price,
+                size=size,
+                trade_timestamp=_trade_timestamp_seconds(message.get("timestamp")),
+                transaction_hash=str(message.get("transaction_hash") or message.get("transactionHash") or ""),
+                source="market_websocket",
+                raw_event=message,
+                observed_at=iso_now(),
+            )
+            if stored is not None and not stored.get("inserted"):
+                return []
         return self.apply_trade_event(
-            clob_token_id=str(message.get("asset_id") or ""),
-            side=str(message.get("side") or ""),
-            price=float(message.get("price") or 0.0),
-            size=float(message.get("size") or 0.0),
+            clob_token_id=token,
+            side=side,
+            price=price,
+            size=size,
             traded_at=traded_at,
             liquidity_source="market_websocket",
             evidence={
+                "event_uid": (stored or {}).get("event_uid"),
                 "event_type": "last_trade_price",
-                "market": message.get("market"),
+                "market": condition_id,
                 "timestamp": message.get("timestamp"),
                 "fee_rate_bps": message.get("fee_rate_bps"),
             },

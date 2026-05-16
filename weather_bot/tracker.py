@@ -282,7 +282,6 @@ class WeatherTracker:
             CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_status ON shadow_exec_orders(status);
             CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_created_at ON shadow_exec_orders(created_at);
             CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_token ON shadow_exec_orders(clob_token_id);
-            CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_condition ON shadow_exec_orders(condition_id);
             CREATE INDEX IF NOT EXISTS idx_shadow_exec_orders_paper_position ON shadow_exec_orders(paper_position_id);
 
             CREATE TABLE IF NOT EXISTS shadow_exec_fills (
@@ -1221,6 +1220,8 @@ class WeatherTracker:
         if not condition_id or not clob_token_id or side not in {"BUY", "SELL"} or price <= 0 or size <= 0 or trade_timestamp <= 0:
             return None
         observed_at = str(observed_at or iso_now())
+        transaction_hash = str(transaction_hash or "").strip()
+        rounded_size = round(size, 6)
         event_uid = _shadow_exec_trade_event_uid(
             condition_id=condition_id,
             clob_token_id=clob_token_id,
@@ -1231,6 +1232,39 @@ class WeatherTracker:
             transaction_hash=transaction_hash,
         )
         with self._lock:
+            duplicate_row = self._find_shadow_exec_trade_duplicate_locked(
+                condition_id=condition_id,
+                clob_token_id=clob_token_id,
+                side=side,
+                price=price,
+                size=rounded_size,
+                trade_timestamp=trade_timestamp,
+                transaction_hash=transaction_hash,
+            )
+            if duplicate_row is not None:
+                duplicate_uid = str(duplicate_row["event_uid"] or "")
+                if transaction_hash and not str(duplicate_row["transaction_hash"] or "").strip():
+                    self.conn.execute(
+                        "UPDATE shadow_exec_trade_events SET transaction_hash = ? WHERE event_uid = ?",
+                        (transaction_hash, duplicate_uid),
+                    )
+                self._update_shadow_exec_trade_cursor_locked(
+                    condition_id,
+                    trade_timestamp=trade_timestamp,
+                    event_uid=duplicate_uid,
+                    source=str(source or "rest_trade_tape"),
+                    updated_at=observed_at,
+                )
+                self.conn.commit()
+                row = self.conn.execute(
+                    "SELECT * FROM shadow_exec_trade_events WHERE event_uid = ?",
+                    (duplicate_uid,),
+                ).fetchone()
+                if row is None:
+                    return None
+                payload = _serialize_shadow_exec_trade_event(row)
+                payload["inserted"] = False
+                return payload
             cursor = self.conn.execute(
                 """
                 INSERT OR IGNORE INTO shadow_exec_trade_events (
@@ -1246,9 +1280,9 @@ class WeatherTracker:
                     clob_token_id,
                     side,
                     price,
-                    round(size, 6),
+                    rounded_size,
                     trade_timestamp,
-                    str(transaction_hash or ""),
+                    transaction_hash,
                     str(source or "rest_trade_tape"),
                     json.dumps(raw_event or {}, sort_keys=True),
                     observed_at,
@@ -1273,6 +1307,39 @@ class WeatherTracker:
         payload = _serialize_shadow_exec_trade_event(row)
         payload["inserted"] = bool(inserted)
         return payload
+
+    def _find_shadow_exec_trade_duplicate_locked(
+        self,
+        *,
+        condition_id: str,
+        clob_token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        trade_timestamp: int,
+        transaction_hash: str,
+    ) -> sqlite3.Row | None:
+        params: list[Any] = [condition_id, clob_token_id, side, price, size, trade_timestamp]
+        where_tx = ""
+        if transaction_hash:
+            where_tx = "AND transaction_hash IN ('', ?)"
+            params.append(transaction_hash)
+        return self.conn.execute(
+            f"""
+            SELECT *
+            FROM shadow_exec_trade_events
+            WHERE condition_id = ?
+              AND clob_token_id = ?
+              AND side = ?
+              AND price = ?
+              AND size = ?
+              AND trade_timestamp = ?
+              {where_tx}
+            ORDER BY CASE WHEN transaction_hash = ? THEN 0 WHEN transaction_hash = '' THEN 1 ELSE 2 END, id
+            LIMIT 1
+            """,
+            (*params, transaction_hash),
+        ).fetchone()
 
     def mark_shadow_exec_trade_event_processed(self, event_uid: str, *, processed_at: str | None = None) -> None:
         processed_at = str(processed_at or iso_now())
@@ -4378,6 +4445,16 @@ def _condition_id_from_shadow_payload(payload: dict[str, Any]) -> str:
     rehearsal = payload.get("shadow_fill_rehearsal") if isinstance(payload.get("shadow_fill_rehearsal"), dict) else {}
     for key in ("book_market", "market", "condition_id", "conditionId"):
         value = str(rehearsal.get(key) or "").strip()
+        if value:
+            return value
+    entry_shadow = payload.get("entry_shadow_order") if isinstance(payload.get("entry_shadow_order"), dict) else {}
+    if entry_shadow:
+        value = _condition_id_from_shadow_payload(entry_shadow)
+        if value:
+            return value
+    nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    if nested:
+        value = _condition_id_from_shadow_payload(nested)
         if value:
             return value
     return ""

@@ -43,6 +43,23 @@ RAIN_KEYWORDS = [
     "precipitation recorded",
 ]
 
+MONTH_NUMBERS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+
+MONTH_PATTERN = "|".join(MONTH_NUMBERS)
+
 
 def parse_rain_title(title: str):
     """
@@ -85,21 +102,20 @@ def parse_rain_title(title: str):
     now = datetime.now()
 
     if "tomorrow" in t:
-        # Clear: one day from now
         date = now + timedelta(days=1)
 
-    elif re.search(
-        r"on\s+(january|february|march|april|may|june|july|"
-        r"august|september|october|november|december)",
-        t
+    elif date_match := re.search(
+        rf"\bon\s+({MONTH_PATTERN})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b",
+        t,
     ):
-        # Month name found — use today as a safe placeholder
-        # TODO: parse the actual day number from the title
-        # e.g. "April 14" → datetime(2026, 4, 14)
-        date = now
+        month = MONTH_NUMBERS[date_match.group(1)]
+        day = int(date_match.group(2))
+        try:
+            date = now.replace(month=month, day=day)
+        except ValueError:
+            return None
 
     else:
-        # Can't determine the date — return None rather than guess
         return None
 
     # ----------------------------------------------------------
@@ -111,14 +127,16 @@ def parse_rain_title(title: str):
     #
     # We use a regex to grab whatever follows "in" or "at".
     # ----------------------------------------------------------
-    location_match = re.search(r"(in|at)\s+([a-z\s]+)", t)
+    location_match = re.search(
+        rf"\b(?:in|at)\s+(.+?)(?:\s+on\s+(?:{MONTH_PATTERN})\s+\d{{1,2}}(?:st|nd|rd|th)?\b|\s+tomorrow\b|\?|$)",
+        t,
+    )
     if not location_match:
-        # No location found — can't use this market
         return None
 
-    # group(2) captures everything after "in " or "at "
-    # .strip() removes any trailing whitespace
-    location = location_match.group(2).strip()
+    location = location_match.group(1).strip(" ?")
+    if not location:
+        return None
 
     # ----------------------------------------------------------
     # STEP 4: Return structured result

@@ -125,8 +125,8 @@ Files:
 
 Current add-on versions in this handoff:
 
-- `weather-bot`: `3.3.21`
-- `weather-codex`: `0.3.20`
+- `weather-bot`: `3.3.22`
+- `weather-codex`: `0.3.21`
 
 ## Important Recent Milestones From This Chat
 
@@ -241,4 +241,3 @@ Suggested next steps after pulling:
 4. Let the bot collect more realistic shadow execution data.
 5. Review the next bundle before making strategy changes.
 6. Only then decide whether to add cluster caps, dispersion gates, or future-date YES-tail filters.
-

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from weather_bot.execution.models import ShadowOrderIntent
@@ -114,6 +115,35 @@ def _paper_position_id(tracker: WeatherTracker) -> int:
         decision_final_score=0.84,
     )
     return int(position.id)
+
+
+def test_tracker_migrates_shadow_exec_order_condition_id_before_index(tmp_path):
+    db_path = tmp_path / "weatherbot.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE shadow_exec_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                clob_token_id TEXT,
+                paper_position_id INTEGER
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    tracker = WeatherTracker(db_path)
+    try:
+        columns = {str(row["name"]) for row in tracker.conn.execute("PRAGMA table_info(shadow_exec_orders)").fetchall()}
+        indexes = {str(row["name"]) for row in tracker.conn.execute("PRAGMA index_list(shadow_exec_orders)").fetchall()}
+        assert "condition_id" in columns
+        assert "idx_shadow_exec_orders_condition" in indexes
+    finally:
+        tracker.close()
 
 
 def test_immediate_rehearsal_full_fill_opens_realistic_shadow_position(tmp_path):
@@ -278,6 +308,54 @@ def test_rest_trade_tape_fallback_dedupes_replayed_trades(tmp_path):
     assert order["filled_shares"] == 40.0
 
 
+def test_rest_trade_tape_fallback_dedupes_websocket_trade(tmp_path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    trade_dt = datetime.fromisoformat("2026-05-07T12:05:00+00:00")
+    trade_ts = int(trade_dt.timestamp())
+    trades = [
+        {
+            "asset": "yes-token-shadow-exec",
+            "side": "SELL",
+            "price": 0.49,
+            "size": 80.0,
+            "timestamp": trade_ts,
+            "transactionHash": "0xrest-same-trade",
+        }
+    ]
+    engine = _engine(tracker, trade_fetcher=lambda condition_id, limit: trades)
+    engine.sync_market_stream = lambda: None
+    intent = _intent(
+        payload={
+            "clob_token_ids": ["yes-token-shadow-exec", "no-token-shadow-exec"],
+            "shadow_fill_rehearsal": {"book_market": "0xcondition-shadow-exec"},
+        }
+    )
+    order_id = engine.mirror_intent(tracker.record_shadow_order_intent(intent), intent)
+
+    ws_fills = engine.apply_market_channel_message(
+        {
+            "event_type": "last_trade_price",
+            "asset_id": "yes-token-shadow-exec",
+            "side": "SELL",
+            "price": "0.49",
+            "size": "80",
+            "timestamp": str(trade_ts * 1000),
+            "market": "0xcondition-shadow-exec",
+        }
+    )
+    summary = engine.run_cycle()
+
+    order = tracker.get_shadow_exec_order(order_id)
+    fills = tracker.get_recent_shadow_exec_fills(limit=None)
+    trade_events = tracker.get_recent_shadow_exec_trade_events(limit=None)
+    assert len(ws_fills) == 1
+    assert summary["rest_trade_tape_events"] == 0
+    assert summary["rest_trade_tape_fills"] == 0
+    assert len(fills) == 1
+    assert len(trade_events) == 1
+    assert order["filled_shares"] == 40.0
+
+
 def test_rest_trade_tape_fallback_does_not_fill_after_order_expiry(tmp_path):
     tracker = WeatherTracker(tmp_path / "weatherbot.db")
     trade_ts = int(datetime.fromisoformat("2026-05-07T12:40:00+00:00").timestamp())
@@ -310,6 +388,69 @@ def test_rest_trade_tape_fallback_does_not_fill_after_order_expiry(tmp_path):
     assert summary["rest_trade_tape_fills"] == 0
     assert order["status"] == "expired"
     assert tracker.get_recent_shadow_exec_fills(limit=None) == []
+
+
+def test_rest_trade_tape_fallback_fills_exit_order_from_entry_condition(tmp_path):
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    trade_ts = int(datetime.fromisoformat("2026-05-07T12:11:00+00:00").timestamp())
+    engine = _engine(
+        tracker,
+        trade_fetcher=lambda condition_id, limit: [
+            {
+                "asset": "yes-token-shadow-exec",
+                "side": "BUY",
+                "price": 0.56,
+                "size": 300.0,
+                "timestamp": trade_ts,
+                "transactionHash": "0xtrade-exit-fill",
+            }
+        ],
+    )
+    engine.sync_market_stream = lambda: None
+    position_id = _paper_position_id(tracker)
+    entry = _intent(
+        position_id=position_id,
+        simulated_fill_status="full_fill",
+        simulated_fill_shares=100.0,
+        simulated_avg_fill_price=0.40,
+        execution_checked_at="2026-05-07T12:00:01+00:00",
+        payload={
+            "clob_token_ids": ["yes-token-shadow-exec", "no-token-shadow-exec"],
+            "shadow_fill_rehearsal": {"book_market": "0xcondition-shadow-exec"},
+        },
+    )
+    engine.mirror_intent(tracker.record_shadow_order_intent(entry), entry)
+    exit_intent = _intent(
+        position_id=position_id,
+        intent_kind="exit",
+        order_action="SELL",
+        order_intent="SELL_LONG",
+        target_price=0.55,
+        reference_price=0.55,
+        shares=100.0,
+        simulated_fill_status="no_fill",
+        created_at="2026-05-07T12:10:00+00:00",
+        payload={
+            "entry_shadow_order": {
+                "clob_token_ids": ["yes-token-shadow-exec", "no-token-shadow-exec"],
+                "shadow_fill_rehearsal": {"book_market": "0xcondition-shadow-exec"},
+            }
+        },
+    )
+    exit_order_id = engine.mirror_intent(tracker.record_shadow_order_intent(exit_intent), exit_intent)
+
+    summary = engine.run_cycle()
+
+    exit_order = tracker.get_shadow_exec_order(exit_order_id)
+    positions = tracker.get_shadow_exec_positions(limit=None)
+    fills = tracker.get_recent_shadow_exec_fills(limit=None)
+    assert summary["rest_trade_tape_events"] == 1
+    assert summary["rest_trade_tape_fills"] == 1
+    assert exit_order["condition_id"] == "0xcondition-shadow-exec"
+    assert exit_order["status"] == "filled"
+    assert positions[0]["status"] == "closed"
+    assert positions[0]["realized_pnl"] == 16.0
+    assert fills[0]["liquidity_source"] == "rest_trade_tape"
 
 
 def test_shadow_entry_order_expires_after_ttl_when_unfilled(tmp_path):
