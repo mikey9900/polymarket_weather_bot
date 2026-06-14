@@ -426,111 +426,153 @@ class WeatherTracker:
         target = Path(self.backup_database(destination))
         conn = sqlite3.connect(str(target))
         try:
-            conn.execute("PRAGMA foreign_keys=OFF")
-            conn.execute(
-                """
-                DELETE FROM paper_position_reviews
-                WHERE id NOT IN (
-                    SELECT id FROM paper_position_reviews
-                    ORDER BY reviewed_at DESC, id DESC
-                    LIMIT ?
-                )
-                """,
-                (max(0, int(review_limit)),),
+            self._compact_history_locked(
+                conn,
+                signal_limit=signal_limit,
+                decision_limit=decision_limit,
+                review_limit=review_limit,
+                shadow_order_limit=shadow_order_limit,
+                operator_event_limit=operator_event_limit,
+                resolution_event_limit=resolution_event_limit,
             )
+        finally:
+            conn.close()
+        return str(target)
+
+    def compact_database(
+        self,
+        *,
+        signal_limit: int = 20000,
+        decision_limit: int = 20000,
+        review_limit: int = 5000,
+        shadow_order_limit: int = 5000,
+        operator_event_limit: int = 1000,
+        resolution_event_limit: int = 1000,
+    ) -> None:
+        with self._lock:
+            self._compact_history_locked(
+                self.conn,
+                signal_limit=signal_limit,
+                decision_limit=decision_limit,
+                review_limit=review_limit,
+                shadow_order_limit=shadow_order_limit,
+                operator_event_limit=operator_event_limit,
+                resolution_event_limit=resolution_event_limit,
+            )
+
+    def _compact_history_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        signal_limit: int,
+        decision_limit: int,
+        review_limit: int,
+        shadow_order_limit: int,
+        operator_event_limit: int,
+        resolution_event_limit: int,
+    ) -> None:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute(
+            """
+            DELETE FROM paper_position_reviews
+            WHERE id NOT IN (
+                SELECT id FROM paper_position_reviews
+                ORDER BY reviewed_at DESC, id DESC
+                LIMIT ?
+            )
+            """,
+            (max(0, int(review_limit)),),
+        )
+        conn.execute(
+            """
+            DELETE FROM shadow_order_intents
+            WHERE id NOT IN (
+                SELECT id FROM shadow_order_intents
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            )
+            """,
+            (max(0, int(shadow_order_limit)),),
+        )
+        for table_name, order_column in (
+            ("shadow_exec_trade_events", "observed_at"),
+            ("shadow_exec_marks", "created_at"),
+            ("shadow_exec_fills", "filled_at"),
+            ("shadow_exec_orders", "created_at"),
+            ("shadow_exec_positions", "updated_at"),
+        ):
             conn.execute(
-                """
-                DELETE FROM shadow_order_intents
+                f"""
+                DELETE FROM {table_name}
                 WHERE id NOT IN (
-                    SELECT id FROM shadow_order_intents
-                    ORDER BY created_at DESC, id DESC
+                    SELECT id FROM {table_name}
+                    ORDER BY {order_column} DESC, id DESC
                     LIMIT ?
                 )
                 """,
                 (max(0, int(shadow_order_limit)),),
             )
-            for table_name, order_column in (
-                ("shadow_exec_trade_events", "observed_at"),
-                ("shadow_exec_marks", "created_at"),
-                ("shadow_exec_fills", "filled_at"),
-                ("shadow_exec_orders", "created_at"),
-                ("shadow_exec_positions", "updated_at"),
-            ):
-                conn.execute(
-                    f"""
-                    DELETE FROM {table_name}
-                    WHERE id NOT IN (
-                        SELECT id FROM {table_name}
-                        ORDER BY {order_column} DESC, id DESC
-                        LIMIT ?
-                    )
-                    """,
-                    (max(0, int(shadow_order_limit)),),
-                )
-            conn.execute(
-                """
-                DELETE FROM operator_events
-                WHERE id NOT IN (
-                    SELECT id FROM operator_events
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT ?
-                )
-                """,
-                (max(0, int(operator_event_limit)),),
+        conn.execute(
+            """
+            DELETE FROM operator_events
+            WHERE id NOT IN (
+                SELECT id FROM operator_events
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
             )
-            conn.execute(
-                """
-                DELETE FROM resolution_events
-                WHERE id NOT IN (
-                    SELECT id FROM resolution_events
-                    ORDER BY resolved_at DESC, id DESC
-                    LIMIT ?
-                )
-                """,
-                (max(0, int(resolution_event_limit)),),
+            """,
+            (max(0, int(operator_event_limit)),),
+        )
+        conn.execute(
+            """
+            DELETE FROM resolution_events
+            WHERE id NOT IN (
+                SELECT id FROM resolution_events
+                ORDER BY resolved_at DESC, id DESC
+                LIMIT ?
             )
-            conn.execute(
-                """
-                DELETE FROM decisions
-                WHERE id NOT IN (
-                    SELECT id FROM decisions
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT ?
-                )
-                AND id NOT IN (
-                    SELECT decision_id FROM paper_positions WHERE decision_id IS NOT NULL
-                )
-                AND id NOT IN (
-                    SELECT decision_id FROM shadow_order_intents WHERE decision_id IS NOT NULL
-                )
-                """,
-                (max(0, int(decision_limit)),),
+            """,
+            (max(0, int(resolution_event_limit)),),
+        )
+        conn.execute(
+            """
+            DELETE FROM decisions
+            WHERE id NOT IN (
+                SELECT id FROM decisions
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
             )
-            conn.execute(
-                """
-                DELETE FROM signals
-                WHERE id NOT IN (
-                    SELECT id FROM signals
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT ?
-                )
-                AND id NOT IN (
-                    SELECT signal_id FROM decisions WHERE signal_id IS NOT NULL
-                )
-                AND id NOT IN (
-                    SELECT signal_id FROM paper_positions WHERE signal_id IS NOT NULL
-                )
-                AND id NOT IN (
-                    SELECT signal_id FROM shadow_order_intents WHERE signal_id IS NOT NULL
-                )
-                """,
-                (max(0, int(signal_limit)),),
+            AND id NOT IN (
+                SELECT decision_id FROM paper_positions WHERE decision_id IS NOT NULL
             )
-            conn.commit()
-            conn.execute("VACUUM")
-        finally:
-            conn.close()
-        return str(target)
+            AND id NOT IN (
+                SELECT decision_id FROM shadow_order_intents WHERE decision_id IS NOT NULL
+            )
+            """,
+            (max(0, int(decision_limit)),),
+        )
+        conn.execute(
+            """
+            DELETE FROM signals
+            WHERE id NOT IN (
+                SELECT id FROM signals
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            )
+            AND id NOT IN (
+                SELECT signal_id FROM decisions WHERE signal_id IS NOT NULL
+            )
+            AND id NOT IN (
+                SELECT signal_id FROM paper_positions WHERE signal_id IS NOT NULL
+            )
+            AND id NOT IN (
+                SELECT signal_id FROM shadow_order_intents WHERE signal_id IS NOT NULL
+            )
+            """,
+            (max(0, int(signal_limit)),),
+        )
+        conn.commit()
+        conn.execute("VACUUM")
 
     def close(self) -> None:
         with self._lock:

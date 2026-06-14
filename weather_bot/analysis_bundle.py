@@ -22,6 +22,7 @@ from .dropbox_exports import (
 )
 from .paths import ACTIVE_CONFIG_PATH, ANALYSIS_BUNDLE_ROOT
 from .persistent_weather_cache import backup_weather_cache
+from .storage_cleanup import prune_matching_files
 
 DEFAULT_ANALYSIS_BUNDLE_LABEL = "WEATHER-BOT"
 POSITION_REVIEW_HISTORY_EXPORT_LIMIT = 5000
@@ -382,6 +383,8 @@ class AnalysisBundleExporter:
                 included_entries=[*included_entries, "manifest.json"],
             )
             self._write_latest_index(latest_index_path, index_payload)
+            prune_matching_files(self.bundle_root, "*_analysis_bundle.zip", keep_latest=3)
+            prune_matching_files(self.bundle_root, "*_analysis_report.xlsx", keep_latest=3)
 
             dropbox_result = self._sync_dropbox_artifacts(
                 bundle_path=bundle_path,

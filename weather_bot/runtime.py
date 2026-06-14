@@ -33,6 +33,7 @@ from .execution.shadow_fill import enrich_shadow_intent_with_fill_rehearsal
 from .messages import format_resolution_message, format_scan_summary, format_signal_message
 from .models import ForecastSnapshot, ResolutionOutcome, ScanBatch, WeatherSignal
 from .precipitation_signals import _build_precip_signal, scan_precipitation_signals
+from .storage_cleanup import prune_matching_files
 from .temperature import _build_temperature_signal, scan_temperature_signals
 
 
@@ -1962,6 +1963,7 @@ class WeatherRuntime:
         path = self.scan_export_root / f"{finished_at.strftime('%Y%m%dT%H%M%S%fZ')}_{scan_type}_{status}.json"
         try:
             path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            prune_matching_files(self.scan_export_root, "*.json", keep_latest=20)
             self._update_state(last_scan_export_error=None)
         except OSError as exc:
             self._update_state(last_scan_export_error=str(exc))

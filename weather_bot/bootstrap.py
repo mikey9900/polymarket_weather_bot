@@ -24,6 +24,7 @@ from .startup_health import (
 from .process_lock import PidLock, acquire_pid_lock
 from .research.codex_automation import CodexAutomationManager
 from .research.runtime import ResearchSnapshotProvider
+from .storage_cleanup import prune_matching_files
 from .runtime import WeatherRuntime
 from .strategy import WeatherStrategyEngine
 from .telegram_client import TelegramClient
@@ -100,6 +101,50 @@ def _restore_tracker_db_if_empty(candidate_db_path: Path, active_db_path: Path) 
     }
 
 
+def _prune_tracker_backups(active_db_path: Path, *, keep_latest: int = 1) -> list[str]:
+    return prune_matching_files(active_db_path.parent, f"{active_db_path.name}.preseed-backup-*", keep_latest=keep_latest)
+
+
+def _prune_generated_artifacts() -> dict[str, list[str]]:
+    return {
+        "scan_exports_pruned": prune_matching_files(SCAN_EXPORTS_ROOT, "*.json", keep_latest=20),
+        "analysis_bundles_pruned": prune_matching_files(ANALYSIS_BUNDLE_ROOT, "*_analysis_bundle.zip", keep_latest=3),
+        "analysis_reports_pruned": prune_matching_files(ANALYSIS_BUNDLE_ROOT, "*_analysis_report.xlsx", keep_latest=3),
+        "research_candidates_pruned": prune_matching_files(Path(TRACKER_DB_PATH).parent / "research" / "candidates", "*.yaml", keep_latest=10),
+        "codex_runs_pruned": prune_matching_files(Path(TRACKER_DB_PATH).parent / "codex" / "runs", "*.json", keep_latest=10),
+    }
+
+
+def _maybe_compact_tracker_db(tracker: WeatherTracker, startup_health: dict[str, object]) -> dict[str, object]:
+    active_db_path = Path(tracker.db_path)
+    active_summary = (startup_health.get("checks") or {}).get("active_db", {})
+    size_bytes = int(active_summary.get("size_bytes") or 0) if isinstance(active_summary, dict) else 0
+    counts = active_summary.get("table_counts", {}) if isinstance(active_summary, dict) else {}
+    signal_count = int(counts.get("signals") or 0) if isinstance(counts, dict) else 0
+    paper_position_count = int(counts.get("paper_positions") or 0) if isinstance(counts, dict) else 0
+    shadow_order_count = int(counts.get("shadow_exec_orders") or 0) if isinstance(counts, dict) else 0
+    should_compact = size_bytes >= 256 * 1024 * 1024 or signal_count > 25000 or paper_position_count > 5000 or shadow_order_count > 10000
+    result = {
+        "tracker_db_compaction_checked": True,
+        "tracker_db_compaction_needed": should_compact,
+        "tracker_db_compaction_reason": None,
+        "tracker_db_backup_pruned": [],
+    }
+    result["tracker_db_backup_pruned"] = _prune_tracker_backups(active_db_path, keep_latest=1)
+    if not should_compact:
+        return result
+    try:
+        tracker.compact_database()
+        result["tracker_db_compaction_reason"] = (
+            f"size={size_bytes} signals={signal_count} paper_positions={paper_position_count} shadow_exec_orders={shadow_order_count}"
+        )
+        result["tracker_db_compacted"] = True
+    except Exception as exc:
+        result["tracker_db_compacted"] = False
+        result["tracker_db_compaction_error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
 def _resolve_tracker_db_path(active_config_path: str | None = None) -> tuple[Path, dict[str, object]]:
     active_db_path = Path(TRACKER_DB_PATH)
     startup_health = run_startup_health_checks(active_db_path, active_config_path=active_config_path)
@@ -132,6 +177,12 @@ def get_application() -> WeatherApplication:
     tracker_db_path, startup_health = _resolve_tracker_db_path(config.config_path)
     tracker = WeatherTracker(tracker_db_path)
     tracker.ensure_paper_capital(config.paper.initial_capital)
+    storage_cleanup = _maybe_compact_tracker_db(tracker, startup_health)
+    if storage_cleanup:
+        startup_health.setdefault("checks", {}).setdefault("startup_checks", {}).update(storage_cleanup)
+        startup_health = run_startup_health_checks(tracker_db_path, active_config_path=config.config_path)
+        startup_health.setdefault("checks", {}).setdefault("startup_checks", {}).update(storage_cleanup)
+    startup_health.setdefault("checks", {}).setdefault("startup_checks", {}).update(_prune_generated_artifacts())
     telegram = TelegramClient.from_env_or_options()
     research_provider = ResearchSnapshotProvider() if config.research.runtime_policy_enabled else None
     codex_manager = CodexAutomationManager() if config.research.enabled else None
