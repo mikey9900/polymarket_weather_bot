@@ -121,6 +121,49 @@ class ResearchSettings:
 
 
 @dataclass(frozen=True)
+class StorageSettings:
+    """Soft disk target and retention limits for regenerable history."""
+
+    enabled: bool = True
+    cleanup_interval_hours: int = 6
+    tracker_soft_limit_mb: int = 128
+    min_history_days: int = 30
+    signal_limit: int = 20000
+    decision_limit: int = 20000
+    review_limit: int = 5000
+    shadow_intent_limit: int = 5000
+    shadow_mark_limit: int = 5000
+    trade_event_limit: int = 20000
+    operator_event_limit: int = 1000
+    resolution_event_limit: int = 1000
+    scan_export_keep: int = 20
+    analysis_bundle_keep: int = 3
+    analysis_report_keep: int = 3
+    research_candidate_keep: int = 10
+    codex_run_keep: int = 10
+    tracker_backup_keep: int = 1
+    nas_share_name: str = ""
+    nas_archive_max_gb: int = 90
+
+    def __post_init__(self) -> None:
+        if self.cleanup_interval_hours < 1 or self.tracker_soft_limit_mb < 16:
+            raise ValueError("Storage cleanup interval must be at least 1 hour and tracker target at least 16 MB.")
+        if self.min_history_days < 7:
+            raise ValueError("Storage must preserve at least 7 days of recent history.")
+        if self.nas_archive_max_gb < 1:
+            raise ValueError("NAS archive target must be at least 1 GB.")
+        for name in (
+            "signal_limit", "decision_limit", "review_limit", "shadow_intent_limit",
+            "shadow_mark_limit", "trade_event_limit", "operator_event_limit",
+            "resolution_event_limit", "scan_export_keep", "analysis_bundle_keep",
+            "analysis_report_keep", "research_candidate_keep", "codex_run_keep",
+            "tracker_backup_keep",
+        ):
+            if getattr(self, name) < 1:
+                raise ValueError(f"Storage {name} must be at least 1.")
+
+
+@dataclass(frozen=True)
 class StrategySettings:
     temperature: StrategyThresholds
     precipitation: StrategyThresholds
@@ -139,6 +182,7 @@ class WeatherBotConfig:
     dashboard: DashboardSettings
     research: ResearchSettings
     config_path: str
+    storage: StorageSettings = StorageSettings()
 
 
 def load_config(
@@ -166,6 +210,7 @@ def load_config(
         dashboard=DashboardSettings(**_section(payload, "dashboard")),
         research=ResearchSettings(**_section(payload, "research")),
         config_path=str(Path(config_path).resolve()),
+        storage=StorageSettings(**_section(payload, "storage")),
     )
 
 
@@ -267,6 +312,18 @@ def _load_ha_options(path: str | Path) -> dict[str, Any]:
         mapped.setdefault("shadow_execution", {})["rest_fallback_seconds"] = int(payload["shadow_execution_rest_fallback_seconds"])
     if "dashboard_port" in payload:
         mapped.setdefault("dashboard", {})["port"] = int(payload["dashboard_port"])
+    for option, field in (
+        ("storage_cleanup_interval_hours", "cleanup_interval_hours"),
+        ("storage_tracker_soft_limit_mb", "tracker_soft_limit_mb"),
+        ("storage_scan_export_keep", "scan_export_keep"),
+        ("storage_analysis_bundle_keep", "analysis_bundle_keep"),
+    ):
+        if option in payload:
+            mapped.setdefault("storage", {})[field] = int(payload[option])
+    if "storage_nas_share_name" in payload:
+        mapped.setdefault("storage", {})["nas_share_name"] = str(payload["storage_nas_share_name"])
+    if "storage_nas_archive_max_gb" in payload:
+        mapped.setdefault("storage", {})["nas_archive_max_gb"] = int(payload["storage_nas_archive_max_gb"])
     return mapped
 
 
@@ -352,6 +409,19 @@ def _load_env_overrides() -> dict[str, Any]:
         payload.setdefault("shadow_execution", {})["rest_fallback_seconds"] = int(
             os.getenv("WEATHER_SHADOW_EXECUTION_REST_FALLBACK_SECONDS", "5")
         )
+    for env_name, field in (
+        ("WEATHER_STORAGE_CLEANUP_INTERVAL_HOURS", "cleanup_interval_hours"),
+        ("WEATHER_STORAGE_TRACKER_SOFT_LIMIT_MB", "tracker_soft_limit_mb"),
+        ("WEATHER_STORAGE_MIN_HISTORY_DAYS", "min_history_days"),
+        ("WEATHER_STORAGE_SCAN_EXPORT_KEEP", "scan_export_keep"),
+        ("WEATHER_STORAGE_ANALYSIS_BUNDLE_KEEP", "analysis_bundle_keep"),
+    ):
+        if os.getenv(env_name):
+            payload.setdefault("storage", {})[field] = int(os.environ[env_name])
+    if os.getenv("WEATHER_STORAGE_NAS_SHARE_NAME"):
+        payload.setdefault("storage", {})["nas_share_name"] = os.environ["WEATHER_STORAGE_NAS_SHARE_NAME"]
+    if os.getenv("WEATHER_STORAGE_NAS_ARCHIVE_MAX_GB"):
+        payload.setdefault("storage", {})["nas_archive_max_gb"] = int(os.environ["WEATHER_STORAGE_NAS_ARCHIVE_MAX_GB"])
     return payload
 
 

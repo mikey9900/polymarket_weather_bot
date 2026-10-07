@@ -1,6 +1,6 @@
 name: "Polymarket Weather Bot"
 description: "Weather-market paper trader with HA ingress, research artifacts, and Telegram backup controls"
-version: "3.3.23"
+version: "3.3.24"
 slug: "polymarket_weather_bot"
 startup: application
 boot: auto
@@ -53,6 +53,12 @@ options:
   paper_stake_usd: 10
   paper_max_open_positions: 20
   paper_execution_mode: "paper"
+  storage_cleanup_interval_hours: 6
+  storage_tracker_soft_limit_mb: 128
+  storage_scan_export_keep: 20
+  storage_analysis_bundle_keep: 3
+  storage_nas_share_name: ""
+  storage_nas_archive_max_gb: 90
   dashboard_port: 8099
   timezone: "America/Edmonton"
 schema:
@@ -88,5 +94,11 @@ schema:
   paper_stake_usd: float(1,10000)
   paper_max_open_positions: int(1,500)
   paper_execution_mode: str
+  storage_cleanup_interval_hours: int(1,168)
+  storage_tracker_soft_limit_mb: int(16,4096)
+  storage_scan_export_keep: int(1,1000)
+  storage_analysis_bundle_keep: int(1,100)
+  storage_nas_share_name: str
+  storage_nas_archive_max_gb: int(1,10000)
   dashboard_port: int(1024,65535)
   timezone: str

@@ -16,6 +16,7 @@ from ..models import iso_now
 
 CLOB_BASE_URL = "https://clob.polymarket.com"
 BOOK_CACHE_TTL_SECONDS = 2.0
+BOOK_CACHE_MAX_ENTRIES = 256
 
 _book_cache_lock = threading.Lock()
 _book_cache: dict[str, tuple[dict[str, Any] | None, float]] = {}
@@ -151,8 +152,20 @@ def fetch_clob_order_book(token_id: str) -> dict[str, Any] | None:
     payload = response.json()
     book = payload if isinstance(payload, dict) else None
     with _book_cache_lock:
-        _book_cache[token_id] = (book, time.monotonic() + BOOK_CACHE_TTL_SECONDS)
+        now = time.monotonic()
+        _book_cache[token_id] = (book, now + BOOK_CACHE_TTL_SECONDS)
+        _prune_book_cache_locked(now)
     return book
+
+
+def _prune_book_cache_locked(now: float) -> None:
+    for key, (_, expires_at) in list(_book_cache.items()):
+        if expires_at <= now:
+            _book_cache.pop(key, None)
+    overflow = len(_book_cache) - BOOK_CACHE_MAX_ENTRIES
+    if overflow > 0:
+        for key in sorted(_book_cache, key=lambda item: _book_cache[item][1])[:overflow]:
+            _book_cache.pop(key, None)
 
 
 def extract_clob_token_ids(payload: dict[str, Any] | None) -> list[str]:

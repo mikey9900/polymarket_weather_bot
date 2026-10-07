@@ -11,10 +11,28 @@
 #   SMALL edge      - one source shows 10-20% discrepancy
 # =============================================================
 
+import math
 from typing import List, Optional
 
 SMALL_EDGE_THRESHOLD = 0.10
 LARGE_EDGE_THRESHOLD = 0.20
+
+
+def _valid_probability(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        probability = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+        return None
+    return probability
+
+
+def _rounded_probability(value: float | None) -> float | None:
+    probability = _valid_probability(value)
+    return round(probability, 3) if probability is not None else None
 
 
 def _check_single_source(
@@ -27,11 +45,13 @@ def _check_single_source(
     Checks a single source's forecast against the market price.
     Returns a discrepancy dict if above threshold, else None.
     """
+    market_prob = _valid_probability(market_prob)
+    forecast_prob = _valid_probability(forecast_prob)
     if market_prob is None or forecast_prob is None:
         return None
 
     diff = forecast_prob - market_prob
-    if abs(diff) < SMALL_EDGE_THRESHOLD:
+    if abs(diff) + 1e-12 < SMALL_EDGE_THRESHOLD:
         return None
 
     return {
@@ -72,7 +92,7 @@ def find_discrepancies(
 
     for bucket in buckets:
         label = bucket.get("label", "")
-        market_prob = bucket.get("market_yes_price")
+        market_prob = _valid_probability(bucket.get("market_yes_price"))
         market_slug = bucket.get("market_slug", "")
         liquidity = bucket.get("liquidity", 0.0)
 
@@ -134,10 +154,9 @@ def find_discrepancies(
         else:
             continue
 
-        avg_disc = sum(result["discrepancy"] for result in agreeing) / len(agreeing)
-        discrepancy_val = round(avg_disc, 3)
-        edge_size = "large" if abs(avg_disc) >= LARGE_EDGE_THRESHOLD else "small"
-        forecast_prob = agreeing[0]["forecast_prob"]
+        forecast_prob = round(sum(result["forecast_prob"] for result in agreeing) / len(agreeing), 3)
+        discrepancy_val = round(forecast_prob - market_prob, 3)
+        edge_size = "large" if abs(discrepancy_val) >= LARGE_EDGE_THRESHOLD else "small"
 
         discrepancies.append(
             {
@@ -160,11 +179,11 @@ def find_discrepancies(
                 "unit": unit_symbol,
                 "market_slug": market_slug,
                 "liquidity": liquidity,
-                "wu_prob": wu_result["forecast_prob"] if wu_result else None,
-                "om_prob": om_result["forecast_prob"] if om_result else None,
-                "vc_prob": vc_result["forecast_prob"] if vc_result else None,
-                "noaa_prob": noaa_result["forecast_prob"] if noaa_result else None,
-                "weatherapi_prob": weatherapi_result["forecast_prob"] if weatherapi_result else None,
+                "wu_prob": _rounded_probability(wu_probs.get(label) if wu_probs else None),
+                "om_prob": _rounded_probability(om_probs.get(label) if om_probs else None),
+                "vc_prob": _rounded_probability(vc_probs.get(label) if vc_probs else None),
+                "noaa_prob": _rounded_probability(noaa_probs.get(label) if noaa_probs else None),
+                "weatherapi_prob": _rounded_probability(weatherapi_probs.get(label) if weatherapi_probs else None),
                 "event_slug": bucket.get("event_slug", ""),
                 "clob_token_ids": list(bucket.get("clob_token_ids") or []),
                 "yes_token_id": bucket.get("yes_token_id"),

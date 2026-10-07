@@ -12,6 +12,7 @@ import requests
 
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 PRICE_CACHE_TTL_SECONDS = 30.0
+PRICE_CACHE_MAX_ENTRIES = 2048
 
 _price_cache_lock = threading.Lock()
 _price_cache: dict[str, tuple[float | None, float]] = {}
@@ -68,7 +69,15 @@ def _get_cached_price(slug: str) -> Optional[float] | None:
 
 def _cache_price(slug: str, value: float | None) -> None:
     with _price_cache_lock:
-        _price_cache[slug] = (value, time.monotonic() + PRICE_CACHE_TTL_SECONDS)
+        now = time.monotonic()
+        _price_cache[slug] = (value, now + PRICE_CACHE_TTL_SECONDS)
+        for key, (_, expires_at) in list(_price_cache.items()):
+            if expires_at <= now:
+                _price_cache.pop(key, None)
+        overflow = len(_price_cache) - PRICE_CACHE_MAX_ENTRIES
+        if overflow > 0:
+            for key in sorted(_price_cache, key=lambda item: _price_cache[item][1])[:overflow]:
+                _price_cache.pop(key, None)
 
 
 def _first_market(payload: Any) -> dict[str, Any]:

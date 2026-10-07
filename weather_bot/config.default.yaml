@@ -113,3 +113,24 @@ research:
   runtime_policy_enabled: true
   auto_refresh_enabled: false
   auto_tuning_enabled: false
+storage:
+  enabled: true
+  cleanup_interval_hours: 6
+  tracker_soft_limit_mb: 128
+  min_history_days: 30
+  signal_limit: 20000
+  decision_limit: 20000
+  review_limit: 5000
+  shadow_intent_limit: 5000
+  shadow_mark_limit: 5000
+  trade_event_limit: 20000
+  operator_event_limit: 1000
+  resolution_event_limit: 1000
+  scan_export_keep: 20
+  analysis_bundle_keep: 3
+  analysis_report_keep: 3
+  research_candidate_keep: 10
+  codex_run_keep: 10
+  tracker_backup_keep: 1
+  nas_share_name: ""
+  nas_archive_max_gb: 90

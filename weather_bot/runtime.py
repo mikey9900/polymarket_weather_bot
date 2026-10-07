@@ -5,6 +5,8 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from collections import deque
@@ -33,7 +35,6 @@ from .execution.shadow_fill import enrich_shadow_intent_with_fill_rehearsal
 from .messages import format_resolution_message, format_scan_summary, format_signal_message
 from .models import ForecastSnapshot, ResolutionOutcome, ScanBatch, WeatherSignal
 from .precipitation_signals import _build_precip_signal, scan_precipitation_signals
-from .storage_cleanup import prune_matching_files
 from .temperature import _build_temperature_signal, scan_temperature_signals
 
 
@@ -55,6 +56,7 @@ class WeatherRuntime:
         price_fetcher=None,
         scan_export_root: str | Path | None = None,
         startup_health: dict[str, Any] | None = None,
+        storage_cleanup=None,
     ):
         self.config = config
         self.tracker = tracker
@@ -66,6 +68,7 @@ class WeatherRuntime:
         self.resolution_fetcher = resolution_fetcher or get_market_resolution
         self.price_fetcher = price_fetcher or get_yes_price
         self.scan_export_root = Path(scan_export_root) if scan_export_root else None
+        self.storage_cleanup = storage_cleanup
         scan_export_error = None
         if self.scan_export_root is not None:
             try:
@@ -79,6 +82,7 @@ class WeatherRuntime:
         self._scan_queue: deque[dict[str, Any]] = deque()
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._last_state_persist_monotonic = 0.0
         self._open_position_weather_cache: dict[str, dict[str, Any]] = {}
         self._next_scheduled_scan_at: dict[str, datetime | None] = {
             "temperature": None,
@@ -181,6 +185,11 @@ class WeatherRuntime:
             ),
             "startup_shadow_sync": {},
             "last_execution_mode_warning": None,
+            "last_storage_cleanup_at": None,
+            "last_storage_cleanup_error": None,
+            "last_storage_tracker_bytes": None,
+            "last_storage_tracker_over_limit": None,
+            "last_storage_cleanup": None,
         }
         saved_state = self.tracker.get_runtime_state("runtime_status", default=default_state)
         self._state = {**default_state, **saved_state}
@@ -380,6 +389,8 @@ class WeatherRuntime:
         ]
         if self.shadow_execution is not None and getattr(self.shadow_execution, "enabled", False):
             loops.append((self._shadow_execution_loop, "weather-shadow-execution"))
+        if self.storage_cleanup is not None and getattr(self.config.storage, "enabled", False):
+            loops.append((self._storage_cleanup_loop, "weather-storage-cleanup"))
         for target, name in loops:
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
@@ -804,6 +815,32 @@ class WeatherRuntime:
                     last_shadow_execution_status="failed",
                     last_shadow_execution_error=str(exc),
                 )
+
+    def _storage_cleanup_loop(self) -> None:
+        interval = max(3600, int(self.config.storage.cleanup_interval_hours) * 3600)
+        while not self._stop_event.is_set():
+            try:
+                result = self.storage_cleanup.run()
+                logger.info(
+                    "storage cleanup: tracker=%s bytes, over_target=%s, archive=%s",
+                    result.get("tracker_bytes_after"),
+                    result.get("tracker_over_soft_limit"),
+                    "saved" if result.get("nas_archive") else result.get("nas_archive_error") or result.get("nas_archive_skipped") or result.get("foreign_key_check", {}).get("status") or "disabled",
+                )
+                self._update_state(
+                    last_storage_cleanup_at=datetime.now(timezone.utc).isoformat(),
+                    last_storage_cleanup_error=result.get("nas_archive_error") or (
+                        "foreign_key_check_failed" if result.get("foreign_key_check", {}).get("status") in {"failed", "error"} else None
+                    ),
+                    last_storage_tracker_bytes=result.get("tracker_bytes_after"),
+                    last_storage_tracker_over_limit=result.get("tracker_over_soft_limit"),
+                    last_storage_cleanup=result,
+                )
+            except Exception as exc:
+                logger.warning("storage cleanup failed: %s", exc)
+                self._update_state(last_storage_cleanup_error=str(exc))
+            if self._stop_event.wait(interval):
+                break
 
     def _scan_worker_loop(self) -> None:
         self._update_state(scan_worker_healthy=True, last_scan_worker_error=None)
@@ -1961,12 +1998,21 @@ class WeatherRuntime:
             "batch": batch.to_dict() if batch is not None else None,
         }
         path = self.scan_export_root / f"{finished_at.strftime('%Y%m%dT%H%M%S%fZ')}_{scan_type}_{status}.json"
+        pending_path = None
         try:
-            path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-            prune_matching_files(self.scan_export_root, "*.json", keep_latest=20)
+            descriptor, pending_name = tempfile.mkstemp(prefix=f"{path.stem}.", suffix=".part", dir=self.scan_export_root)
+            pending_path = Path(pending_name)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(pending_path, path)
             self._update_state(last_scan_export_error=None)
         except OSError as exc:
             self._update_state(last_scan_export_error=str(exc))
+        finally:
+            if pending_path is not None:
+                pending_path.unlink(missing_ok=True)
 
     def _sync_queue_state_locked(self) -> None:
         pending = [str(job.get("scan_type") or "") for job in self._scan_queue]
@@ -1974,8 +2020,18 @@ class WeatherRuntime:
 
     def _update_state(self, **changes) -> None:
         with self._state_lock:
+            changed_keys = {key for key, value in changes.items() if self._state.get(key) != value}
+            if not changed_keys:
+                return
             self._state.update(changes)
+            # The shadow poll updates this timestamp every few seconds. Keep it
+            # live in memory without rewriting SQLite's WAL on every poll.
+            heartbeat_keys = {"last_shadow_execution_cycle_at", "last_resolution_check_at"}
+            now = time.monotonic()
+            if changed_keys <= heartbeat_keys and now - self._last_state_persist_monotonic < 300:
+                return
             self.tracker.set_runtime_state("runtime_status", dict(self._state))
+            self._last_state_persist_monotonic = now
 
     def _reconcile_boot_state(self) -> bool:
         changes: dict[str, Any] = {

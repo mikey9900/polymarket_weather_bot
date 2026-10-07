@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -1684,6 +1685,44 @@ def test_dashboard_exports_snapshot_and_control_queue_state(tmp_path: Path):
     assert payload["controls"]["scan_queue_depth"] == 1
 
 
+def test_dashboard_background_refresh_keeps_live_state_without_rewriting_export(tmp_path: Path, monkeypatch):
+    config = load_config(_write_config(tmp_path))
+    tracker = WeatherTracker(tmp_path / "weatherbot.db")
+    tracker.ensure_paper_capital(500.0)
+    strategy = WeatherStrategyEngine(config, tracker)
+    runtime = WeatherRuntime(config=config, tracker=tracker, strategy_engine=strategy, telegram=TelegramClient())
+    control_plane = ControlPlane(runtime, tracker)
+    export_path = tmp_path / "dashboard_state.json"
+    dashboard = DashboardStateService(
+        tracker=tracker,
+        runtime=runtime,
+        control_plane=control_plane,
+        state_export_path=export_path,
+    )
+    analytics_calls = 0
+    original_analytics = tracker.get_pnl_analytics
+
+    def counted_analytics(*args, **kwargs):
+        nonlocal analytics_calls
+        analytics_calls += 1
+        return original_analytics(*args, **kwargs)
+
+    monkeypatch.setattr(tracker, "get_pnl_analytics", counted_analytics)
+    dashboard.refresh_once()
+    first_export = export_path.read_text(encoding="utf-8")
+    assert analytics_calls == 1
+
+    runtime.pause()
+    dashboard.refresh_once(background=True)
+    assert dashboard.get_state_threadsafe()["controls"]["state"] == "paused"
+    assert export_path.read_text(encoding="utf-8") == first_export
+    assert analytics_calls == 1
+
+    dashboard.refresh_once()
+    assert json.loads(export_path.read_text(encoding="utf-8"))["controls"]["state"] == "paused"
+    assert analytics_calls == 2
+
+
 def test_dashboard_snapshot_exposes_recent_shadow_orders(tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     object.__setattr__(config.paper, "execution_mode", "paper_shadow")
@@ -1792,14 +1831,14 @@ def test_runtime_scan_export_failure_is_non_fatal(tmp_path: Path, monkeypatch):
         temperature_scanner=lambda *, limit=300: _batch(_signal("scan-export-failure")),
         scan_export_root=export_root,
     )
-    original_write_text = Path.write_text
+    original_replace = os.replace
 
-    def flaky_write_text(path: Path, *args, **kwargs):
-        if path.parent == export_root:
+    def flaky_replace(source, destination):
+        if Path(destination).parent == export_root:
             raise OSError("disk full")
-        return original_write_text(path, *args, **kwargs)
+        return original_replace(source, destination)
 
-    monkeypatch.setattr(Path, "write_text", flaky_write_text)
+    monkeypatch.setattr("weather_bot.runtime.os.replace", flaky_replace)
 
     batch, results = runtime.run_temperature_scan(send_alerts=False)
     state = runtime.get_status_snapshot()

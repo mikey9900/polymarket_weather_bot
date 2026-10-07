@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from weather_bot.execution.models import ShadowOrderIntent
+from weather_bot.execution import shadow_fill
 from weather_bot.execution.shadow_fill import enrich_shadow_intent_with_fill_rehearsal
 from parser.weather_parser import parse_temperature_buckets_for_event
 
@@ -14,6 +15,25 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+
+def test_book_cache_is_bounded_across_daily_tokens(monkeypatch):
+    monkeypatch.setattr(shadow_fill, "_book_cache", {})
+    monkeypatch.setattr(shadow_fill, "BOOK_CACHE_MAX_ENTRIES", 2)
+    monkeypatch.setattr(shadow_fill, "BOOK_CACHE_TTL_SECONDS", 60.0)
+    calls = []
+
+    def fake_get(url, params, timeout):
+        calls.append(params["token_id"])
+        return _FakeResponse({"bids": [], "asks": []})
+
+    monkeypatch.setattr(shadow_fill.requests, "get", fake_get)
+    for token in ("token-a", "token-b", "token-c"):
+        shadow_fill.fetch_clob_order_book(token)
+    assert len(shadow_fill._book_cache) == 2
+    assert "token-a" not in shadow_fill._book_cache
+    shadow_fill.fetch_clob_order_book("token-c")
+    assert calls == ["token-a", "token-b", "token-c"]
 
 
 def _intent(**overrides) -> ShadowOrderIntent:

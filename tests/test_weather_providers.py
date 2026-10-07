@@ -73,6 +73,53 @@ def test_find_discrepancies_counts_only_agreeing_sources():
     assert discrepancy["weatherapi_prob"] == 0.77
 
 
+def test_agreeing_source_average_sets_signal_edge_and_fair_probability():
+    discrepancies = find_discrepancies(
+        event_title="Highest temperature in NYC on April 27?",
+        city_slug="nyc",
+        event_date=date(2026, 4, 27),
+        buckets=[{"label": "70-71F", "market_yes_price": 0.20}],
+        wu_probs={"70-71F": 0.50},
+        om_probs={"70-71F": 0.35},
+        wu_temp=71.0,
+        om_temp=70.0,
+        vc_probs={"70-71F": 0.22},
+    )
+
+    assert len(discrepancies) == 1
+    discrepancy = discrepancies[0]
+    assert discrepancy["source_count"] == 2
+    assert discrepancy["forecast_prob"] == 0.425
+    assert discrepancy["discrepancy"] == 0.225
+    assert discrepancy["vc_prob"] == 0.22
+
+    signal = _build_temperature_signal(
+        event={"title": discrepancy["event_title"], "slug": "nyc-apr-27"},
+        discrepancy=discrepancy,
+        event_end=datetime(2026, 4, 27, 0, 0, 0),
+        created_at=datetime(2026, 4, 26, 12, 0, 0),
+    )
+    assert signal.forecast_prob == 0.425
+    assert signal.source_dispersion_pct == 0.28
+
+
+def test_source_edge_threshold_uses_unrounded_probability():
+    def scan(market: float, forecast: float):
+        return find_discrepancies(
+            event_title="Highest temperature in NYC on April 27?",
+            city_slug="nyc",
+            event_date=date(2026, 4, 27),
+            buckets=[{"label": "70-71F", "market_yes_price": market}],
+            wu_probs={"70-71F": forecast},
+            om_probs=None,
+            wu_temp=71.0,
+            om_temp=None,
+        )
+
+    assert len(scan(0.20, 0.3001)) == 1
+    assert scan(0.21, 0.3096) == []
+
+
 def test_build_temperature_signal_tracks_all_available_provider_probabilities():
     created_at = datetime(2026, 4, 26, 12, 0, 0)
     event_end = datetime(2026, 4, 27, 0, 0, 0)
