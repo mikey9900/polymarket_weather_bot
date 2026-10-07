@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -22,7 +23,6 @@ from .dropbox_exports import (
 )
 from .paths import ACTIVE_CONFIG_PATH, ANALYSIS_BUNDLE_ROOT
 from .persistent_weather_cache import backup_weather_cache
-from .storage_cleanup import prune_matching_files
 
 DEFAULT_ANALYSIS_BUNDLE_LABEL = "WEATHER-BOT"
 POSITION_REVIEW_HISTORY_EXPORT_LIMIT = 5000
@@ -33,6 +33,8 @@ COMPACT_DB_REVIEW_LIMIT = 5000
 COMPACT_DB_SHADOW_ORDER_LIMIT = 5000
 COMPACT_DB_OPERATOR_EVENT_LIMIT = 1000
 COMPACT_DB_RESOLUTION_EVENT_LIMIT = 1000
+RECENT_SHADOW_JSON_LIMIT = 5000
+RECENT_TRADE_EVENT_JSON_LIMIT = 10000
 
 
 class AnalysisBundleExporter:
@@ -211,6 +213,8 @@ class AnalysisBundleExporter:
         latest_bundle_path = self.latest_bundle_path
         latest_index_path = self.latest_index_path
         report_path = self.bundle_root / f"{stamp}_{self.bundle_label}_analysis_report.xlsx"
+        pending_report_path = report_path.with_name(report_path.name + ".part")
+        pending_bundle_path = bundle_path.with_name(bundle_path.name + ".part")
         latest_report_path = self.latest_report_path
         position_review_total_count = (
             self.tracker.get_position_review_count()
@@ -218,16 +222,16 @@ class AnalysisBundleExporter:
             else None
         )
         position_review_history = self.tracker.get_position_review_history(limit=POSITION_REVIEW_HISTORY_EXPORT_LIMIT)
-        shadow_order_intents = self.tracker.get_recent_shadow_order_intents(limit=None)
+        shadow_order_intents = self.tracker.get_recent_shadow_order_intents(limit=RECENT_SHADOW_JSON_LIMIT)
         shadow_fill_summary = _summarize_shadow_fills(shadow_order_intents)
         shadow_exec_summary = self.tracker.get_shadow_execution_summary()
-        shadow_exec_orders = self.tracker.get_recent_shadow_exec_orders(limit=None)
-        shadow_exec_positions = self.tracker.get_shadow_exec_positions(limit=None)
-        shadow_exec_fills = self.tracker.get_recent_shadow_exec_fills(limit=None)
-        shadow_exec_marks = self.tracker.get_recent_shadow_exec_marks(limit=None)
-        shadow_exec_trade_events = self.tracker.get_recent_shadow_exec_trade_events(limit=None)
-        shadow_exec_trade_cursors = self.tracker.get_shadow_exec_trade_cursors()
-        shadow_exec_missed = self.tracker.get_shadow_execution_missed_paper_trades(limit=None)
+        shadow_exec_orders = self.tracker.get_recent_shadow_exec_orders(limit=RECENT_SHADOW_JSON_LIMIT)
+        shadow_exec_positions = self.tracker.get_shadow_exec_positions(limit=RECENT_SHADOW_JSON_LIMIT)
+        shadow_exec_fills = self.tracker.get_recent_shadow_exec_fills(limit=RECENT_SHADOW_JSON_LIMIT)
+        shadow_exec_marks = self.tracker.get_recent_shadow_exec_marks(limit=RECENT_SHADOW_JSON_LIMIT)
+        shadow_exec_trade_events = self.tracker.get_recent_shadow_exec_trade_events(limit=RECENT_TRADE_EVENT_JSON_LIMIT)
+        shadow_exec_trade_cursors = self.tracker.get_shadow_exec_trade_cursors(limit=RECENT_SHADOW_JSON_LIMIT)
+        shadow_exec_missed = self.tracker.get_shadow_execution_missed_paper_trades(limit=RECENT_SHADOW_JSON_LIMIT)
         same_day_risk_tracking = self.tracker.get_same_day_risk_tracking(limit=SAME_DAY_RISK_EXPORT_LIMIT)
         same_day_risk_summary = summarize_same_day_risk(same_day_risk_tracking, position_review_history)
         position_review_count = (
@@ -256,15 +260,16 @@ class AnalysisBundleExporter:
                     self.tracker.backup_database(tracker_backup_path)
                 backup_weather_cache(weather_cache_backup_path)
                 build_analysis_report(
-                    output_path=report_path,
+                    output_path=pending_report_path,
                     label=self.bundle_label,
                     created_at=created_at,
                     snapshot=snapshot,
                     tracker=self.tracker,
                     runtime=self.runtime,
                 )
+                os.replace(pending_report_path, report_path)
 
-                with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                with zipfile.ZipFile(pending_bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                     included_entries.append("dashboard_state.json")
                     archive.writestr("dashboard_state.json", json.dumps(snapshot, indent=2, sort_keys=True))
 
@@ -332,6 +337,9 @@ class AnalysisBundleExporter:
                         "scan_export_root": str(scan_export_root) if scan_export_root is not None else None,
                         "scan_export_count": len(scan_files),
                         "tracker_db_export_mode": "compact_recent",
+                        "shadow_json_row_limit": RECENT_SHADOW_JSON_LIMIT,
+                        "trade_event_json_row_limit": RECENT_TRADE_EVENT_JSON_LIMIT,
+                        "trade_ledger_in_db_snapshot": True,
                         "tracker_db_compact_limits": _compact_db_limits(),
                         "position_review_count": position_review_count,
                         "position_review_export_count": len(position_review_history),
@@ -357,9 +365,10 @@ class AnalysisBundleExporter:
                         "included_entries": [*included_entries, "manifest.json"],
                     }
                     archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+                os.replace(pending_bundle_path, bundle_path)
 
-            shutil.copy2(bundle_path, latest_bundle_path)
-            shutil.copy2(report_path, latest_report_path)
+            _publish_latest_artifact(bundle_path, latest_bundle_path)
+            _publish_latest_artifact(report_path, latest_report_path)
             index_payload = self._build_latest_index(
                 created_at=created_at,
                 reason=reason,
@@ -383,9 +392,6 @@ class AnalysisBundleExporter:
                 included_entries=[*included_entries, "manifest.json"],
             )
             self._write_latest_index(latest_index_path, index_payload)
-            prune_matching_files(self.bundle_root, "*_analysis_bundle.zip", keep_latest=3)
-            prune_matching_files(self.bundle_root, "*_analysis_report.xlsx", keep_latest=3)
-
             dropbox_result = self._sync_dropbox_artifacts(
                 bundle_path=bundle_path,
                 latest_bundle_path=latest_bundle_path,
@@ -425,6 +431,8 @@ class AnalysisBundleExporter:
                 **dropbox_result,
             }
         except Exception as exc:
+            pending_report_path.unlink(missing_ok=True)
+            pending_bundle_path.unlink(missing_ok=True)
             self._last_error = str(exc)
             self._last_created_at = created_at.isoformat()
             raise
@@ -650,6 +658,20 @@ class AnalysisBundleExporter:
         if self.dropbox_root == "/":
             return f"/{folder}/{filename}"
         return f"{self.dropbox_root}/{folder}/{filename}"
+
+
+def _publish_latest_artifact(source: Path, latest: Path) -> None:
+    """Reuse local disk blocks for the latest pointer when hard links work."""
+    pending = latest.with_name(latest.name + ".part")
+    pending.unlink(missing_ok=True)
+    try:
+        try:
+            os.link(source, pending)
+        except OSError:
+            shutil.copy2(source, pending)
+        os.replace(pending, latest)
+    finally:
+        pending.unlink(missing_ok=True)
 
 
 def _compact_db_limits() -> dict[str, int]:

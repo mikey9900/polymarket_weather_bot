@@ -57,3 +57,13 @@ def test_get_yes_price_reuses_recent_cache(monkeypatch):
     assert first == 0.33
     assert second == 0.33
     assert calls == ["highest-temperature-in-denver-on-april-27-2026-56-57f"]
+
+
+def test_price_cache_is_bounded_across_market_slugs(monkeypatch):
+    monkeypatch.setattr(polymarket_prices, "_price_cache", {})
+    monkeypatch.setattr(polymarket_prices, "PRICE_CACHE_MAX_ENTRIES", 2)
+    monkeypatch.setattr(polymarket_prices, "PRICE_CACHE_TTL_SECONDS", 60.0)
+    for slug in ("market-a", "market-b", "market-c"):
+        polymarket_prices._cache_price(slug, 0.5)
+    assert len(polymarket_prices._price_cache) == 2
+    assert "market-a" not in polymarket_prices._price_cache

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import threading
 from collections import defaultdict
@@ -422,6 +423,9 @@ class WeatherTracker:
         shadow_order_limit: int = 5000,
         operator_event_limit: int = 1000,
         resolution_event_limit: int = 1000,
+        mark_limit: int = 5000,
+        trade_event_limit: int = 20000,
+        min_history_days: int = 30,
     ) -> str:
         target = Path(self.backup_database(destination))
         conn = sqlite3.connect(str(target))
@@ -434,7 +438,14 @@ class WeatherTracker:
                 shadow_order_limit=shadow_order_limit,
                 operator_event_limit=operator_event_limit,
                 resolution_event_limit=resolution_event_limit,
+                mark_limit=mark_limit,
+                trade_event_limit=trade_event_limit,
+                min_history_days=min_history_days,
+                backup_copy=True,
             )
+            busy, _, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if busy:
+                raise sqlite3.OperationalError("Compact backup could not checkpoint its WAL")
         finally:
             conn.close()
         return str(target)
@@ -448,9 +459,12 @@ class WeatherTracker:
         shadow_order_limit: int = 5000,
         operator_event_limit: int = 1000,
         resolution_event_limit: int = 1000,
-    ) -> None:
+        mark_limit: int = 5000,
+        trade_event_limit: int = 20000,
+        min_history_days: int = 30,
+    ) -> dict[str, Any]:
         with self._lock:
-            self._compact_history_locked(
+            return self._compact_history_locked(
                 self.conn,
                 signal_limit=signal_limit,
                 decision_limit=decision_limit,
@@ -458,6 +472,9 @@ class WeatherTracker:
                 shadow_order_limit=shadow_order_limit,
                 operator_event_limit=operator_event_limit,
                 resolution_event_limit=resolution_event_limit,
+                mark_limit=mark_limit,
+                trade_event_limit=trade_event_limit,
+                min_history_days=min_history_days,
             )
 
     def _compact_history_locked(
@@ -470,109 +487,201 @@ class WeatherTracker:
         shadow_order_limit: int,
         operator_event_limit: int,
         resolution_event_limit: int,
-    ) -> None:
-        conn.execute("PRAGMA foreign_keys=OFF")
-        conn.execute(
-            """
-            DELETE FROM paper_position_reviews
-            WHERE id NOT IN (
-                SELECT id FROM paper_position_reviews
-                ORDER BY reviewed_at DESC, id DESC
-                LIMIT ?
-            )
-            """,
-            (max(0, int(review_limit)),),
+        mark_limit: int,
+        trade_event_limit: int,
+        min_history_days: int,
+        backup_copy: bool = False,
+    ) -> dict[str, Any]:
+        """Trim old disposable detail while retaining all live trade records.
+
+        Positions, orders, fills, and their references are never removed. Recent
+        history and observations attached to active positions are also retained.
+        """
+        if min_history_days < 7:
+            raise ValueError("At least seven days of history must be preserved.")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=min_history_days)).isoformat()
+        limits = (
+            ("paper_position_reviews", "reviewed_at", review_limit,
+             "AND NOT EXISTS (SELECT 1 FROM paper_positions p WHERE p.id = paper_position_reviews.position_id AND p.status NOT IN ('closed', 'resolved'))"),
+            ("shadow_exec_marks", "created_at", mark_limit,
+             "AND NOT EXISTS (SELECT 1 FROM shadow_exec_positions p WHERE p.id = shadow_exec_marks.shadow_position_id AND p.status NOT IN ('closed', 'resolved'))"),
+            ("shadow_exec_trade_events", "observed_at", trade_event_limit,
+             "AND NOT EXISTS (SELECT 1 FROM shadow_exec_orders o WHERE o.status IN ('resting', 'partial_fill') AND (o.condition_id = shadow_exec_trade_events.condition_id OR o.clob_token_id = shadow_exec_trade_events.clob_token_id)) "
+             "AND NOT EXISTS (SELECT 1 FROM shadow_exec_positions p WHERE p.status = 'open' AND p.clob_token_id = shadow_exec_trade_events.clob_token_id)"),
+            ("shadow_order_intents", "created_at", shadow_order_limit,
+             "AND id NOT IN (SELECT shadow_intent_id FROM shadow_exec_orders WHERE shadow_intent_id IS NOT NULL) "
+             "AND NOT EXISTS (SELECT 1 FROM paper_positions p WHERE p.id = shadow_order_intents.position_id AND p.status NOT IN ('closed', 'resolved'))"),
+            ("operator_events", "created_at", operator_event_limit, ""),
+            ("resolution_events", "resolved_at", resolution_event_limit, ""),
+            ("decisions", "created_at", decision_limit,
+             "AND id NOT IN (SELECT decision_id FROM paper_positions WHERE decision_id IS NOT NULL) "
+             "AND id NOT IN (SELECT decision_id FROM shadow_order_intents WHERE decision_id IS NOT NULL)"),
+            ("signals", "created_at", signal_limit,
+             "AND id NOT IN (SELECT signal_id FROM decisions WHERE signal_id IS NOT NULL) "
+             "AND id NOT IN (SELECT signal_id FROM paper_positions WHERE signal_id IS NOT NULL) "
+             "AND id NOT IN (SELECT signal_id FROM shadow_order_intents WHERE signal_id IS NOT NULL)"),
         )
-        conn.execute(
-            """
-            DELETE FROM shadow_order_intents
-            WHERE id NOT IN (
-                SELECT id FROM shadow_order_intents
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-            )
-            """,
-            (max(0, int(shadow_order_limit)),),
-        )
-        for table_name, order_column in (
-            ("shadow_exec_trade_events", "observed_at"),
-            ("shadow_exec_marks", "created_at"),
-            ("shadow_exec_fills", "filled_at"),
-            ("shadow_exec_orders", "created_at"),
-            ("shadow_exec_positions", "updated_at"),
-        ):
-            conn.execute(
-                f"""
-                DELETE FROM {table_name}
-                WHERE id NOT IN (
-                    SELECT id FROM {table_name}
-                    ORDER BY {order_column} DESC, id DESC
-                    LIMIT ?
+        conn.execute("PRAGMA foreign_keys=ON")
+        deleted: dict[str, int] = {}
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for table, time_column, limit, protection in limits:
+                cursor = conn.execute(
+                    f"DELETE FROM {table} WHERE {time_column} < ? "
+                    f"AND id NOT IN (SELECT id FROM {table} ORDER BY id DESC LIMIT ?) "
+                    f"{protection}",
+                    (cutoff, max(1, int(limit))),
                 )
-                """,
-                (max(0, int(shadow_order_limit)),),
+                deleted[table] = max(0, cursor.rowcount)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+        result: dict[str, Any] = {"deleted": deleted, "vacuumed": False}
+        if not sum(deleted.values()):
+            return result
+        result.update(self._maybe_vacuum_locked(conn, active_guard=not backup_copy))
+        return result
+
+    def _maybe_vacuum_locked(self, conn: sqlite3.Connection, *, active_guard: bool = True) -> dict[str, Any]:
+        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
+        free_pages = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+        reclaimable = free_pages * page_size
+        result: dict[str, Any] = {"vacuumed": False, "reclaimable_bytes": reclaimable}
+        if reclaimable < 128 * 1024 * 1024 or not page_count or free_pages / page_count < 0.20:
+            result["vacuum_skipped"] = "little_reclaimable_space"
+            return result
+        if active_guard:
+            active = sum(
+                int(conn.execute(query).fetchone()[0])
+                for query in (
+                    "SELECT COUNT(*) FROM paper_positions WHERE status IN ('open', 'pending')",
+                    "SELECT COUNT(*) FROM shadow_exec_positions WHERE status = 'open'",
+                    "SELECT COUNT(*) FROM shadow_exec_orders WHERE status IN ('resting', 'partial_fill')",
+                )
             )
-        conn.execute(
-            """
-            DELETE FROM operator_events
-            WHERE id NOT IN (
-                SELECT id FROM operator_events
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-            )
-            """,
-            (max(0, int(operator_event_limit)),),
-        )
-        conn.execute(
-            """
-            DELETE FROM resolution_events
-            WHERE id NOT IN (
-                SELECT id FROM resolution_events
-                ORDER BY resolved_at DESC, id DESC
-                LIMIT ?
-            )
-            """,
-            (max(0, int(resolution_event_limit)),),
-        )
-        conn.execute(
-            """
-            DELETE FROM decisions
-            WHERE id NOT IN (
-                SELECT id FROM decisions
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-            )
-            AND id NOT IN (
-                SELECT decision_id FROM paper_positions WHERE decision_id IS NOT NULL
-            )
-            AND id NOT IN (
-                SELECT decision_id FROM shadow_order_intents WHERE decision_id IS NOT NULL
-            )
-            """,
-            (max(0, int(decision_limit)),),
-        )
-        conn.execute(
-            """
-            DELETE FROM signals
-            WHERE id NOT IN (
-                SELECT id FROM signals
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-            )
-            AND id NOT IN (
-                SELECT signal_id FROM decisions WHERE signal_id IS NOT NULL
-            )
-            AND id NOT IN (
-                SELECT signal_id FROM paper_positions WHERE signal_id IS NOT NULL
-            )
-            AND id NOT IN (
-                SELECT signal_id FROM shadow_order_intents WHERE signal_id IS NOT NULL
-            )
-            """,
-            (max(0, int(signal_limit)),),
-        )
-        conn.commit()
-        conn.execute("VACUUM")
+            if active:
+                result["vacuum_skipped"] = "active_trade_state"
+                result["active_trade_records"] = active
+                return result
+        db_file = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+        try:
+            db_size = db_file.stat().st_size
+            free_bytes = shutil.disk_usage(db_file.parent).free
+            if free_bytes < 2 * db_size + 32 * 1024 * 1024:
+                result["vacuum_skipped"] = "insufficient_free_space"
+                return result
+            conn.execute("VACUUM")
+            result["vacuumed"] = True
+        except (OSError, sqlite3.OperationalError) as exc:
+            result["vacuum_skipped"] = f"{type(exc).__name__}: {exc}"
+        try:
+            busy, log_pages, checkpointed_pages = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            result["wal_checkpoint"] = {
+                "busy": int(busy), "log_pages": int(log_pages), "checkpointed_pages": int(checkpointed_pages),
+            }
+        except sqlite3.OperationalError as exc:
+            result["wal_checkpoint_error"] = str(exc)
+        return result
+
+    def prune_archived_closed_positions(
+        self,
+        *,
+        archive_receipt: Any,
+        min_history_days: int = 30,
+        position_limit: int = 2000,
+    ) -> dict[str, Any]:
+        """Remove old, terminal trade groups after the caller verifies an archive.
+
+        Foreign keys stay enabled and are deferred only until commit, so any
+        unexpected cross-group reference aborts the entire removal.
+        """
+        if not getattr(archive_receipt, "snapshot_sha256", None) or not getattr(archive_receipt, "tracker_sha256", None):
+            raise ValueError("A verified NAS archive receipt is required before pruning closed trades.")
+        if min_history_days < 30:
+            raise ValueError("Closed trade ledger must stay local for at least 30 days.")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=min_history_days)).isoformat()
+        with self._lock:
+            conn = self.conn
+            conn.execute("PRAGMA foreign_keys=ON")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("PRAGMA defer_foreign_keys=ON")
+                for table in ("purge_paper", "purge_shadow", "purge_orders", "purge_intents"):
+                    conn.execute(f"CREATE TEMP TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY)")
+                    conn.execute(f"DELETE FROM {table}")
+                conn.execute(
+                    """INSERT INTO purge_paper(id)
+                       SELECT p.id FROM paper_positions p
+                       WHERE p.status IN ('closed', 'resolved')
+                         AND COALESCE(p.resolved_at, p.created_at) < ?
+                         AND NOT EXISTS (
+                           SELECT 1 FROM shadow_exec_positions sp
+                           WHERE sp.paper_position_id = p.id AND sp.status NOT IN ('closed', 'resolved')
+                         )
+                         AND NOT EXISTS (
+                           SELECT 1 FROM shadow_exec_orders o
+                           WHERE o.paper_position_id = p.id AND o.status IN ('resting', 'partial_fill')
+                         )
+                         AND NOT EXISTS (
+                           SELECT 1 FROM shadow_exec_orders o
+                           JOIN shadow_exec_positions sp ON sp.id = o.shadow_position_id
+                           WHERE sp.paper_position_id = p.id AND o.status IN ('resting', 'partial_fill')
+                         )
+                       ORDER BY COALESCE(p.resolved_at, p.created_at), p.id
+                       LIMIT ?""",
+                    (cutoff, max(1, int(position_limit))),
+                )
+                count = int(conn.execute("SELECT COUNT(*) FROM purge_paper").fetchone()[0])
+                if not count:
+                    conn.rollback()
+                    return {"positions_deleted": 0}
+                conn.execute("INSERT INTO purge_shadow SELECT id FROM shadow_exec_positions WHERE paper_position_id IN (SELECT id FROM purge_paper)")
+                conn.execute(
+                    """INSERT OR IGNORE INTO purge_orders
+                       SELECT id FROM shadow_exec_orders
+                       WHERE paper_position_id IN (SELECT id FROM purge_paper)
+                          OR shadow_position_id IN (SELECT id FROM purge_shadow)"""
+                )
+                conn.execute(
+                    """INSERT OR IGNORE INTO purge_intents
+                       SELECT id FROM shadow_order_intents WHERE position_id IN (SELECT id FROM purge_paper)"""
+                )
+                conn.execute(
+                    """INSERT OR IGNORE INTO purge_intents
+                       SELECT shadow_intent_id FROM shadow_exec_orders
+                       WHERE id IN (SELECT id FROM purge_orders) AND shadow_intent_id IS NOT NULL"""
+                )
+                deleted: dict[str, int] = {}
+                statements = (
+                    ("shadow_exec_fills", "paper_position_id IN (SELECT id FROM purge_paper) OR shadow_position_id IN (SELECT id FROM purge_shadow) OR order_id IN (SELECT id FROM purge_orders) OR shadow_intent_id IN (SELECT id FROM purge_intents)"),
+                    ("shadow_exec_marks", "shadow_position_id IN (SELECT id FROM purge_shadow)"),
+                    ("paper_position_reviews", "position_id IN (SELECT id FROM purge_paper)"),
+                )
+                for table, condition in statements:
+                    deleted[table] = max(0, conn.execute(f"DELETE FROM {table} WHERE {condition}").rowcount)
+                conn.execute(
+                    "UPDATE shadow_exec_positions SET entry_order_id = NULL, exit_order_id = NULL WHERE id IN (SELECT id FROM purge_shadow)"
+                )
+                for table, condition in (
+                    ("shadow_exec_orders", "id IN (SELECT id FROM purge_orders)"),
+                    ("shadow_exec_positions", "id IN (SELECT id FROM purge_shadow)"),
+                    ("shadow_order_intents", "id IN (SELECT id FROM purge_intents)"),
+                    ("paper_positions", "id IN (SELECT id FROM purge_paper)"),
+                ):
+                    deleted[table] = max(0, conn.execute(f"DELETE FROM {table} WHERE {condition}").rowcount)
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                return {"positions_deleted": 0, "blocked_by_reference": str(exc)}
+            except Exception:
+                conn.rollback()
+                raise
+            result: dict[str, Any] = {"positions_deleted": count, "deleted": deleted}
+            result.update(self._maybe_vacuum_locked(conn))
+            return result
 
     def close(self) -> None:
         with self._lock:
@@ -1409,10 +1518,13 @@ class WeatherTracker:
             ).fetchall()
         return [_serialize_shadow_exec_trade_event(row) for row in rows]
 
-    def get_shadow_exec_trade_cursors(self) -> list[dict[str, Any]]:
+    def get_shadow_exec_trade_cursors(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        limit_clause = "" if limit is None else "LIMIT ?"
+        params = () if limit is None else (max(1, int(limit)),)
         with self._lock:
             rows = self.conn.execute(
-                "SELECT * FROM shadow_exec_trade_cursors ORDER BY updated_at DESC, condition_id ASC"
+                f"SELECT * FROM shadow_exec_trade_cursors ORDER BY updated_at DESC, condition_id ASC {limit_clause}",
+                params,
             ).fetchall()
         return [_serialize_shadow_exec_trade_cursor(row) for row in rows]
 
@@ -1674,20 +1786,10 @@ class WeatherTracker:
 
     def get_shadow_execution_missed_paper_trades(self, *, limit: int | None = 50) -> list[dict[str, Any]]:
         with self._lock:
-            entry_rows = self.conn.execute(
-                "SELECT DISTINCT paper_position_id FROM shadow_exec_orders WHERE intent_kind = 'entry' AND paper_position_id IS NOT NULL"
-            ).fetchall()
-            shadow_rows = self.conn.execute(
-                "SELECT DISTINCT paper_position_id FROM shadow_exec_positions WHERE paper_position_id IS NOT NULL"
-            ).fetchall()
-            positions = self._query_dashboard_paper_positions(limit=None)
-        entry_ids = {int(row["paper_position_id"]) for row in entry_rows if row["paper_position_id"] is not None}
-        shadow_ids = {int(row["paper_position_id"]) for row in shadow_rows if row["paper_position_id"] is not None}
+            positions = self._query_dashboard_paper_positions(limit=None, missed_only=True)
         missed: list[dict[str, Any]] = []
         for position in positions:
             position_id = int(position.get("id") or 0)
-            if position_id not in entry_ids or position_id in shadow_ids:
-                continue
             paper_pnl = _paper_position_current_pnl(position)
             missed.append(
                 {
@@ -1712,62 +1814,76 @@ class WeatherTracker:
 
     def get_shadow_execution_summary(self) -> dict[str, Any]:
         with self._lock:
-            order_rows = self.conn.execute("SELECT * FROM shadow_exec_orders").fetchall()
-            position_rows = self.conn.execute("SELECT * FROM shadow_exec_positions").fetchall()
-            fill_rows = self.conn.execute("SELECT * FROM shadow_exec_fills").fetchall()
-            trade_event_rows = self.conn.execute("SELECT * FROM shadow_exec_trade_events").fetchall()
-            trade_cursor_rows = self.conn.execute("SELECT * FROM shadow_exec_trade_cursors").fetchall()
-            last_order = self.conn.execute("SELECT MAX(created_at) AS value FROM shadow_exec_orders").fetchone()
-            last_fill = self.conn.execute("SELECT MAX(filled_at) AS value FROM shadow_exec_fills").fetchone()
-            last_trade_event = self.conn.execute("SELECT MAX(observed_at) AS value FROM shadow_exec_trade_events").fetchone()
-        orders = [_serialize_shadow_exec_order(row) for row in order_rows]
-        positions = [_serialize_shadow_exec_position(row) for row in position_rows]
-        fills = [_serialize_shadow_exec_fill(row) for row in fill_rows]
-        trade_events = [_serialize_shadow_exec_trade_event(row) for row in trade_event_rows]
-        trade_cursors = [_serialize_shadow_exec_trade_cursor(row) for row in trade_cursor_rows]
+            orders = self.conn.execute(
+                """SELECT COUNT(*) AS total, MAX(created_at) AS last_at,
+                          SUM(CASE WHEN intent_kind = 'entry' THEN 1 ELSE 0 END) AS entries,
+                          SUM(CASE WHEN intent_kind = 'exit' THEN 1 ELSE 0 END) AS exits,
+                          SUM(CASE WHEN filled_shares > 0 THEN 1 ELSE 0 END) AS filled,
+                          SUM(CASE WHEN intent_kind = 'entry' AND filled_shares > 0 THEN 1 ELSE 0 END) AS filled_entries,
+                          SUM(CASE WHEN intent_kind = 'entry' AND filled_shares <= 0 THEN 1 ELSE 0 END) AS unfilled_entries,
+                          SUM(CASE WHEN status IN ('resting', 'partial_fill') THEN 1 ELSE 0 END) AS open_orders,
+                          SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) AS expired,
+                          SUM(CASE WHEN status = 'no_position' THEN 1 ELSE 0 END) AS no_position
+                   FROM shadow_exec_orders"""
+            ).fetchone()
+            positions = self.conn.execute(
+                """SELECT COUNT(*) AS total,
+                          SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_positions,
+                          SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_positions,
+                          COALESCE(SUM(total_pnl), 0) AS total_pnl,
+                          COALESCE(SUM(realized_pnl), 0) AS realized_pnl,
+                          COALESCE(SUM(unrealized_pnl), 0) AS unrealized_pnl,
+                          COALESCE(SUM(taker_exit_estimated_pnl), 0) AS taker_exit_pnl,
+                          COALESCE(SUM(CASE WHEN status = 'open' THEN mark_value_usd ELSE 0 END), 0) AS open_exposure
+                   FROM shadow_exec_positions"""
+            ).fetchone()
+            fills = self.conn.execute(
+                """SELECT COUNT(*) AS total, MAX(filled_at) AS last_at,
+                          SUM(CASE WHEN liquidity_source = 'rest_trade_tape' THEN 1 ELSE 0 END) AS rest_fills,
+                          SUM(CASE WHEN liquidity_source = 'market_websocket' THEN 1 ELSE 0 END) AS websocket_fills,
+                          COUNT(DISTINCT CASE WHEN liquidity_source = 'rest_trade_tape' AND order_id > 0 THEN order_id END) AS rescued_orders
+                   FROM shadow_exec_fills"""
+            ).fetchone()
+            trade_events = self.conn.execute(
+                "SELECT COUNT(*) AS total, MAX(observed_at) AS last_at FROM shadow_exec_trade_events"
+            ).fetchone()
+            trade_cursor_count = int(self.conn.execute("SELECT COUNT(*) FROM shadow_exec_trade_cursors").fetchone()[0])
+            by_status = {
+                str(row["status"]): int(row["count"])
+                for row in self.conn.execute("SELECT status, COUNT(*) AS count FROM shadow_exec_orders GROUP BY status")
+            }
+            fills_by_source = {
+                str(row["liquidity_source"]): int(row["count"])
+                for row in self.conn.execute("SELECT liquidity_source, COUNT(*) AS count FROM shadow_exec_fills GROUP BY liquidity_source")
+            }
         paper_stats = self.get_paper_stats()
         missed = self.get_shadow_execution_missed_paper_trades(limit=None)
-        total_pnl = round(sum(float(item.get("total_pnl") or 0.0) for item in positions), 6)
-        realized_pnl = round(sum(float(item.get("realized_pnl") or 0.0) for item in positions), 6)
-        unrealized_pnl = round(sum(float(item.get("unrealized_pnl") or 0.0) for item in positions), 6)
-        open_exposure = round(sum(float(item.get("mark_value_usd") or 0.0) for item in positions if item.get("status") == "open"), 6)
-        entry_orders = [item for item in orders if item.get("intent_kind") == "entry"]
-        exit_orders = [item for item in orders if item.get("intent_kind") == "exit"]
-        filled_entries = [item for item in entry_orders if float(item.get("filled_shares") or 0.0) > 0]
-        unfilled_entries = [item for item in entry_orders if float(item.get("filled_shares") or 0.0) <= 0]
-        filled_orders = [item for item in orders if float(item.get("filled_shares") or 0.0) > 0]
-        trade_tape_fills = [item for item in fills if item.get("liquidity_source") == "rest_trade_tape"]
-        websocket_fills = [item for item in fills if item.get("liquidity_source") == "market_websocket"]
-        trade_tape_order_ids = {
-            int(item.get("order_id") or 0)
-            for item in trade_tape_fills
-            if int(item.get("order_id") or 0) > 0
-        }
+        total_pnl = round(float(positions["total_pnl"] or 0), 6)
+        realized_pnl = round(float(positions["realized_pnl"] or 0), 6)
+        unrealized_pnl = round(float(positions["unrealized_pnl"] or 0), 6)
+        open_exposure = round(float(positions["open_exposure"] or 0), 6)
         paper_pnl = float(paper_stats.get("total_pnl") or 0.0)
         missed_paper_pnl = round(sum(float(item.get("paper_pnl") or 0.0) for item in missed), 6)
-        taker_exit_estimated_pnl = round(
-            sum(float(item.get("taker_exit_estimated_pnl") or 0.0) for item in positions),
-            6,
-        )
+        taker_exit_estimated_pnl = round(float(positions["taker_exit_pnl"] or 0), 6)
         return {
             "generated_at": iso_now(),
-            "order_count": len(orders),
-            "entry_order_count": len(entry_orders),
-            "exit_order_count": len(exit_orders),
-            "filled_order_count": len(filled_orders),
-            "open_order_count": sum(1 for item in orders if item.get("status") in {"resting", "partial_fill"}),
-            "expired_order_count": sum(1 for item in orders if item.get("status") == "expired"),
-            "no_position_order_count": sum(1 for item in orders if item.get("status") == "no_position"),
-            "position_count": len(positions),
-            "open_position_count": sum(1 for item in positions if item.get("status") == "open"),
-            "closed_position_count": sum(1 for item in positions if item.get("status") == "closed"),
-            "fill_count": len(fills),
-            "trade_event_count": len(trade_events),
-            "trade_cursor_count": len(trade_cursors),
-            "rest_trade_tape_fill_count": len(trade_tape_fills),
-            "market_websocket_fill_count": len(websocket_fills),
-            "trade_tape_rescued_order_count": len(trade_tape_order_ids),
-            "entry_fill_rate": round((len(filled_entries) / len(entry_orders) * 100.0), 2) if entry_orders else 0.0,
+            "order_count": int(orders["total"] or 0),
+            "entry_order_count": int(orders["entries"] or 0),
+            "exit_order_count": int(orders["exits"] or 0),
+            "filled_order_count": int(orders["filled"] or 0),
+            "open_order_count": int(orders["open_orders"] or 0),
+            "expired_order_count": int(orders["expired"] or 0),
+            "no_position_order_count": int(orders["no_position"] or 0),
+            "position_count": int(positions["total"] or 0),
+            "open_position_count": int(positions["open_positions"] or 0),
+            "closed_position_count": int(positions["closed_positions"] or 0),
+            "fill_count": int(fills["total"] or 0),
+            "trade_event_count": int(trade_events["total"] or 0),
+            "trade_cursor_count": trade_cursor_count,
+            "rest_trade_tape_fill_count": int(fills["rest_fills"] or 0),
+            "market_websocket_fill_count": int(fills["websocket_fills"] or 0),
+            "trade_tape_rescued_order_count": int(fills["rescued_orders"] or 0),
+            "entry_fill_rate": round((int(orders["filled_entries"] or 0) / int(orders["entries"] or 1) * 100.0), 2) if orders["entries"] else 0.0,
             "realistic_total_pnl": total_pnl,
             "realistic_realized_pnl": realized_pnl,
             "realistic_unrealized_pnl": unrealized_pnl,
@@ -1780,13 +1896,13 @@ class WeatherTracker:
             "signal_vs_realistic_gap": round(paper_pnl - total_pnl, 6),
             "missed_paper_pnl": missed_paper_pnl,
             "open_exposure": open_exposure,
-            "realistic_entry_fill_count": len(filled_entries),
-            "unfilled_entry_order_count": len(unfilled_entries),
-            "last_order_at": last_order["value"] if last_order is not None else None,
-            "last_fill_at": last_fill["value"] if last_fill is not None else None,
-            "last_trade_event_at": last_trade_event["value"] if last_trade_event is not None else None,
-            "by_status": _count_by_key(orders, "status"),
-            "fills_by_source": _count_by_key(fills, "liquidity_source"),
+            "realistic_entry_fill_count": int(orders["filled_entries"] or 0),
+            "unfilled_entry_order_count": int(orders["unfilled_entries"] or 0),
+            "last_order_at": orders["last_at"],
+            "last_fill_at": fills["last_at"],
+            "last_trade_event_at": trade_events["last_at"],
+            "by_status": by_status,
+            "fills_by_source": fills_by_source,
         }
 
     def _apply_shadow_entry_fill_locked(
@@ -1945,6 +2061,27 @@ class WeatherTracker:
             mark_value = 0.0
             unrealized_pnl = 0.0
         total_pnl = round(realized_pnl + unrealized_pnl, 6)
+        if source not in {"entry_fill", "exit_fill"}:
+            previous_marked_at = _parse_iso_datetime(row["last_marked_at"])
+            current_marked_at = _parse_iso_datetime(marked_at)
+            recent_heartbeat = (
+                previous_marked_at is not None
+                and current_marked_at is not None
+                and 0 <= (current_marked_at - previous_marked_at).total_seconds() < 900
+            )
+            if recent_heartbeat and (
+                abs(effective_mark - float(row["mark_price"] or 0.0)) < 0.001
+                and abs(mark_value - float(row["mark_value_usd"] or 0.0)) < 0.01
+                and abs(unrealized_pnl - float(row["unrealized_pnl"] or 0.0)) < 0.01
+                and abs(total_pnl - float(row["total_pnl"] or 0.0)) < 0.01
+            ):
+                return {
+                    "id": int(position_id),
+                    "mark_price": float(row["mark_price"] or 0.0),
+                    "mark_value_usd": float(row["mark_value_usd"] or 0.0),
+                    "unrealized_pnl": float(row["unrealized_pnl"] or 0.0),
+                    "total_pnl": float(row["total_pnl"] or 0.0),
+                }
         self.conn.execute(
             """
             UPDATE shadow_exec_positions
@@ -2122,6 +2259,44 @@ class WeatherTracker:
     ) -> bool:
         reviewed_at = str(reviewed_at or iso_now())
         with self._lock:
+            current = self.conn.execute(
+                "SELECT * FROM paper_positions WHERE id = ? AND status = 'open'",
+                (int(position_id),),
+            ).fetchone()
+            if current is None:
+                return False
+            previous_at = _parse_iso_datetime(current["mark_updated_at"])
+            current_at = _parse_iso_datetime(reviewed_at)
+            recent = (
+                previous_at is not None and current_at is not None
+                and 0 <= (current_at - previous_at).total_seconds() < 900
+            )
+            if recent:
+                previous_review = self.conn.execute(
+                    """SELECT event_kind, reason_code FROM paper_position_reviews
+                       WHERE position_id = ? ORDER BY id DESC LIMIT 1""",
+                    (int(position_id),),
+                ).fetchone()
+
+                def same_number(old: Any, new: Any) -> bool:
+                    if old is None or new is None:
+                        return old is None and new is None
+                    return abs(float(old) - float(new)) < 0.000001
+
+                unchanged = (
+                    same_number(current["mark_price"], _bounded_probability(mark_price))
+                    and same_number(current["mark_probability"], _bounded_probability(mark_probability))
+                    and same_number(current["mark_edge_abs"], _as_float(edge_abs))
+                    and same_number(current["mark_final_score"], _as_float(final_score))
+                    and str(current["mark_reason"] or "") == str(reason or "")
+                    and (exit_fee_bps is None or same_number(current["exit_fee_bps"], _bps(exit_fee_bps)))
+                    and (exit_slippage_bps is None or same_number(current["exit_slippage_bps"], _bps(exit_slippage_bps)))
+                    and previous_review is not None
+                    and previous_review["event_kind"] == "review"
+                    and str(previous_review["reason_code"] or "") == str(reason_code or "")
+                )
+                if unchanged:
+                    return True
             cursor = self.conn.execute(
                 """
                 UPDATE paper_positions
@@ -2933,7 +3108,11 @@ class WeatherTracker:
             ("30d", "Last 30 Days", timedelta(days=30)),
         )
         with self._lock:
-            closed_positions = self._query_dashboard_paper_positions(limit=None, statuses=("closed", "resolved"))
+            closed_positions = self._query_dashboard_paper_positions(
+                limit=None,
+                statuses=("closed", "resolved"),
+                since=(now - timedelta(days=30)).isoformat(),
+            )
             open_positions = self._query_dashboard_paper_positions(limit=500, status="open")
         payload = {
             "generated_at": now.isoformat(),
@@ -3401,9 +3580,11 @@ class WeatherTracker:
         limit: int | None,
         status: str | None = None,
         statuses: list[str] | tuple[str, ...] | set[str] | None = None,
+        since: str | None = None,
+        missed_only: bool = False,
     ) -> list[dict[str, Any]]:
         params: list[Any] = []
-        where = ""
+        predicates: list[str] = []
         status_values: list[str] = []
         if statuses:
             status_values = [str(item) for item in statuses if str(item).strip()]
@@ -3411,8 +3592,17 @@ class WeatherTracker:
             status_values = [str(status)]
         if status_values:
             placeholders = ", ".join("?" for _ in status_values)
-            where = f"WHERE p.status IN ({placeholders})"
+            predicates.append(f"p.status IN ({placeholders})")
             params.extend(status_values)
+        if since:
+            predicates.append("COALESCE(p.resolved_at, p.created_at) >= ?")
+            params.append(str(since))
+        if missed_only:
+            predicates.append(
+                "EXISTS (SELECT 1 FROM shadow_exec_orders o WHERE o.paper_position_id = p.id AND o.intent_kind = 'entry')"
+            )
+            predicates.append("NOT EXISTS (SELECT 1 FROM shadow_exec_positions sp WHERE sp.paper_position_id = p.id)")
+        where = "WHERE " + " AND ".join(predicates) if predicates else ""
         limit_clause = ""
         if limit is not None:
             limit_clause = "LIMIT ?"

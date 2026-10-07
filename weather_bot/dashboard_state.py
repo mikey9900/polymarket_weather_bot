@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,9 @@ from typing import Any
 
 
 class DashboardStateService:
+    _BACKGROUND_EXPORT_SECONDS = 30.0
+    _BACKGROUND_ANALYTICS_SECONDS = 30.0
+
     def __init__(self, *, tracker, runtime, control_plane, refresh_seconds: float = 5.0, codex_manager=None, state_export_path: str | Path | None = None, analysis_exporter=None):
         self.tracker = tracker
         self.runtime = runtime
@@ -29,6 +33,10 @@ class DashboardStateService:
         self._lock = threading.Lock()
         self._history: deque[dict[str, Any]] = deque(maxlen=240)
         self._state: dict[str, Any] = {}
+        self._analytics_cache: dict[str, Any] | None = None
+        self._analytics_cached_at: float | None = None
+        self._last_export_write_at: float | None = None
+        self._last_export_text: str | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
@@ -46,9 +54,9 @@ class DashboardStateService:
             self._thread.join(timeout=5.0)
         self._thread = None
 
-    def refresh_once(self) -> None:
-        snapshot = self._build_snapshot()
-        self._sync_export(snapshot)
+    def refresh_once(self, *, background: bool = False) -> None:
+        snapshot = self._build_snapshot(background=background)
+        self._sync_export(snapshot, background=background)
         with self._lock:
             self._state = snapshot
             self._history.append(
@@ -64,11 +72,11 @@ class DashboardStateService:
     def _loop(self) -> None:
         while not self._stop.wait(self.refresh_seconds):
             try:
-                self.refresh_once()
+                self.refresh_once(background=True)
             except Exception:
                 continue
 
-    def _build_snapshot(self) -> dict[str, Any]:
+    def _build_snapshot(self, *, background: bool = False) -> dict[str, Any]:
         paper_stats = self.tracker.get_paper_stats()
         shadow_execution_summary = self.tracker.get_shadow_execution_summary()
         runtime_status = self.runtime.get_status_snapshot()
@@ -77,6 +85,7 @@ class DashboardStateService:
         stale_after_s = getattr(stale_after_s, "mark_stale_after_seconds", None)
         app_timezone = getattr(getattr(self.runtime, "config", None), "app", None)
         app_timezone = getattr(app_timezone, "timezone", "UTC")
+        analytics = self._get_analytics(app_timezone, background=background)
         payload = {
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "controls": self.control_plane.build_controls_payload(),
@@ -97,15 +106,9 @@ class DashboardStateService:
                     shadow_execution_summary=shadow_execution_summary,
                 ),
             },
-            "pnl_analytics": self.tracker.get_pnl_analytics(timezone_name=app_timezone),
-            "paper_vs_shadow_daily_summary": self.tracker.get_paper_vs_shadow_daily_summary(
-                timezone_name=app_timezone,
-                weekend_only=True,
-            ),
-            "decision_activity_12h": self.tracker.get_decision_activity_summary(
-                hours=12,
-                timezone_name=app_timezone,
-            ),
+            "pnl_analytics": analytics["pnl_analytics"],
+            "paper_vs_shadow_daily_summary": analytics["paper_vs_shadow_daily_summary"],
+            "decision_activity_12h": analytics["decision_activity_12h"],
             "open_positions": self.tracker.get_dashboard_paper_positions(
                 limit=250,
                 status="open",
@@ -147,14 +150,55 @@ class DashboardStateService:
             payload.update(self.codex_manager.snapshot())
         return payload
 
-    def _sync_export(self, snapshot: dict[str, Any]) -> None:
+    def _get_analytics(self, timezone_name: str, *, background: bool) -> dict[str, Any]:
+        now = time.monotonic()
+        with self._lock:
+            if (
+                background
+                and self._analytics_cache is not None
+                and self._analytics_cached_at is not None
+                and now - self._analytics_cached_at < self._BACKGROUND_ANALYTICS_SECONDS
+            ):
+                return self._analytics_cache
+        analytics = {
+            "pnl_analytics": self.tracker.get_pnl_analytics(timezone_name=timezone_name),
+            "paper_vs_shadow_daily_summary": self.tracker.get_paper_vs_shadow_daily_summary(
+                timezone_name=timezone_name,
+                weekend_only=True,
+            ),
+            "decision_activity_12h": self.tracker.get_decision_activity_summary(
+                hours=12,
+                timezone_name=timezone_name,
+            ),
+        }
+        with self._lock:
+            self._analytics_cache = analytics
+            self._analytics_cached_at = now
+        return analytics
+
+    def _sync_export(self, snapshot: dict[str, Any], *, background: bool = False) -> None:
         exports = snapshot.setdefault("exports", {})
         exports["dashboard_state_path"] = str(self.state_export_path) if self.state_export_path is not None else None
         if self.state_export_path is None:
             exports["dashboard_state_error"] = self._state_export_error
             return
+        now = time.monotonic()
+        if (
+            background
+            and self._last_export_write_at is not None
+            and now - self._last_export_write_at < self._BACKGROUND_EXPORT_SECONDS
+            and self._state_export_error is None
+            and self.state_export_path.exists()
+        ):
+            exports["dashboard_state_error"] = self._state_export_error
+            return
         try:
-            self.state_export_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True), encoding="utf-8")
+            exports["dashboard_state_error"] = None
+            content = json.dumps(snapshot, indent=2, sort_keys=True)
+            if content != self._last_export_text or not self.state_export_path.exists():
+                self.state_export_path.write_text(content, encoding="utf-8")
+                self._last_export_text = content
+            self._last_export_write_at = now
             self._state_export_error = None
         except OSError as exc:
             self._state_export_error = str(exc)
